@@ -1,12 +1,13 @@
 """Switch platform for Conti.
 
-Maps Tuya ``power`` DP (bool) to HA :class:`SwitchEntity`.
-Supports multi-gang devices: if the dp_map contains multiple DPs
-with ``"key": "power"``, each one becomes a separate switch entity.
+Creates a :class:`SwitchEntity` for every boolean DP in the device's dp_map.
+This supports single-switch devices, multi-gang devices, and power strips
+whose dp_map contains multiple bool DPs (e.g. ``socket_1`` … ``socket_4``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -23,7 +24,6 @@ from .const import (
     CONF_DP_MAP,
     DEVICE_TYPE_SWITCH,
     DOMAIN,
-    DP_KEY_POWER,
     MANUFACTURER,
 )
 from .coordinator import ContiCoordinator
@@ -45,31 +45,30 @@ async def async_setup_entry(
     )
     device_id: str = entry.data[CONF_DEVICE_ID]
 
-    # Collect ALL DPs with key="power" for multi-gang support.
-    power_dps: list[str] = [
-        str(dp_id)
+    # Collect ALL DPs whose type is "bool" — covers single-switch, multi-gang,
+    # and power-strip devices without requiring a specific "power" key.
+    bool_dps: list[tuple[str, str]] = [
+        (str(dp_id), info.get("key", f"switch_{dp_id}"))
         for dp_id, info in dp_map.items()
-        if isinstance(info, dict) and info.get("key") == DP_KEY_POWER
+        if isinstance(info, dict) and info.get("type") == "bool"
     ]
 
-    if not power_dps:
+    if not bool_dps:
         _LOGGER.warning(
-            "Switch device %s has no power DP in dp_map — no entities created",
+            "Switch device %s has no bool DPs in dp_map — no entities created",
             device_id,
         )
         return
 
-    multi = len(power_dps) > 1
     entities: list[ContiSwitch] = []
-    for idx, dp_id in enumerate(sorted(power_dps), start=1):
-        suffix = f" {idx}" if multi else ""
+    for dp_id, key_name in sorted(bool_dps, key=lambda x: x[0]):
         entities.append(
-            ContiSwitch(coordinator, entry, device_id, dp_id, suffix)
+            ContiSwitch(coordinator, entry, device_id, dp_id, key_name)
         )
 
     _LOGGER.debug(
         "Creating %d switch entit(y/ies) for %s (DPs: %s)",
-        len(entities), device_id, power_dps,
+        len(entities), device_id, [dp for dp, _ in bool_dps],
     )
     async_add_entities(entities, update_before_add=True)
 
@@ -85,14 +84,14 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
         entry: ConfigEntry,
         device_id: str,
         dp_id: str,
-        name_suffix: str = "",
+        key_name: str = "",
     ) -> None:
         super().__init__(coordinator)
         self._device_id = device_id
         self._dp_id = dp_id
 
         self._attr_unique_id = f"{DOMAIN}_{device_id}_switch_{dp_id}"
-        self._attr_name = f"Switch{name_suffix}" if name_suffix else None
+        self._attr_name = key_name or None
         self._attr_device_info = {
             "identifiers": {(DOMAIN, device_id)},
             "name": entry.title,
@@ -105,7 +104,13 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.device_manager.is_online(self._device_id)
+        # Prefer cached DP or coordinator health so entities don't flap
+        # to "unknown" on transient poll failures.
+        return (
+            self._dp_value() is not None
+            or self.coordinator.last_update_success
+            or self.coordinator.device_manager.is_online(self._device_id)
+        )
 
     @property
     def is_on(self) -> bool | None:
@@ -116,10 +121,23 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
         await self.coordinator.device_manager.set_dp(
             self._device_id, int(self._dp_id), True
         )
-        await self.coordinator.async_request_refresh()
+        # Optimistic: reflect new state in UI immediately
+        self.coordinator.apply_optimistic_update(
+            self._device_id, self._dp_id, True
+        )
+        # Non-blocking delayed refresh to reconcile with device
+        self.hass.async_create_task(self._delayed_refresh())
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.device_manager.set_dp(
             self._device_id, int(self._dp_id), False
         )
+        self.coordinator.apply_optimistic_update(
+            self._device_id, self._dp_id, False
+        )
+        self.hass.async_create_task(self._delayed_refresh())
+
+    async def _delayed_refresh(self) -> None:
+        """Reconcile with device after a short delay to avoid flapping."""
+        await asyncio.sleep(1.0)
         await self.coordinator.async_request_refresh()

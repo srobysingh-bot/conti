@@ -154,6 +154,21 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     # -- Diagnostics ---------------------------------------------------------
 
+    def apply_optimistic_update(
+        self, device_id: str, dp_id: str, value: Any
+    ) -> None:
+        """Apply an optimistic DP update and notify listeners immediately.
+
+        Called by entity platforms (e.g. switch) after a successful ``set_dp``
+        so the UI reflects the new state without waiting for a poll round-trip.
+        """
+        if self.data is None:
+            self.data = {}
+        device_data = self.data.setdefault(device_id, {})
+        device_data[dp_id] = value
+        self._consecutive_failures = 0
+        self.async_set_updated_data(self.data)
+
     def get_diagnostics(self) -> dict[str, Any]:
         """Return diagnostic info for this device."""
         diag = self.device_manager.get_device_diagnostics(self._device_id)

@@ -6,10 +6,14 @@ Maps Tuya DPs to HA :class:`LightEntity` features:
 * Brightness    — ``brightness`` DP (int, scaled to 0-255)
 * Color temp    — ``color_temp`` DP (int, scaled to mireds)
 * RGB colour    — ``color_rgb`` DP (string ``"rrggbb"`` hex)
+
+Commands use optimistic state updates for instant UI feedback and
+batch related DPs into a single ``set_dps`` call.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -41,6 +45,8 @@ from .const import (
 from .coordinator import ContiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+_DP_KEY_MODE = "mode"  # Tuya light mode DP key (e.g. "white", "colour")
 
 
 async def async_setup_entry(
@@ -94,6 +100,7 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         self._dp_brightness = self._find_dp(DP_KEY_BRIGHTNESS)
         self._dp_color_temp = self._find_dp(DP_KEY_COLOR_TEMP)
         self._dp_rgb = self._find_dp(DP_KEY_COLOR_RGB)
+        self._dp_mode = self._find_dp(_DP_KEY_MODE)
 
         # Determine supported color modes
         modes: set[ColorMode] = set()
@@ -135,7 +142,13 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.device_manager.is_online(self._device_id)
+        # Prefer cached DP or coordinator health so entities don't flap
+        # to "unknown" on transient poll failures.
+        return (
+            self._dp_value(self._dp_power) is not None
+            or self.coordinator.last_update_success
+            or self.coordinator.device_manager.is_online(self._device_id)
+        )
 
     @property
     def is_on(self) -> bool | None:
@@ -184,36 +197,86 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         except ValueError:
             return None
 
+    # -- Helpers (optimistic) -------------------------------------------------
+
+    def _apply_optimistic(self, updates: dict[str, Any]) -> None:
+        """Push *updates* into coordinator data and notify HA immediately."""
+        for dp_id, value in updates.items():
+            self.coordinator.apply_optimistic_update(
+                self._device_id, dp_id, value
+            )
+
+    async def _delayed_refresh(self) -> None:
+        """Reconcile with the device after a short delay."""
+        await asyncio.sleep(1.0)
+        await self.coordinator.async_request_refresh()
+
     # -- Commands ------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         mgr = self.coordinator.device_manager
         dps: dict[int, Any] = {}
+        optimistic: dict[str, Any] = {}  # str dp_id → value
 
+        # Always ensure power is on
         if self._dp_power:
             dps[int(self._dp_power)] = True
+            optimistic[self._dp_power] = True
+
+        # Set mode to "white" when turning on or adjusting colour temp
+        if self._dp_mode and (
+            ATTR_COLOR_TEMP_KELVIN in kwargs
+            or ATTR_BRIGHTNESS in kwargs
+            or not kwargs  # plain ON
+        ):
+            dps[int(self._dp_mode)] = "white"
+            optimistic[self._dp_mode] = "white"
 
         if ATTR_BRIGHTNESS in kwargs and self._dp_brightness:
             lo, hi = self._dp_range(self._dp_brightness)
             scaled = int(lo + kwargs[ATTR_BRIGHTNESS] / 255 * (hi - lo))
             dps[int(self._dp_brightness)] = scaled
+            optimistic[self._dp_brightness] = scaled
 
         if ATTR_COLOR_TEMP_KELVIN in kwargs and self._dp_color_temp:
             lo, hi = self._dp_range(self._dp_color_temp)
             frac = (kwargs[ATTR_COLOR_TEMP_KELVIN] - 2000) / (6535 - 2000)
-            dps[int(self._dp_color_temp)] = int(frac * hi)
+            ct_val = int(frac * hi)
+            dps[int(self._dp_color_temp)] = ct_val
+            optimistic[self._dp_color_temp] = ct_val
 
         if ATTR_RGB_COLOR in kwargs and self._dp_rgb:
             r, g, b = kwargs[ATTR_RGB_COLOR]
-            dps[int(self._dp_rgb)] = f"{r:02x}{g:02x}{b:02x}"
+            hex_val = f"{r:02x}{g:02x}{b:02x}"
+            dps[int(self._dp_rgb)] = hex_val
+            optimistic[self._dp_rgb] = hex_val
+            # Switch mode to colour when RGB is requested
+            if self._dp_mode:
+                dps[int(self._dp_mode)] = "colour"
+                optimistic[self._dp_mode] = "colour"
 
-        if dps:
-            await mgr.set_dps(self._device_id, dps)
-            await self.coordinator.async_request_refresh()
+        if not dps:
+            return
+
+        # Optimistic: update HA state instantly before the network call
+        self._apply_optimistic(optimistic)
+
+        # Send batched command to the device
+        await mgr.set_dps(self._device_id, dps)
+
+        # Non-blocking delayed refresh to reconcile
+        self.hass.async_create_task(self._delayed_refresh())
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        if self._dp_power:
-            await self.coordinator.device_manager.set_dp(
-                self._device_id, int(self._dp_power), False
-            )
-            await self.coordinator.async_request_refresh()
+        if not self._dp_power:
+            return
+
+        # Optimistic: reflect OFF in UI immediately
+        self._apply_optimistic({self._dp_power: False})
+
+        await self.coordinator.device_manager.set_dp(
+            self._device_id, int(self._dp_power), False
+        )
+
+        # Non-blocking delayed refresh
+        self.hass.async_create_task(self._delayed_refresh())
