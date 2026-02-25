@@ -1,0 +1,48 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Tuya Device",
+        "description": "Enter the details for your local Tuya device.  You can find the Device ID and Local Key using the Tuya IoT Platform developer tools.  Protocol version 'Auto' will try 3.3, then 3.4, then 3.5, then 3.1 automatically.",
+        "data": {
+          "name": "Device Name",
+          "host": "Device IP Address",
+          "device_id": "Device ID",
+          "local_key": "Local Key",
+          "protocol_version": "Protocol Version",
+          "device_type": "Device Type",
+          "dp_map": "DP Mapping (JSON)"
+        },
+        "data_description": {
+          "dp_map": "JSON object mapping DP ids to their role, e.g. {\"1\": {\"key\": \"power\", \"type\": \"bool\"}}.  Leave the default to use auto-detection."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This device is already configured."
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the device. Check IP address, port, and that the device is on the same network.",
+      "invalid_auth": "Authentication failed. The local key is likely incorrect.  Verify the 16-character key from the Tuya IoT Platform.",
+      "wrong_protocol": "Protocol mismatch. The device rejected all attempted protocol versions (3.3, 3.4, 3.5, 3.1). Check the device firmware version.",
+      "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
+      "unknown": "An unexpected error occurred."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Conti Device Options",
+        "description": "Edit the DP mapping, toggle debug logging, or re-discover DPs from the device.",
+        "data": {
+          "dp_map": "DP Mapping (JSON)",
+          "verbose_logging": "Enable verbose / debug logging",
+          "rediscover_dps": "Re-discover DPs from device"
+        }
+      }
+    },
+    "error": {
+      "invalid_dp_map": "The DP mapping JSON is not valid."
+    }
+  }
+}
