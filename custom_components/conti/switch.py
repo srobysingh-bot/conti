@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
@@ -78,6 +79,10 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     _attr_has_entity_name = True
 
+    # Seconds after a command during which contradicting poll values are
+    # ignored (stale-data guard).
+    _COOLDOWN_SECS: float = 1.5
+
     def __init__(
         self,
         coordinator: ContiCoordinator,
@@ -89,6 +94,13 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
         super().__init__(coordinator)
         self._device_id = device_id
         self._dp_id = dp_id
+
+        # Anti-bounce / cooldown state
+        self._last_state: bool | None = None
+        self._desired: bool | None = None
+        self._cooldown_until: float = 0.0
+        self._refresh_task: asyncio.Task | None = None
+        self._send_lock = asyncio.Lock()
 
         self._attr_unique_id = f"{DOMAIN}_{device_id}_switch_{dp_id}"
         self._attr_name = key_name or None
@@ -114,28 +126,89 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        val = self._dp_value()
-        return bool(val) if val is not None else None
+        polled = self._dp_value()
+        now = time.monotonic()
+
+        # --- Missing DP: fall back to last known state ---
+        if polled is None:
+            return self._last_state
+
+        polled_bool = bool(polled)
+
+        # --- Cooldown guard: ignore stale contradictions ---
+        if now < self._cooldown_until and self._desired is not None:
+            if polled_bool != self._desired:
+                # Poll contradicts the command we just sent — keep desired
+                return self._desired
+            # Poll agrees with command — accept & end cooldown early
+            self._cooldown_until = 0.0
+
+        self._last_state = polled_bool
+        return polled_bool
+
+    # -- Coordinator update filtering ----------------------------------------
+
+    def _handle_coordinator_update(self) -> None:
+        """Accept coordinator data but let ``is_on`` filter stale values."""
+        self.async_write_ha_state()
+
+    # -- Commands ------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self.coordinator.device_manager.set_dp(
-            self._device_id, int(self._dp_id), True
-        )
+        self._desired = True
+        self._last_state = True
+        self._cooldown_until = time.monotonic() + self._COOLDOWN_SECS
+
         # Optimistic: reflect new state in UI immediately
         self.coordinator.apply_optimistic_update(
             self._device_id, self._dp_id, True
         )
-        # Non-blocking delayed refresh to reconcile with device
-        self.hass.async_create_task(self._delayed_refresh())
+        self.async_write_ha_state()
+
+        # Send in background so the service call returns instantly
+        self.hass.async_create_task(self._async_send_dp(True))
+
+        # Debounced delayed refresh
+        self._schedule_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self.coordinator.device_manager.set_dp(
-            self._device_id, int(self._dp_id), False
-        )
+        self._desired = False
+        self._last_state = False
+        self._cooldown_until = time.monotonic() + self._COOLDOWN_SECS
+
         self.coordinator.apply_optimistic_update(
             self._device_id, self._dp_id, False
         )
-        self.hass.async_create_task(self._delayed_refresh())
+        self.async_write_ha_state()
+
+        self.hass.async_create_task(self._async_send_dp(False))
+        self._schedule_refresh()
+
+    # -- Background helpers --------------------------------------------------
+
+    async def _async_send_dp(self, value: bool) -> None:
+        """Send the DP to the device; log but do not raise on failure."""
+        async with self._send_lock:
+            try:
+                await self.coordinator.device_manager.set_dp(
+                    self._device_id, int(self._dp_id), value
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Background set_dp failed for %s dp=%s value=%s",
+                    self._device_id,
+                    self._dp_id,
+                    value,
+                    exc_info=True,
+                )
+
+    def _schedule_refresh(self) -> None:
+        """Cancel any pending refresh and schedule a new one."""
+        if self._refresh_task is not None and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        self._refresh_task = self.hass.async_create_task(
+            self._delayed_refresh()
+        )
 
     async def _delayed_refresh(self) -> None:
         """Reconcile with device after a short delay to avoid flapping."""

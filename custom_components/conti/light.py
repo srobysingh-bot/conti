@@ -102,6 +102,12 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         self._dp_rgb = self._find_dp(DP_KEY_COLOR_RGB)
         self._dp_mode = self._find_dp(_DP_KEY_MODE)
 
+        # Command coalescing / debounce state
+        self._pending_dps: dict[int, Any] = {}
+        self._send_task: asyncio.Task | None = None
+        self._send_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
+
         # Determine supported color modes
         modes: set[ColorMode] = set()
         if self._dp_brightness:
@@ -206,6 +212,55 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
                 self._device_id, dp_id, value
             )
 
+    # -- Command coalescing --------------------------------------------------
+
+    def _schedule_send(self, dps: dict[int, Any]) -> None:
+        """Merge *dps* into the pending batch and ensure a send is scheduled."""
+        self._pending_dps.update(dps)
+        if self._send_task is None or self._send_task.done():
+            self._send_task = self.hass.async_create_task(
+                self._debounced_send()
+            )
+
+    async def _debounced_send(self) -> None:
+        """Wait briefly, coalesce all pending DPs, and send once.
+
+        If new DPs arrive while the device call is in-flight the loop
+        runs one more iteration so the latest values are always sent.
+        """
+        while True:
+            await asyncio.sleep(0.2)
+            if not self._pending_dps:
+                break
+            # Snapshot and clear
+            batch = dict(self._pending_dps)
+            self._pending_dps.clear()
+            async with self._send_lock:
+                try:
+                    await self.coordinator.device_manager.set_dps(
+                        self._device_id, batch
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Debounced set_dps failed for %s: %s",
+                        self._device_id,
+                        batch,
+                        exc_info=True,
+                    )
+            # Schedule a single delayed refresh after successful send
+            self._schedule_refresh()
+            # If nothing new accumulated while we were sending, we're done
+            if not self._pending_dps:
+                break
+
+    def _schedule_refresh(self) -> None:
+        """Cancel any pending refresh and schedule a new one."""
+        if self._refresh_task is not None and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        self._refresh_task = self.hass.async_create_task(
+            self._delayed_refresh()
+        )
+
     async def _delayed_refresh(self) -> None:
         """Reconcile with the device after a short delay."""
         await asyncio.sleep(1.0)
@@ -261,11 +316,8 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         # Optimistic: update HA state instantly before the network call
         self._apply_optimistic(optimistic)
 
-        # Send batched command to the device
-        await mgr.set_dps(self._device_id, dps)
-
-        # Non-blocking delayed refresh to reconcile
-        self.hass.async_create_task(self._delayed_refresh())
+        # Coalesce into the debounced send pipeline (non-blocking)
+        self._schedule_send(dps)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         if not self._dp_power:
@@ -274,9 +326,5 @@ class ContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         # Optimistic: reflect OFF in UI immediately
         self._apply_optimistic({self._dp_power: False})
 
-        await self.coordinator.device_manager.set_dp(
-            self._device_id, int(self._dp_power), False
-        )
-
-        # Non-blocking delayed refresh
-        self.hass.async_create_task(self._delayed_refresh())
+        # Coalesce into the debounced send pipeline (non-blocking)
+        self._schedule_send({int(self._dp_power): False})
