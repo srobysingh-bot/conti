@@ -180,6 +180,7 @@ class TinyTuyaDevice:
             port=self._port,
         )
         d.set_socketPersistent(True)
+        d.set_sendWait(None)  # remove 10ms post-send sleep for faster commands
 
         try:
             result = d.status()
@@ -286,28 +287,55 @@ class TinyTuyaDevice:
     # -- DP commands ---------------------------------------------------------
 
     async def set_dp(self, dp_id: int, value: Any) -> bool:
-        """Set a single DP on the device."""
+        """Set a single DP on the device using fire-and-forget CONTROL."""
         if not self._device:
             return False
 
         def _set() -> bool:
             try:
-                self._device.set_value(dp_id, value)  # type: ignore[union-attr]
+                str_dps = {str(dp_id): value}
+                payload = self._device.generate_payload(  # type: ignore[union-attr]
+                    tinytuya.CONTROL, str_dps
+                )
+                # nowait: send without waiting for ACK to avoid multi-second stalls
+                self._device._send_receive(payload, 0, getresponse=False)  # type: ignore[union-attr]  # noqa: SLF001
+                self._cached_dps[str(dp_id)] = value
                 return True
             except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "Conti set_dp(%s, %s, %s) failed: %s",
-                    self._device_id,
-                    dp_id,
-                    value,
-                    exc,
+                _LOGGER.debug(
+                    "Conti set_dp(%s, %s) first attempt failed: %s",
+                    self._device_id, dp_id, exc,
                 )
-                return False
+                self._connected = False
+                # Single reconnect-and-retry (with ACK to verify socket)
+                try:
+                    self._device.close()  # type: ignore[union-attr]
+                    result = self._device.status()  # type: ignore[union-attr]
+                    if not (isinstance(result, dict) and "dps" in result):
+                        _LOGGER.warning(
+                            "Conti set_dp(%s, %s) retry reconnect failed",
+                            self._device_id, dp_id,
+                        )
+                        return False
+                    self._connected = True
+                    payload = self._device.generate_payload(  # type: ignore[union-attr]
+                        tinytuya.CONTROL, {str(dp_id): value}
+                    )
+                    self._device._send_receive(payload, 0, getresponse=False)  # type: ignore[union-attr]  # noqa: SLF001
+                    self._cached_dps[str(dp_id)] = value
+                    return True
+                except Exception as retry_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Conti set_dp(%s, %s) retry also failed: %s",
+                        self._device_id, dp_id, retry_exc,
+                    )
+                    self._connected = False
+                    return False
 
         return await asyncio.to_thread(_set)
 
     async def set_dps(self, dps: dict[int, Any]) -> bool:
-        """Set multiple DP values in a single CONTROL command."""
+        """Set multiple DP values in a single fire-and-forget CONTROL."""
         if not self._device:
             return False
 
@@ -317,13 +345,41 @@ class TinyTuyaDevice:
                 payload = self._device.generate_payload(  # type: ignore[union-attr]
                     tinytuya.CONTROL, str_dps
                 )
-                self._device._send_receive(payload)  # type: ignore[union-attr]  # noqa: SLF001
+                # nowait: send without waiting for ACK to avoid multi-second stalls
+                self._device._send_receive(payload, 0, getresponse=False)  # type: ignore[union-attr]  # noqa: SLF001
+                self._cached_dps.update(str_dps)
                 return True
             except Exception as exc:  # noqa: BLE001
-                _LOGGER.warning(
-                    "Conti set_dps(%s) failed: %s", self._device_id, exc
+                _LOGGER.debug(
+                    "Conti set_dps(%s) first attempt failed: %s",
+                    self._device_id, exc,
                 )
-                return False
+                self._connected = False
+                # Single reconnect-and-retry (with ACK to verify socket)
+                try:
+                    self._device.close()  # type: ignore[union-attr]
+                    result = self._device.status()  # type: ignore[union-attr]
+                    if not (isinstance(result, dict) and "dps" in result):
+                        _LOGGER.warning(
+                            "Conti set_dps(%s) retry reconnect failed",
+                            self._device_id,
+                        )
+                        return False
+                    self._connected = True
+                    str_dps = {str(k): v for k, v in dps.items()}
+                    payload = self._device.generate_payload(  # type: ignore[union-attr]
+                        tinytuya.CONTROL, str_dps
+                    )
+                    self._device._send_receive(payload, 0, getresponse=False)  # type: ignore[union-attr]  # noqa: SLF001
+                    self._cached_dps.update(str_dps)
+                    return True
+                except Exception as retry_exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "Conti set_dps(%s) retry also failed: %s",
+                        self._device_id, retry_exc,
+                    )
+                    self._connected = False
+                    return False
 
         return await asyncio.to_thread(_set)
 

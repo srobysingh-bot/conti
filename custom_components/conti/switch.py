@@ -31,6 +31,12 @@ from .coordinator import ContiCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Anti-bounce constants
+# ---------------------------------------------------------------------------
+COOLDOWN_S: float = 5.0          # Ignore stale poll contradictions for this long
+REFRESH_DELAY_S: float = 4.0     # Delay before reconciliation refresh
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -79,10 +85,6 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     _attr_has_entity_name = True
 
-    # Seconds after a command during which contradicting poll values are
-    # ignored (stale-data guard).
-    _COOLDOWN_SECS: float = 1.5
-
     def __init__(
         self,
         coordinator: ContiCoordinator,
@@ -99,8 +101,10 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
         self._last_state: bool | None = None
         self._desired: bool | None = None
         self._cooldown_until: float = 0.0
-        self._refresh_task: asyncio.Task | None = None
+
+        # Per-entity command lock & refresh handle
         self._send_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task | None = None
 
         self._attr_unique_id = f"{DOMAIN}_{device_id}_switch_{dp_id}"
         self._attr_name = key_name or None
@@ -129,7 +133,7 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
         polled = self._dp_value()
         now = time.monotonic()
 
-        # --- Missing DP: fall back to last known state ---
+        # --- Missing DP: never flip OFF; keep last known state ---
         if polled is None:
             return self._last_state
 
@@ -140,8 +144,14 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
             if polled_bool != self._desired:
                 # Poll contradicts the command we just sent — keep desired
                 return self._desired
-            # Poll agrees with command — accept & end cooldown early
-            self._cooldown_until = 0.0
+            # Poll agrees — still keep desired until cooldown expires
+            # naturally so later stale polls cannot flip the state back.
+            self._last_state = self._desired
+            return self._desired
+
+        # Cooldown expired — clear desired and accept polled value
+        if self._desired is not None:
+            self._desired = None
 
         self._last_state = polled_bool
         return polled_bool
@@ -155,39 +165,30 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
     # -- Commands ------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        self._desired = True
-        self._last_state = True
-        self._cooldown_until = time.monotonic() + self._COOLDOWN_SECS
+        self._apply_desired(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self._apply_desired(False)
+
+    def _apply_desired(self, value: bool) -> None:
+        """Optimistically update UI and send command immediately."""
+        self._desired = value
+        self._last_state = value
+        self._cooldown_until = time.monotonic() + COOLDOWN_S
 
         # Optimistic: reflect new state in UI immediately
         self.coordinator.apply_optimistic_update(
-            self._device_id, self._dp_id, True
+            self._device_id, self._dp_id, value
         )
         self.async_write_ha_state()
 
         # Send in background so the service call returns instantly
-        self.hass.async_create_task(self._async_send_dp(True))
-
-        # Debounced delayed refresh
-        self._schedule_refresh()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        self._desired = False
-        self._last_state = False
-        self._cooldown_until = time.monotonic() + self._COOLDOWN_SECS
-
-        self.coordinator.apply_optimistic_update(
-            self._device_id, self._dp_id, False
-        )
-        self.async_write_ha_state()
-
-        self.hass.async_create_task(self._async_send_dp(False))
-        self._schedule_refresh()
+        self.hass.async_create_task(self._async_send_dp(value))
 
     # -- Background helpers --------------------------------------------------
 
     async def _async_send_dp(self, value: bool) -> None:
-        """Send the DP to the device; log but do not raise on failure."""
+        """Send the DP command to the device immediately (serialised by lock)."""
         async with self._send_lock:
             try:
                 await self.coordinator.device_manager.set_dp(
@@ -202,6 +203,12 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
                     exc_info=True,
                 )
 
+        # Extend cooldown after actual send
+        self._cooldown_until = time.monotonic() + COOLDOWN_S
+
+        # Schedule one delayed refresh (cancel previous)
+        self._schedule_refresh()
+
     def _schedule_refresh(self) -> None:
         """Cancel any pending refresh and schedule a new one."""
         if self._refresh_task is not None and not self._refresh_task.done():
@@ -211,6 +218,18 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
         )
 
     async def _delayed_refresh(self) -> None:
-        """Reconcile with device after a short delay to avoid flapping."""
-        await asyncio.sleep(1.0)
+        """Reconcile with device after a delay to avoid stale reads."""
+        await asyncio.sleep(REFRESH_DELAY_S)
         await self.coordinator.async_request_refresh()
+
+        # If polled value still contradicts the last desired state,
+        # re-send once to re-assert (no loop).
+        desired = self._desired
+        if desired is not None:
+            polled = self._dp_value()
+            if polled is not None and bool(polled) != desired:
+                _LOGGER.debug(
+                    "Re-asserting %s dp=%s to %s (polled %s after refresh)",
+                    self._device_id, self._dp_id, desired, polled,
+                )
+                await self._async_send_dp(desired)

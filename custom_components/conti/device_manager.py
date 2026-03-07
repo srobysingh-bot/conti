@@ -309,8 +309,14 @@ class DeviceManager:
                 _LOGGER.warning("Conti set_dps(%s) failed: %s", device_id, exc)
                 return False
 
-    async def query_device(self, device_id: str) -> dict[str, Any]:
+    async def query_device(self, device_id: str) -> dict[str, Any] | None:
         """Query the current DP values.  Returns `{}` if offline.
+
+        Returns ``None`` when the poll is intentionally **skipped** because
+        a command (``set_dp``/``set_dps``) currently holds the per-device
+        lock.  The caller should treat ``None`` as "no new data, but not
+        a failure" and fall back to cached DPS without incrementing any
+        failure counter.
 
         * If a reconnect task is already running, returns cached DPS.
         * After a successful connect, uses status_with_fallback().
@@ -330,6 +336,16 @@ class DeviceManager:
                     device_id,
                 )
                 return managed.client.cached_dps
+
+            # Don't start a reconnect attempt while the lock is busy.
+            if managed.lock.locked():
+                _LOGGER.debug(
+                    "Conti device %s: offline but lock busy, "
+                    "skipping reconnect — returning None (poll skipped)",
+                    device_id,
+                )
+                return None
+
             _LOGGER.info(
                 "Conti device %s offline, attempting connect to %s",
                 device_id,
@@ -407,6 +423,16 @@ class DeviceManager:
 
         # ---- Device is online - request fresh status ----
         managed.client.ip = managed.config["host"]
+
+        # If the lock is already held (command in-flight), skip this poll
+        # so user commands are never blocked behind polling I/O.
+        if managed.lock.locked():
+            _LOGGER.debug(
+                "Conti device %s: lock busy (command in-flight), "
+                "skipping poll — returning None (poll skipped)",
+                device_id,
+            )
+            return None
 
         async with managed.lock:
             try:

@@ -91,7 +91,12 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         try:
             dps = await self.device_manager.query_device(self._device_id)
-            if dps:
+            if dps is None:
+                # Poll was skipped (lock busy / command in-flight).
+                # Return the EXISTING coordinator data unchanged so we
+                # never overwrite optimistic state set by a command.
+                return self.data or {}
+            elif dps:
                 result[self._device_id] = dps
                 self._consecutive_failures = 0
             else:
