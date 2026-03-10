@@ -22,10 +22,12 @@ class ContiWhiteStripLight(BaseContiLight):
 
     def _init_color_modes(self) -> None:
         modes: set[ColorMode] = set()
-        if self._dp_brightness:
-            modes.add(ColorMode.BRIGHTNESS)
         if self._dp_color_temp:
             modes.add(ColorMode.COLOR_TEMP)
+        # Only add BRIGHTNESS when COLOR_TEMP is absent (HA rule:
+        # BRIGHTNESS cannot coexist with other color modes).
+        elif self._dp_brightness:
+            modes.add(ColorMode.BRIGHTNESS)
         if not modes:
             modes.add(ColorMode.ONOFF)
         self._attr_supported_color_modes = modes

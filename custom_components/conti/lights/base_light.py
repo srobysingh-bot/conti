@@ -116,14 +116,20 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         """Determine ``_attr_supported_color_modes`` and ``_attr_color_mode``.
 
         Default implementation auto-detects from available DPs.
+
+        HA rule: ``ColorMode.BRIGHTNESS`` may only appear **alone** in
+        ``supported_color_modes``.  ``COLOR_TEMP`` and ``RGB`` already
+        imply brightness control, so ``BRIGHTNESS`` is omitted when
+        either of those is present.
         """
         modes: set[ColorMode] = set()
-        if self._dp_brightness:
-            modes.add(ColorMode.BRIGHTNESS)
-        if self._dp_color_temp:
-            modes.add(ColorMode.COLOR_TEMP)
         if self._dp_rgb:
             modes.add(ColorMode.RGB)
+        if self._dp_color_temp:
+            modes.add(ColorMode.COLOR_TEMP)
+        # Only add BRIGHTNESS when no richer mode is present.
+        if self._dp_brightness and not modes:
+            modes.add(ColorMode.BRIGHTNESS)
         if not modes:
             modes.add(ColorMode.ONOFF)
         self._attr_supported_color_modes = modes

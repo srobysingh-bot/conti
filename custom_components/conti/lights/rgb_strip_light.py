@@ -24,7 +24,9 @@ class ContiRgbStripLight(BaseContiLight):
         modes: set[ColorMode] = set()
         if self._dp_rgb:
             modes.add(ColorMode.RGB)
-        if self._dp_brightness:
+        # Only add BRIGHTNESS when RGB is absent (HA rule:
+        # BRIGHTNESS cannot coexist with other color modes).
+        if self._dp_brightness and not modes:
             modes.add(ColorMode.BRIGHTNESS)
         if not modes:
             modes.add(ColorMode.ONOFF)
