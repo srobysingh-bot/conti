@@ -32,6 +32,7 @@ from .const import (
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     DP_KEY_BATTERY,
+    DP_KEY_CONTACT,
     DP_KEY_HUMIDITY,
     DP_KEY_MOTION,
     DP_KEY_POWER_USAGE,
@@ -49,6 +50,7 @@ _SENSOR_META: dict[str, tuple[SensorDeviceClass | None, str | None, SensorStateC
     DP_KEY_POWER_USAGE: (SensorDeviceClass.ENERGY, UnitOfEnergy.WATT_HOUR, SensorStateClass.TOTAL_INCREASING, None),
     DP_KEY_BATTERY: (SensorDeviceClass.BATTERY, PERCENTAGE, SensorStateClass.MEASUREMENT, None),
     DP_KEY_MOTION: (None, None, None, "mdi:motion-sensor"),
+    DP_KEY_CONTACT: (None, None, None, "mdi:door-closed"),
 }
 
 
@@ -57,8 +59,18 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    if entry.data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_SENSOR:
-        return
+    device_type = entry.data.get(CONF_DEVICE_TYPE)
+
+    if device_type != DEVICE_TYPE_SENSOR:
+        # Combo support: create sensor entities when a non-sensor device
+        # (e.g. switch with power monitoring) has sensor-capable DPs.
+        raw = entry.options.get(CONF_DP_MAP) or entry.data.get(CONF_DP_MAP, "{}")
+        dp_map_check = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        if not isinstance(dp_map_check, dict) or not any(
+            isinstance(v, dict) and v.get("key") in _SENSOR_META
+            for v in dp_map_check.values()
+        ):
+            return
 
     coordinator: ContiCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     dp_map: dict[str, Any] = json.loads(

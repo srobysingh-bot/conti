@@ -21,7 +21,7 @@ from homeassistant.components.climate import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -95,6 +95,7 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
         super().__init__(coordinator)
         self._device_id = device_id
         self._dp_map = dp_map
+        self._entry = entry
 
         self._attr_unique_id = f"{DOMAIN}_{device_id}_climate"
         self._attr_device_info = {
@@ -134,6 +135,39 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
         # Fan modes
         fan_info = self._dp_map.get(self._dp_fan_mode, {}) if self._dp_fan_mode else {}
         self._attr_fan_modes = fan_info.get("values", ["auto", "low", "medium", "high"])
+
+        # Track last-known power state for external-change detection
+        self._last_power: bool | None = None
+
+    # -- Coordinator update handling -----------------------------------------
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Detect external power changes and log to HA Activity panel."""
+        prev_power = self._last_power
+        current = self._dp_value(self._dp_power)
+        if current is not None:
+            self._last_power = bool(current)
+        self.async_write_ha_state()
+
+        # Fire logbook entry only for genuine external power changes
+        if (
+            self._dp_power
+            and prev_power is not None
+            and current is not None
+            and bool(current) != prev_power
+            and not self.coordinator.is_dp_commanded(self._dp_power)
+        ):
+            action = "turned on" if bool(current) else "turned off"
+            self.hass.bus.async_fire(
+                "logbook_entry",
+                {
+                    "name": self._entry.title,
+                    "message": f"{action} by external device",
+                    "entity_id": self.entity_id,
+                    "domain": "climate",
+                },
+            )
 
     # -- Helpers -------------------------------------------------------------
 
@@ -203,10 +237,12 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
         mgr = self.coordinator.device_manager
         if hvac_mode == HVACMode.OFF:
             if self._dp_power:
+                self.coordinator.mark_dp_commanded(self._dp_power)
                 await mgr.set_dp(self._device_id, int(self._dp_power), False)
         else:
             dps: dict[int, Any] = {}
             if self._dp_power:
+                self.coordinator.mark_dp_commanded(self._dp_power)
                 dps[int(self._dp_power)] = True
             if self._dp_hvac_mode:
                 tuya_mode = _HVAC_REVERSE.get(hvac_mode, "auto")

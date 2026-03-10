@@ -72,8 +72,10 @@ DP_KEY_BRIGHTNESS: Final = "brightness"
 DP_KEY_COLOR_TEMP: Final = "color_temp"
 DP_KEY_COLOR_RGB: Final = "color_rgb"
 # Fan
+DP_KEY_FAN_POWER: Final = "fan_power"  # separate power DP for combo (fan+light)
 DP_KEY_FAN_SPEED: Final = "fan_speed"
 DP_KEY_FAN_DIRECTION: Final = "fan_direction"
+DP_KEY_FAN_OSCILLATION: Final = "fan_oscillation"
 # Climate
 DP_KEY_TARGET_TEMP: Final = "target_temp"
 DP_KEY_CURRENT_TEMP: Final = "current_temp"
@@ -85,6 +87,7 @@ DP_KEY_HUMIDITY: Final = "humidity"
 DP_KEY_POWER_USAGE: Final = "power_usage"
 DP_KEY_BATTERY: Final = "battery"
 DP_KEY_MOTION: Final = "motion"
+DP_KEY_CONTACT: Final = "contact"
 
 # ---------------------------------------------------------------------------
 # Reconnect
@@ -96,6 +99,11 @@ RECONNECT_MAX_DELAY: Final = 60.0
 # Stability
 # ---------------------------------------------------------------------------
 MAX_CONSECUTIVE_FAILURES: Final = 5  # mark UpdateFailed after this many
+
+# ---------------------------------------------------------------------------
+# Activity tracking
+# ---------------------------------------------------------------------------
+COMMAND_TRACK_WINDOW: Final = 6.0  # seconds — match entity stale-protect
 
 # ---------------------------------------------------------------------------
 # Example DP maps  (used in config-flow description only)

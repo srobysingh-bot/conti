@@ -23,9 +23,11 @@ from .const import (
     DP_KEY_BRIGHTNESS,
     DP_KEY_COLOR_RGB,
     DP_KEY_COLOR_TEMP,
+    DP_KEY_CONTACT,
     DP_KEY_CURRENT_TEMP,
     DP_KEY_FAN_DIRECTION,
     DP_KEY_FAN_MODE,
+    DP_KEY_FAN_OSCILLATION,
     DP_KEY_FAN_SPEED,
     DP_KEY_HUMIDITY,
     DP_KEY_HVAC_MODE,
@@ -68,9 +70,10 @@ SWITCH_HEURISTICS: Final[list[_HeuristicRule]] = [
 ]
 
 FAN_HEURISTICS: Final[list[_HeuristicRule]] = [
-    (["1", "20"],  DP_KEY_POWER,         "bool", False),
-    (["3", "4"],   DP_KEY_FAN_SPEED,     "int",  False),
-    (["4", "8"],   DP_KEY_FAN_DIRECTION, "str",  False),
+    (["1", "20"],  DP_KEY_POWER,          "bool", False),
+    (["3", "4"],   DP_KEY_FAN_SPEED,      "int",  False),
+    (["4", "8"],   DP_KEY_FAN_DIRECTION,  "str",  False),
+    (["8", "104"], DP_KEY_FAN_OSCILLATION, "bool", False),
 ]
 
 CLIMATE_HEURISTICS: Final[list[_HeuristicRule]] = [
@@ -87,6 +90,7 @@ SENSOR_HEURISTICS: Final[list[_HeuristicRule]] = [
     (["3"],               DP_KEY_BATTERY,       "int",  False),
     (["9", "10"],         DP_KEY_POWER_USAGE,   "int",  False),
     (["101", "102", "103"], DP_KEY_MOTION,      "bool", False),
+    (["101", "102"],      DP_KEY_CONTACT,       "bool", False),
 ]
 
 _HEURISTIC_MAP: Final[dict[str, list[_HeuristicRule]]] = {

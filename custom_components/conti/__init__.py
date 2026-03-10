@@ -206,7 +206,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if final_dps:
                 await _save_dps_cache(hass, device_id, final_dps)
 
-            manager.unregister_state_callback(device_id)
+            # Callback cleanup + disconnect handled inside
+            # remove_device (coordinator.async_shutdown already
+            # unregistered its specific callback).
             await manager.remove_device(device_id)
 
         # Decrement ref count — stop manager when last entry unloads

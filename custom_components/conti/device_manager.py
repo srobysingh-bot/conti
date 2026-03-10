@@ -80,6 +80,7 @@ class _ManagedDevice:
         "config",
         "reconnect_delay",
         "reconnect_task",
+        "listener_task",
         "online",
         "lock",
         "diag",
@@ -90,6 +91,7 @@ class _ManagedDevice:
         self.config = config
         self.reconnect_delay: float = RECONNECT_BASE_DELAY
         self.reconnect_task: Optional[asyncio.Task[None]] = None
+        self.listener_task: Optional[asyncio.Task[None]] = None
         self.online: bool = False
         self.lock: asyncio.Lock = asyncio.Lock()
         self.diag: DeviceDiagnostics = DeviceDiagnostics()
@@ -117,9 +119,11 @@ class DeviceManager:
         self._running = True
 
     async def stop(self) -> None:
-        """Close every connection and cancel pending reconnects."""
+        """Close every connection and cancel pending reconnects/listeners."""
         self._running = False
         for dev in self._devices.values():
+            if dev.listener_task and not dev.listener_task.done():
+                dev.listener_task.cancel()
             if dev.reconnect_task and not dev.reconnect_task.done():
                 dev.reconnect_task.cancel()
             await dev.client.close()
@@ -170,6 +174,12 @@ class DeviceManager:
             version=config.get("protocol_version", DEFAULT_PROTOCOL_VERSION),
             port=config.get("port", DEFAULT_PORT),
         )
+
+        # Tell TinyTuya which DPs to request so multi-gang devices
+        # report all channels in status queries.
+        dp_map = config.get("dp_map")
+        if isinstance(dp_map, dict) and dp_map:
+            client.set_monitored_dp_ids(list(dp_map.keys()))
 
         managed = _ManagedDevice(client, config)
         self._devices[device_id] = managed
@@ -255,6 +265,10 @@ class DeviceManager:
                     )
                     managed.online = False
                     self._schedule_reconnect(device_id)
+                else:
+                    # TCP alive — start push listener for near-instant
+                    # RF / physical-button state updates.
+                    self._start_listener(device_id)
             else:
                 managed.online = False
                 managed.diag.consecutive_failures += 1
@@ -273,6 +287,8 @@ class DeviceManager:
         managed = self._devices.pop(device_id, None)
         if managed is None:
             return
+        if managed.listener_task and not managed.listener_task.done():
+            managed.listener_task.cancel()
         if managed.reconnect_task and not managed.reconnect_task.done():
             managed.reconnect_task.cancel()
         await managed.client.close()
@@ -385,6 +401,7 @@ class DeviceManager:
                             device_id,
                             managed.diag.protocol_version,
                         )
+                        self._start_listener(device_id)
                         return st
 
                     # Connected but empty — check if connection survived
@@ -396,6 +413,7 @@ class DeviceManager:
                             managed.client.last_tx_hex[:32],
                             managed.client.last_rx_hex[:32],
                         )
+                        self._start_listener(device_id)
                         return managed.client.cached_dps
 
                     # Connection lost during probing
@@ -592,10 +610,86 @@ class DeviceManager:
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("State callback error for %s", device_id)
 
+    # -- Push listener -------------------------------------------------------
+
+    def _start_listener(self, device_id: str) -> None:
+        """Start the unsolicited-data listener for *device_id*."""
+        managed = self._devices.get(device_id)
+        if not managed:
+            return
+        if managed.listener_task and not managed.listener_task.done():
+            return  # already running
+        managed.listener_task = asyncio.create_task(
+            self._listen_loop(device_id),
+            name=f"conti-listener-{device_id}",
+        )
+
+    def _stop_listener(self, device_id: str) -> None:
+        """Cancel the listener task for *device_id* if running."""
+        managed = self._devices.get(device_id)
+        if managed and managed.listener_task and not managed.listener_task.done():
+            managed.listener_task.cancel()
+            managed.listener_task = None
+
+    async def _listen_loop(self, device_id: str) -> None:
+        """Background: poll the persistent socket for unsolicited pushes.
+
+        Runs every ~0.5 s between polls/commands.  When the per-device
+        lock is held (command or poll in flight) the loop yields so it
+        never blocks real I/O.  A short 100 ms socket timeout inside
+        ``receive_nowait`` keeps each iteration fast.
+        """
+        managed = self._devices.get(device_id)
+        if not managed:
+            return
+
+        _LOGGER.debug("Push listener started for %s", device_id)
+        try:
+            while self._running and managed.online:
+                # Yield to commands / polls that hold the lock
+                if managed.lock.locked():
+                    await asyncio.sleep(0.2)
+                    continue
+
+                async with managed.lock:
+                    try:
+                        dps = await managed.client.receive_nowait()
+                    except Exception:  # noqa: BLE001
+                        dps = None
+
+                # Socket died during receive?
+                if not managed.client.connected:
+                    managed.online = False
+                    self._classify_error(
+                        managed, "disconnected during push listen"
+                    )
+                    _LOGGER.warning(
+                        "Conti device %s: connection lost (push listener) "
+                        "— scheduling reconnect",
+                        device_id,
+                    )
+                    self._schedule_reconnect(device_id)
+                    break
+
+                if dps:
+                    _LOGGER.debug(
+                        "Unsolicited push from %s: %s",
+                        device_id,
+                        list(dps.keys()),
+                    )
+                    self._on_dp_update(device_id, dps)
+
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
+
+        _LOGGER.debug("Push listener stopped for %s", device_id)
+
     def _on_disconnect(self, device_id: str) -> None:
         managed = self._devices.get(device_id)
         if not managed:
             return
+        self._stop_listener(device_id)
         was_online = managed.online
         managed.online = False
         self._classify_error(managed, "disconnected")
@@ -682,6 +776,7 @@ class DeviceManager:
                         managed.diag.protocol_version,
                         list(st.keys()),
                     )
+                    self._start_listener(device_id)
                     return
 
                 # Connected but empty — check if TCP is alive
@@ -695,6 +790,7 @@ class DeviceManager:
                         managed.client.last_tx_hex[:32],
                         managed.client.last_rx_hex[:32],
                     )
+                    self._start_listener(device_id)
                     return
 
                 # Connection dropped during probing

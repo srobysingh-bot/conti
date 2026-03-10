@@ -11,9 +11,9 @@ from __future__ import annotations
 from .base_light import STALE_PROTECT_SECONDS  # noqa: F401 (re-export)
 from .dimmer_light import ContiDimmerLight
 
-# Triac dimmers are electrically slower to settle; a slightly wider
+# Triac dimmers are electrically slower to settle; a wider
 # stale-protect window prevents bounce-back after slider adjustments.
-_TRIAC_STALE_PROTECT_SECONDS: float = 3.5
+_TRIAC_STALE_PROTECT_SECONDS: float = 8.0
 
 
 class ContiTriacDimmerLight(ContiDimmerLight):

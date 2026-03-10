@@ -192,8 +192,25 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
     @callback
     def _handle_coordinator_update(self) -> None:
         """Only write HA state when the coordinator brings a real change."""
+        prev_on = self._state_on
         if self._process_coordinator_data():
             self.async_write_ha_state()
+            # Log external power state changes to the HA Activity panel
+            if (
+                self._dp_power
+                and self._state_on != prev_on
+                and not self.coordinator.is_dp_commanded(self._dp_power)
+            ):
+                action = "turned on" if self._state_on else "turned off"
+                self.hass.bus.async_fire(
+                    "logbook_entry",
+                    {
+                        "name": self._entry.title,
+                        "message": f"{action} by external device",
+                        "entity_id": self.entity_id,
+                        "domain": "light",
+                    },
+                )
 
     def _is_stale(self, dp_id: str, incoming: Any) -> bool:
         """Return ``True`` if *incoming* for *dp_id* should be ignored.
@@ -268,6 +285,21 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
                             changed = True
                     except ValueError:
                         pass
+
+        # --- Mode → color_mode (RGB-capable lights) ---
+        if self._dp_mode is not None and self._dp_mode in device_data:
+            raw_mode = device_data[self._dp_mode]
+            if not self._is_stale(self._dp_mode, raw_mode):
+                new_cm = (
+                    ColorMode.RGB
+                    if str(raw_mode) == "colour"
+                    else ColorMode.COLOR_TEMP
+                    if ColorMode.COLOR_TEMP in self._attr_supported_color_modes
+                    else self._attr_color_mode
+                )
+                if self._attr_color_mode != new_cm:
+                    self._attr_color_mode = new_cm
+                    changed = True
 
         return changed
 

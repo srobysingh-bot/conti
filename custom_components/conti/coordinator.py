@@ -11,6 +11,7 @@ device manager or sockets directly.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -22,7 +23,12 @@ try:
 except ImportError:
     from homeassistant.helpers.update_coordinator import UpdateFailed  # type: ignore[no-redef]
 
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN, MAX_CONSECUTIVE_FAILURES
+from .const import (
+    COMMAND_TRACK_WINDOW,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    MAX_CONSECUTIVE_FAILURES,
+)
 from .device_manager import DeviceManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,6 +61,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self.device_manager = device_manager
         self._device_id = device_id
         self._consecutive_failures: int = 0
+
+        # Track DPs commanded via HA so we can label source in activity
+        self._commanded_dps: dict[str, float] = {}  # dp_id → monotonic ts
 
         # Register per-device push callback
         self.device_manager.register_state_callback(
@@ -152,10 +161,29 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         """Called by `DeviceManager` when a device pushes new DPs."""
         if self.data is None:
             self.data = {}
-        self.data[device_id] = dps
+        # Merge — push updates may contain only the changed DPs.
+        existing = self.data.get(device_id, {})
+        existing.update(dps)
+        self.data[device_id] = existing
         self._consecutive_failures = 0
         # Schedule an immediate refresh on listeners (entities)
         self.async_set_updated_data(self.data)
+
+    # -- Activity helpers ----------------------------------------------------
+
+    def is_dp_commanded(self, dp_id: str) -> bool:
+        """Return True if *dp_id* was commanded via HA within the track window."""
+        ts = self._commanded_dps.get(dp_id)
+        return ts is not None and (time.monotonic() - ts) < COMMAND_TRACK_WINDOW
+
+    def mark_dp_commanded(self, dp_id: str) -> None:
+        """Record that *dp_id* was just commanded by HA.
+
+        Lightweight alternative to :meth:`apply_optimistic_update` for
+        platforms that don't use optimistic state but still need correct
+        source labelling in the Activity panel.
+        """
+        self._commanded_dps[dp_id] = time.monotonic()
 
     # -- Diagnostics ---------------------------------------------------------
 
@@ -167,6 +195,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         Called by entity platforms (e.g. switch) after a successful ``set_dp``
         so the UI reflects the new state without waiting for a poll round-trip.
         """
+        # Track the command time so is_dp_commanded labels poll echoes correctly
+        self._commanded_dps[dp_id] = time.monotonic()
+
         if self.data is None:
             self.data = {}
         device_data = self.data.setdefault(device_id, {})

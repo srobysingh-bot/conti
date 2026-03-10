@@ -47,9 +47,8 @@ async def async_setup_entry(
         return
 
     coordinator: ContiCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    dp_map: dict[str, Any] = json.loads(
-        entry.options.get(CONF_DP_MAP) or entry.data.get(CONF_DP_MAP, "{}")
-    )
+    raw = entry.options.get(CONF_DP_MAP) or entry.data.get(CONF_DP_MAP, "{}")
+    dp_map: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else (raw or {})
     device_id: str = entry.data[CONF_DEVICE_ID]
 
     # Collect ALL DPs whose type is "bool" — covers single-switch, multi-gang,
@@ -160,7 +159,26 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     def _handle_coordinator_update(self) -> None:
         """Accept coordinator data but let ``is_on`` filter stale values."""
+        prev_on = self._last_state
         self.async_write_ha_state()
+        # Log external power state changes to the HA Activity panel
+        polled = self._dp_value()
+        if (
+            polled is not None
+            and prev_on is not None
+            and bool(polled) != prev_on
+            and time.monotonic() >= self._cooldown_until
+        ):
+            action = "turned on" if bool(polled) else "turned off"
+            self.hass.bus.async_fire(
+                "logbook_entry",
+                {
+                    "name": self._attr_device_info.get("name", self._device_id),
+                    "message": f"{action} by external device",
+                    "entity_id": self.entity_id,
+                    "domain": "switch",
+                },
+            )
 
     # -- Commands ------------------------------------------------------------
 

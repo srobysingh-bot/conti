@@ -15,8 +15,10 @@ Key design decisions
   parsing or character removal.
 * **Persistent socket** — ``set_socketPersistent(True)`` keeps TCP
   alive between calls; the coordinator polls every 10 s.
-* **No push callbacks** — TinyTuya is pull-based; entities receive
-  updates through the DataUpdateCoordinator polling loop.
+* **Push via receive_nowait** — a background listener in
+  ``DeviceManager`` calls :meth:`receive_nowait` every ~0.5 s to pick
+  up unsolicited status updates (RF remote, physical button) with
+  sub-second latency between coordinator polls.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ class TinyTuyaDevice:
         self._cached_dps: dict[str, Any] = {}
         self._detected_version: str | None = None
         self._protocol_version: str = version if version != "auto" else "3.3"
+        self._monitored_dp_ids: dict[str, None] | None = None
 
         # Diagnostics (kept for compatibility; TinyTuya doesn't expose hex)
         self._last_tx_hex: str = ""
@@ -112,6 +115,15 @@ class TinyTuyaDevice:
         self._last_rx_hex = value
 
     # -- Callback registration (compatibility stubs) -------------------------
+
+    def set_monitored_dp_ids(self, dp_ids: list[str]) -> None:
+        """Tell TinyTuya which DPs to include in status queries.
+
+        Must be called before :meth:`connect`.  The IDs are passed to
+        ``tinytuya.Device.set_dpsUsed()`` so that multi-gang / multi-DP
+        devices report all their DPs, not just the default subset.
+        """
+        self._monitored_dp_ids = {str(dp): None for dp in dp_ids}
 
     def set_dp_callback(self, callback: Callable[..., Any]) -> None:
         """Register a push callback (no-op — TinyTuya is polled)."""
@@ -181,6 +193,17 @@ class TinyTuyaDevice:
         )
         d.set_socketPersistent(True)
         d.set_sendWait(None)  # remove 10ms post-send sleep for faster commands
+
+        # Tell TinyTuya which DPs to request so multi-gang devices
+        # report all channels, not just the default subset.
+        if self._monitored_dp_ids:
+            try:
+                d.set_dpsUsed(self._monitored_dp_ids)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "set_dpsUsed not supported for %s — continuing",
+                    self._device_id,
+                )
 
         try:
             result = d.status()
@@ -412,3 +435,44 @@ class TinyTuyaDevice:
             return dict(self._cached_dps)
 
         return await asyncio.to_thread(_detect)
+
+    # -- Unsolicited data listener -------------------------------------------
+
+    def _receive_nowait_sync(self) -> dict[str, Any] | None:
+        """Non-blocking check for unsolicited data on the persistent socket.
+
+        Sets a short socket timeout (100 ms) so it never stalls other I/O.
+        Returns a DP dict ``{"1": val, ...}`` if an update arrived, else
+        ``None``.
+        """
+        if not self._device or not self._connected:
+            return None
+        sock = getattr(self._device, "socket", None)
+        if sock is None:
+            self._connected = False
+            return None
+
+        old_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(0.1)
+            data = self._device.receive()
+        except Exception:  # noqa: BLE001
+            # Socket error — caller should check ``connected``
+            self._connected = False
+            return None
+        finally:
+            try:
+                if sock.fileno() != -1:
+                    sock.settimeout(old_timeout)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if isinstance(data, dict) and "dps" in data:
+            dps = {str(k): v for k, v in data["dps"].items()}
+            self._cached_dps.update(dps)
+            return dps
+        return None
+
+    async def receive_nowait(self) -> dict[str, Any] | None:
+        """Async wrapper — check for pending unsolicited data."""
+        return await asyncio.to_thread(self._receive_nowait_sync)
