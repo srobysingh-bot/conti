@@ -21,6 +21,23 @@ CONF_DP_MAP: Final = "dp_map"
 CONF_DETECTED_VERSION: Final = "detected_version"
 CONF_DISCOVERED_DPS: Final = "discovered_dps"
 CONF_VERBOSE_LOGGING: Final = "verbose_logging"
+CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
+
+# External-ON correction — individual UI fields
+CONF_EXTERNAL_ON_ENABLED: Final = "external_on_enabled"
+CONF_EXTERNAL_ON_APPLY: Final = "external_on_apply"
+CONF_MORNING_START: Final = "morning_start_time"
+CONF_MORNING_END: Final = "morning_end_time"
+CONF_MORNING_BRIGHTNESS: Final = "morning_brightness_pct"
+CONF_MORNING_KELVIN: Final = "morning_kelvin"
+CONF_DAY_START: Final = "day_start_time"
+CONF_DAY_END: Final = "day_end_time"
+CONF_DAY_BRIGHTNESS: Final = "day_brightness_pct"
+CONF_DAY_KELVIN: Final = "day_kelvin"
+CONF_NIGHT_START: Final = "night_start_time"
+CONF_NIGHT_END: Final = "night_end_time"
+CONF_NIGHT_BRIGHTNESS: Final = "night_brightness_pct"
+CONF_NIGHT_KELVIN: Final = "night_kelvin"
 
 # ---------------------------------------------------------------------------
 # Supported device types

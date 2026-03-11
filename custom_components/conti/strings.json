@@ -33,11 +33,32 @@
     "step": {
       "init": {
         "title": "Conti Device Options",
-        "description": "Edit the DP mapping, toggle debug logging, or re-discover DPs from the device.",
+        "description": "Edit the DP mapping, toggle debug logging, re-discover DPs, or open external-ON profile settings.",
         "data": {
           "dp_map": "DP Mapping (JSON)",
           "verbose_logging": "Enable verbose / debug logging",
-          "rediscover_dps": "Re-discover DPs from device"
+          "rediscover_dps": "Re-discover DPs from device",
+          "configure_external_on": "Configure External-ON Correction Profile"
+        }
+      },
+      "external_on": {
+        "title": "External-ON Correction Profile",
+        "description": "Configure time-based brightness and warmth correction applied when the light is turned on externally (RF remote / wall switch). Set a slot\u2019s brightness to 0 to disable that slot.",
+        "data": {
+          "external_on_enabled": "Enable external-ON correction",
+          "external_on_apply": "Apply correction on external ON",
+          "morning_start_time": "Morning \u2014 start time",
+          "morning_end_time": "Morning \u2014 end time",
+          "morning_brightness_pct": "Morning \u2014 brightness (%)",
+          "morning_kelvin": "Morning \u2014 colour temperature (K)",
+          "day_start_time": "Day \u2014 start time",
+          "day_end_time": "Day \u2014 end time",
+          "day_brightness_pct": "Day \u2014 brightness (%)",
+          "day_kelvin": "Day \u2014 colour temperature (K)",
+          "night_start_time": "Night \u2014 start time",
+          "night_end_time": "Night \u2014 end time",
+          "night_brightness_pct": "Night \u2014 brightness (%)",
+          "night_kelvin": "Night \u2014 colour temperature (K)"
         }
       }
     },

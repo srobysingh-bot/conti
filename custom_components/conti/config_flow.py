@@ -35,12 +35,26 @@ from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 
 from .const import (
     AUTO_DETECT_ORDER,
+    CONF_DAY_BRIGHTNESS,
+    CONF_DAY_END,
+    CONF_DAY_KELVIN,
+    CONF_DAY_START,
     CONF_DETECTED_VERSION,
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
+    CONF_EXTERNAL_ON_APPLY,
+    CONF_EXTERNAL_ON_ENABLED,
     CONF_LOCAL_KEY,
+    CONF_MORNING_BRIGHTNESS,
+    CONF_MORNING_END,
+    CONF_MORNING_KELVIN,
+    CONF_MORNING_START,
+    CONF_NIGHT_BRIGHTNESS,
+    CONF_NIGHT_END,
+    CONF_NIGHT_KELVIN,
+    CONF_NIGHT_START,
     CONF_PROTOCOL_VERSION,
     CONF_VERBOSE_LOGGING,
     DEFAULT_PORT,
@@ -326,19 +340,21 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class ContiOptionsFlow(config_entries.OptionsFlow):
-    """Options flow for Conti — edit DP map, toggle debug, re-discover."""
+    """Options flow for Conti — device settings + external-ON profile."""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._entry = config_entry
+        self._pending_options: dict[str, Any] | None = None
+
+    # -- Init step: device settings + navigate to external-ON ---------------
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Main options step."""
+        """Device settings form with option to configure external-ON."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # Validate DP map
             dp_map_raw = user_input.get(CONF_DP_MAP, "{}")
             try:
                 dp_map = json.loads(dp_map_raw)
@@ -354,7 +370,6 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                 )
                 new_options[CONF_DP_MAP] = json.dumps(dp_map)
 
-                # If re-discover is requested, run DP detection now.
                 if user_input.get("rediscover_dps", False):
                     ok, _, discovered, _ = await _test_device(
                         device_id=self._entry.data[CONF_DEVICE_ID],
@@ -380,9 +395,13 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         )
                         new_options[CONF_DISCOVERED_DPS] = json.dumps(discovered)
 
+                # If user checked "configure external-ON", go to that step
+                if user_input.get("configure_external_on", False):
+                    self._pending_options = new_options
+                    return await self.async_step_external_on()
+
                 return self.async_create_entry(title="", data=new_options)
 
-        # Build defaults from current options / data.
         current_dp_map = (
             self._entry.options.get(CONF_DP_MAP)
             or self._entry.data.get(CONF_DP_MAP, "{}")
@@ -398,7 +417,161 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         CONF_VERBOSE_LOGGING, default=current_verbose
                     ): bool,
                     vol.Optional("rediscover_dps", default=False): bool,
+                    vol.Optional("configure_external_on", default=False): bool,
                 }
             ),
             errors=errors,
         )
+
+    # -- External-ON correction profile (real UI fields) --------------------
+
+    async def async_step_external_on(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Configure per-device time-based external-ON correction."""
+        from homeassistant.helpers.selector import (  # noqa: PLC0415
+            BooleanSelector,
+            NumberSelector,
+            NumberSelectorConfig,
+            NumberSelectorMode,
+            TimeSelector,
+        )
+
+        if user_input is not None:
+            # Start from pending options (from init step) or current options
+            new_options = (
+                dict(self._pending_options)
+                if self._pending_options is not None
+                else dict(self._entry.options)
+            )
+            for key in (
+                CONF_EXTERNAL_ON_ENABLED,
+                CONF_EXTERNAL_ON_APPLY,
+                CONF_MORNING_START,
+                CONF_MORNING_END,
+                CONF_MORNING_BRIGHTNESS,
+                CONF_MORNING_KELVIN,
+                CONF_DAY_START,
+                CONF_DAY_END,
+                CONF_DAY_BRIGHTNESS,
+                CONF_DAY_KELVIN,
+                CONF_NIGHT_START,
+                CONF_NIGHT_END,
+                CONF_NIGHT_BRIGHTNESS,
+                CONF_NIGHT_KELVIN,
+            ):
+                if key in user_input:
+                    new_options[key] = user_input[key]
+            self._pending_options = None
+            return self.async_create_entry(title="", data=new_options)
+
+        opts = self._entry.options
+        has_ct = self._device_supports_color_temp()
+
+        brightness_sel = NumberSelector(
+            NumberSelectorConfig(
+                min=0, max=100, step=1, mode=NumberSelectorMode.SLIDER,
+                unit_of_measurement="%",
+            )
+        )
+        kelvin_sel = NumberSelector(
+            NumberSelectorConfig(
+                min=2000, max=6535, step=50, mode=NumberSelectorMode.SLIDER,
+                unit_of_measurement="K",
+            )
+        )
+        time_sel = TimeSelector()
+        bool_sel = BooleanSelector()
+
+        schema_fields: dict[vol.Optional | vol.Required, Any] = {}
+
+        # -- Toggles --
+        schema_fields[vol.Optional(
+            CONF_EXTERNAL_ON_ENABLED,
+            default=opts.get(CONF_EXTERNAL_ON_ENABLED, False),
+        )] = bool_sel
+        schema_fields[vol.Optional(
+            CONF_EXTERNAL_ON_APPLY,
+            default=opts.get(CONF_EXTERNAL_ON_APPLY, True),
+        )] = bool_sel
+
+        # -- Morning slot --
+        schema_fields[vol.Optional(
+            CONF_MORNING_START,
+            default=opts.get(CONF_MORNING_START, "06:00:00"),
+        )] = time_sel
+        schema_fields[vol.Optional(
+            CONF_MORNING_END,
+            default=opts.get(CONF_MORNING_END, "12:00:00"),
+        )] = time_sel
+        schema_fields[vol.Optional(
+            CONF_MORNING_BRIGHTNESS,
+            default=opts.get(CONF_MORNING_BRIGHTNESS, 70),
+        )] = brightness_sel
+        if has_ct:
+            schema_fields[vol.Optional(
+                CONF_MORNING_KELVIN,
+                default=opts.get(CONF_MORNING_KELVIN, 4000),
+            )] = kelvin_sel
+
+        # -- Day slot --
+        schema_fields[vol.Optional(
+            CONF_DAY_START,
+            default=opts.get(CONF_DAY_START, "12:00:00"),
+        )] = time_sel
+        schema_fields[vol.Optional(
+            CONF_DAY_END,
+            default=opts.get(CONF_DAY_END, "22:00:00"),
+        )] = time_sel
+        schema_fields[vol.Optional(
+            CONF_DAY_BRIGHTNESS,
+            default=opts.get(CONF_DAY_BRIGHTNESS, 100),
+        )] = brightness_sel
+        if has_ct:
+            schema_fields[vol.Optional(
+                CONF_DAY_KELVIN,
+                default=opts.get(CONF_DAY_KELVIN, 5000),
+            )] = kelvin_sel
+
+        # -- Night slot --
+        schema_fields[vol.Optional(
+            CONF_NIGHT_START,
+            default=opts.get(CONF_NIGHT_START, "22:00:00"),
+        )] = time_sel
+        schema_fields[vol.Optional(
+            CONF_NIGHT_END,
+            default=opts.get(CONF_NIGHT_END, "06:00:00"),
+        )] = time_sel
+        schema_fields[vol.Optional(
+            CONF_NIGHT_BRIGHTNESS,
+            default=opts.get(CONF_NIGHT_BRIGHTNESS, 15),
+        )] = brightness_sel
+        if has_ct:
+            schema_fields[vol.Optional(
+                CONF_NIGHT_KELVIN,
+                default=opts.get(CONF_NIGHT_KELVIN, 2700),
+            )] = kelvin_sel
+
+        return self.async_show_form(
+            step_id="external_on",
+            data_schema=vol.Schema(schema_fields),
+        )
+
+    # -- Helpers ------------------------------------------------------------
+
+    def _device_supports_color_temp(self) -> bool:
+        """Return True if the device dp_map contains a color_temp DP."""
+        raw = (
+            self._entry.options.get(CONF_DP_MAP)
+            or self._entry.data.get(CONF_DP_MAP, "{}")
+        )
+        try:
+            dp_map = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, ValueError):
+            return False
+        if not isinstance(dp_map, dict):
+            return False
+        for info in dp_map.values():
+            if isinstance(info, dict) and info.get("key") == "color_temp":
+                return True
+        return False

@@ -29,7 +29,23 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from homeassistant.util import dt as dt_util
+
 from ..const import (
+    CONF_DAY_BRIGHTNESS,
+    CONF_DAY_END,
+    CONF_DAY_KELVIN,
+    CONF_DAY_START,
+    CONF_EXTERNAL_ON_APPLY,
+    CONF_EXTERNAL_ON_ENABLED,
+    CONF_MORNING_BRIGHTNESS,
+    CONF_MORNING_END,
+    CONF_MORNING_KELVIN,
+    CONF_MORNING_START,
+    CONF_NIGHT_BRIGHTNESS,
+    CONF_NIGHT_END,
+    CONF_NIGHT_KELVIN,
+    CONF_NIGHT_START,
     DOMAIN,
     DP_KEY_BRIGHTNESS,
     DP_KEY_COLOR_RGB,
@@ -38,6 +54,7 @@ from ..const import (
     MANUFACTURER,
 )
 from ..coordinator import ContiCoordinator
+from ..external_on_profile import resolve_active_rule
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +117,9 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         # Anti-bounce tracking
         self._last_sent_dps: dict[str, Any] = {}
         self._last_sent_ts: float = 0.0
+
+        # Duplicate-correction guard (monotonic seconds)
+        self._last_correction_ts: float = 0.0
 
         # Cached entity state — authoritative for HA properties.
         self._state_on: bool = False
@@ -217,6 +237,9 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
                         "domain": "light",
                     },
                 )
+                # --- External-ON correction profile ---
+                if self._state_on:
+                    self._maybe_apply_external_on_correction()
 
     def _is_stale(self, dp_id: str, incoming: Any) -> bool:
         """Return ``True`` if *incoming* for *dp_id* should be ignored.
@@ -344,6 +367,103 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
                 except ValueError:
                     pass
         self.async_write_ha_state()
+
+    # -- External-ON correction ----------------------------------------------
+
+    _SLOT_KEYS = (
+        (CONF_MORNING_START, CONF_MORNING_END, CONF_MORNING_BRIGHTNESS, CONF_MORNING_KELVIN),
+        (CONF_DAY_START, CONF_DAY_END, CONF_DAY_BRIGHTNESS, CONF_DAY_KELVIN),
+        (CONF_NIGHT_START, CONF_NIGHT_END, CONF_NIGHT_BRIGHTNESS, CONF_NIGHT_KELVIN),
+    )
+
+    def _build_profile_from_options(self) -> dict[str, Any]:
+        """Build a profile dict from the individual options-flow fields."""
+        opts = self._entry.options
+        if not opts.get(CONF_EXTERNAL_ON_ENABLED, False):
+            return {}
+        if not opts.get(CONF_EXTERNAL_ON_APPLY, True):
+            return {}
+
+        rules: list[dict[str, Any]] = []
+        for start_k, end_k, br_k, kelvin_k in self._SLOT_KEYS:
+            start = opts.get(start_k)
+            end = opts.get(end_k)
+            brightness = opts.get(br_k)
+            if not start or not end or brightness is None or int(brightness) <= 0:
+                continue
+            rule: dict[str, Any] = {
+                "start": start,
+                "end": end,
+                "brightness_pct": int(brightness),
+            }
+            kelvin = opts.get(kelvin_k)
+            if kelvin is not None and int(kelvin) > 0:
+                rule["kelvin"] = int(kelvin)
+            rules.append(rule)
+
+        if not rules:
+            return {}
+        return {"enabled": True, "rules": rules}
+
+    def _maybe_apply_external_on_correction(self) -> None:
+        """Apply time-based correction profile on external power-on.
+
+        Reads per-device options fields each time so that options-flow
+        changes take effect without an integration reload.
+        """
+        # Duplicate-correction guard: ignore rapid re-fires within 5 s.
+        now_mono = time.monotonic()
+        if (now_mono - self._last_correction_ts) < 5.0:
+            return
+
+        profile = self._build_profile_from_options()
+
+        now = dt_util.now()
+        rule = resolve_active_rule(profile, now.hour, now.minute)
+        if rule is None:
+            return
+
+        brightness_pct = rule.get("brightness_pct")
+        if brightness_pct is None:
+            return
+
+        dps: dict[int, Any] = {}
+        optimistic: dict[str, Any] = {}
+
+        if self._dp_brightness:
+            lo, hi = self._dp_range(self._dp_brightness)
+            scaled = int(lo + (float(brightness_pct) / 100) * (hi - lo))
+            dps[int(self._dp_brightness)] = scaled
+            optimistic[self._dp_brightness] = scaled
+
+        kelvin = rule.get("kelvin")
+        if kelvin is not None and self._dp_color_temp:
+            lo, hi = self._dp_range(self._dp_color_temp)
+            frac = max(0.0, min(1.0, (float(kelvin) - 2000) / (6535 - 2000)))
+            ct_val = int(lo + frac * (hi - lo))
+            dps[int(self._dp_color_temp)] = ct_val
+            optimistic[self._dp_color_temp] = ct_val
+
+        # Ensure mode is "white" so brightness/CT DPs take effect.
+        if self._dp_mode and dps:
+            dps[int(self._dp_mode)] = "white"
+            optimistic[self._dp_mode] = "white"
+
+        if not dps:
+            return
+
+        _LOGGER.info(
+            "External-ON correction for %s: brightness=%s%% kelvin=%s",
+            self._device_id,
+            brightness_pct,
+            kelvin,
+        )
+        self._last_correction_ts = time.monotonic()
+        self._track_sent(optimistic)
+        self._apply_optimistic(optimistic)
+        # Bypass debounce — send correction as fast as possible to minimise
+        # the visible flash at firmware-default brightness.
+        self.hass.async_create_task(self._send_immediately(dps))
 
     def _track_sent(self, optimistic: dict[str, Any]) -> None:
         """Record sent DP values for stale-protect."""
