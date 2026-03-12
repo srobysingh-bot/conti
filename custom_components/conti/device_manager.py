@@ -454,7 +454,13 @@ class DeviceManager:
 
         async with managed.lock:
             try:
-                status = await managed.client.status_with_fallback()
+                # Short timeout (2 s) for routine polls on an already-
+                # connected persistent socket so the lock is released
+                # quickly and the push listener is not starved when the
+                # device is slow to answer a DP_QUERY.
+                status = await managed.client.status_with_fallback(
+                    timeout=2.0
+                )
             except Exception as exc:
                 status = None
                 self._classify_error(managed, f"status failed: {exc!r}")
@@ -634,9 +640,9 @@ class DeviceManager:
     async def _listen_loop(self, device_id: str) -> None:
         """Background: poll the persistent socket for unsolicited pushes.
 
-        Runs every ~0.5 s between polls/commands.  When the per-device
+        Runs every ~0.15 s between polls/commands.  When the per-device
         lock is held (command or poll in flight) the loop yields so it
-        never blocks real I/O.  A short 100 ms socket timeout inside
+        never blocks real I/O.  A short 50 ms socket timeout inside
         ``receive_nowait`` keeps each iteration fast.
         """
         managed = self._devices.get(device_id)
@@ -648,7 +654,7 @@ class DeviceManager:
             while self._running and managed.online:
                 # Yield to commands / polls that hold the lock
                 if managed.lock.locked():
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.05)
                     continue
 
                 async with managed.lock:
@@ -679,7 +685,7 @@ class DeviceManager:
                     )
                     self._on_dp_update(device_id, dps)
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.15)
         except asyncio.CancelledError:
             pass
 

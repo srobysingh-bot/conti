@@ -16,9 +16,9 @@ Key design decisions
 * **Persistent socket** — ``set_socketPersistent(True)`` keeps TCP
   alive between calls; the coordinator polls every 10 s.
 * **Push via receive_nowait** — a background listener in
-  ``DeviceManager`` calls :meth:`receive_nowait` every ~0.5 s to pick
+  ``DeviceManager`` calls :meth:`receive_nowait` every ~0.15 s to pick
   up unsolicited status updates (RF remote, physical button) with
-  sub-second latency between coordinator polls.
+  sub-200 ms latency between coordinator polls.
 """
 
 from __future__ import annotations
@@ -266,10 +266,22 @@ class TinyTuyaDevice:
 
     # -- Status queries ------------------------------------------------------
 
-    def _status_sync(self) -> dict[str, Any]:
-        """Synchronous status query — returns DP dict or ``{}``."""
+    def _status_sync(self, timeout: float | None = None) -> dict[str, Any]:
+        """Synchronous status query — returns DP dict or ``{}``.
+
+        Parameters
+        ----------
+        timeout:
+            If given, temporarily lowers ``connection_timeout`` on the
+            underlying tinytuya device so the recv blocks for at most
+            *timeout* seconds.  Restored in ``finally``.
+        """
         if not self._device:
             return {}
+        saved_timeout: float | None = None
+        if timeout is not None:
+            saved_timeout = getattr(self._device, "connection_timeout", None)
+            self._device.connection_timeout = timeout
         try:
             result = self._device.status()
             if isinstance(result, dict) and "dps" in result:
@@ -295,14 +307,19 @@ class TinyTuyaDevice:
             )
             self._connected = False
             return {}
+        finally:
+            if saved_timeout is not None and self._device:
+                self._device.connection_timeout = saved_timeout
 
-    async def status(self) -> dict[str, Any]:
+    async def status(self, timeout: float | None = None) -> dict[str, Any]:
         """Query the device for current DP values."""
-        return await asyncio.to_thread(self._status_sync)
+        return await asyncio.to_thread(self._status_sync, timeout)
 
-    async def status_with_fallback(self) -> dict[str, Any]:
+    async def status_with_fallback(
+        self, timeout: float | None = None
+    ) -> dict[str, Any]:
         """Query status; return cached DPS when the live query is empty."""
-        dps = await self.status()
+        dps = await self.status(timeout=timeout)
         if dps:
             return dps
         return dict(self._cached_dps)
@@ -441,7 +458,7 @@ class TinyTuyaDevice:
     def _receive_nowait_sync(self) -> dict[str, Any] | None:
         """Non-blocking check for unsolicited data on the persistent socket.
 
-        Sets a short socket timeout (100 ms) so it never stalls other I/O.
+        Sets a short socket timeout (50 ms) so it never stalls other I/O.
         Returns a DP dict ``{"1": val, ...}`` if an update arrived, else
         ``None``.
         """
@@ -454,7 +471,7 @@ class TinyTuyaDevice:
 
         old_timeout = sock.gettimeout()
         try:
-            sock.settimeout(0.1)
+            sock.settimeout(0.05)
             data = self._device.receive()
         except Exception:  # noqa: BLE001
             # Socket error — caller should check ``connected``
