@@ -3,18 +3,56 @@
     "step": {
       "user": {
         "title": "Add Tuya Device",
-        "description": "Enter the details for your local Tuya device.  You can find the Device ID and Local Key using the Tuya IoT Platform developer tools.  Protocol version 'Auto' will try 3.3, then 3.4, then 3.5, then 3.1 automatically.",
+        "description": "Enter the device credentials.  You can find the Device ID and Local Key using the Tuya IoT Platform developer tools.  Protocol version will be detected automatically.",
         "data": {
           "name": "Device Name",
           "host": "Device IP Address",
           "device_id": "Device ID",
           "local_key": "Local Key",
-          "protocol_version": "Protocol Version",
-          "device_type": "Device Type",
-          "dp_map": "DP Mapping (JSON)"
+          "port": "Port (default 6668)",
+          "device_type": "Device Type"
         },
         "data_description": {
-          "dp_map": "JSON object mapping DP ids to their role, e.g. {\"1\": {\"key\": \"power\", \"type\": \"bool\"}}.  Leave the default to use auto-detection."
+          "local_key": "16-character key from Tuya IoT Platform"
+        }
+      },
+      "detect": {
+        "title": "Detection Results",
+        "description": "Conti connected to your device and detected:\n\n• Protocol: v{protocol_version}\n• Data points found: {dp_count}\n• Data points mapped: {mapped_count}\n• Device profile: {profile_name}\n• Mapping confidence: {confidence}\n\nYou can proceed with these results, override the protocol version, or use Tuya Cloud to improve the mapping.",
+        "data": {
+          "use_cloud_assist": "Use Tuya Cloud to improve mapping (optional)",
+          "protocol_override": "Protocol version override (advanced)"
+        }
+      },
+      "cloud_assist": {
+        "title": "Tuya Cloud Assist (Optional)",
+        "description": "Provide your Tuya IoT Platform API credentials to fetch the device schema.  This improves DP mapping accuracy.  Leave blank to skip.\n\nCredentials are used only during setup and are NOT stored.",
+        "data": {
+          "tuya_access_id": "Access ID / Client ID",
+          "tuya_access_secret": "Access Secret / Client Secret",
+          "tuya_region": "Data Centre Region"
+        }
+      },
+      "review": {
+        "title": "Review DP Mapping",
+        "description": "Profile: {profile_name} ({confidence} confidence, source: {mapping_source})\n\n{confidence_warning}\n\nDP Mapping:\n```\n{dp_summary}\n```\n\nChoose an action below.",
+        "data": {
+          "action": "Action",
+          "dp_map": "DP Mapping (JSON) \u2014 only used if you choose Manual Edit"
+        }
+      },
+      "pre_learn": {
+        "title": "Guided Learn \u2014 Device Classification",
+        "description": "Conti identified this device as:\n\n**{device_family}**\n\n{classification_reason}\n\nTo complete the mapping, Conti will guide you through {total_steps} step(s):\n\n{action_plan}\n\nAdjust the number of switches/outlets below if incorrect, then click Submit to start learning.",
+        "data": {
+          "gang_count": "Number of switches / outlets (adjust if incorrect)"
+        }
+      },
+      "learn": {
+        "title": "Guided Learn \u2014 Step {step_number} of {total_steps}",
+        "description": "Device: {device_family}\n\n**{instruction}**\n\n{feedback}\n\n{learned_summary}\n{missing_summary}",
+        "data": {
+          "learn_action": "Action"
         }
       }
     },
@@ -26,6 +64,8 @@
       "invalid_auth": "Authentication failed. The local key is likely incorrect.  Verify the 16-character key from the Tuya IoT Platform.",
       "wrong_protocol": "Protocol mismatch. The device rejected all attempted protocol versions (3.3, 3.4, 3.5, 3.1). Check the device firmware version.",
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
+      "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",
+      "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
       "unknown": "An unexpected error occurred."
     }
   },

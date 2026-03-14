@@ -21,6 +21,10 @@ CONF_DP_MAP: Final = "dp_map"
 CONF_DETECTED_VERSION: Final = "detected_version"
 CONF_DISCOVERED_DPS: Final = "discovered_dps"
 CONF_VERBOSE_LOGGING: Final = "verbose_logging"
+CONF_DEVICE_PROFILE: Final = "device_profile"  # profile id from device_profiles.py
+CONF_MAPPING_SOURCE: Final = "mapping_source"  # "auto" | "cloud" | "learn" | "manual"
+CONF_MAPPING_CONFIDENCE: Final = "mapping_confidence"  # 0.0–1.0
+CONF_TUYA_CATEGORY: Final = "tuya_category"  # Tuya product category (e.g. "dj")
 CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
 
 # External-ON correction — individual UI fields

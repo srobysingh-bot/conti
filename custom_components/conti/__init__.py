@@ -28,10 +28,12 @@ from homeassistant.helpers.storage import Store
 from .const import (
     CONF_DETECTED_VERSION,
     CONF_DEVICE_ID,
+    CONF_DEVICE_PROFILE,
     CONF_DEVICE_TYPE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
     CONF_LOCAL_KEY,
+    CONF_MAPPING_SOURCE,
     CONF_PROTOCOL_VERSION,
     CONF_VERBOSE_LOGGING,
     DEFAULT_PORT,
@@ -135,13 +137,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     _LOGGER.info(
-        "Setting up Conti device %s at %s:%d (v%s, key=%s, dp_map keys=%s)",
+        "Setting up Conti device %s at %s:%d (v%s, key=%s, dp_map keys=%s, "
+        "profile=%s, mapping_source=%s)",
         device_id,
         device_config["host"],
         device_config["port"],
         version,
         mask_key(entry.data[CONF_LOCAL_KEY]),
         list(dp_map.keys()) if dp_map else "none",
+        entry.data.get(CONF_DEVICE_PROFILE, "none"),
+        entry.data.get(CONF_MAPPING_SOURCE, "legacy"),
     )
 
     await manager.add_device(device_config)

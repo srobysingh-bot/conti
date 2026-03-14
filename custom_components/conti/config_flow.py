@@ -1,24 +1,31 @@
 """Config flow for the Conti integration.
 
-Presents a single-step form that collects:
-  * Device name, IP, Device ID, Local Key
-  * Protocol version  (auto / 3.1 / 3.3 / 3.4 / 3.5)
-  * Device type       (light / fan / climate / switch / sensor)
-  * DP mapping JSON   (optional — auto-mapped when empty)
+Multi-step onboarding flow:
 
-During submission the flow makes a **live connection** to the device
-to validate credentials before persisting the config entry.
+Step 1 — **Credentials** (``user``)
+    Collects device name, IP, Device ID, Local Key, port, device type.
+    Protocol version defaults to "auto" (no user decision needed).
 
-If protocol version is 'auto', versions 3.3 → 3.4 → 3.5 → 3.1 are tried;
-the first that succeeds is persisted as ``detected_version``.
+Step 2 — **Detection** (``detect``)
+    Connects to the device, auto-detects protocol version, discovers DPs,
+    matches a device profile, scores confidence.  Shows results.
 
-After a successful connection, DP discovery is attempted and heuristic
-auto-mapping produces a merged dp_map stored in the config entry.
+Step 3 — **Cloud Assist** (``cloud_assist``) — *optional*
+    If cloud credentials are provided, fetches Tuya Cloud device schema,
+    translates DP codes to Conti keys, improves the dp_map.
+
+Step 4 — **Review** (``review``)
+    Shows the final dp_map and profile.  User can accept, manually edit,
+    or enter guided learn mode.
+
+Step 5 — **Guided Learn** (``learn``) — *optional*
+    Interactive DP learning for low-confidence mappings.
 
 An options flow is provided for:
   * Toggling verbose/debug logging.
   * Editing the DP map.
   * Re-running DP discovery.
+  * External-ON correction profiles.
 """
 
 from __future__ import annotations
@@ -42,11 +49,14 @@ from .const import (
     CONF_DETECTED_VERSION,
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
+    CONF_DEVICE_PROFILE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
     CONF_LOCAL_KEY,
+    CONF_MAPPING_CONFIDENCE,
+    CONF_MAPPING_SOURCE,
     CONF_MORNING_BRIGHTNESS,
     CONF_MORNING_END,
     CONF_MORNING_KELVIN,
@@ -56,6 +66,7 @@ from .const import (
     CONF_NIGHT_KELVIN,
     CONF_NIGHT_START,
     CONF_PROTOCOL_VERSION,
+    CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
@@ -73,6 +84,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Minimum confidence score to skip guided learn prompt
+_CONFIDENCE_THRESHOLD = 0.6
+
 
 def _mask_key(key: str) -> str:
     """Redact a local key for safe logging — first 2 + last 2 chars."""
@@ -81,7 +95,8 @@ def _mask_key(key: str) -> str:
     return key[:2] + "*" * (len(key) - 4) + key[-2:]
 
 
-def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+def _credentials_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Step 1: Collect device credentials (no protocol/DP fields)."""
     d = defaults or {}
     return vol.Schema(
         {
@@ -93,17 +108,9 @@ def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)
             ): int,
             vol.Required(
-                CONF_PROTOCOL_VERSION,
-                default=d.get(CONF_PROTOCOL_VERSION, DEFAULT_PROTOCOL_VERSION),
-            ): vol.In(SUPPORTED_VERSIONS),
-            vol.Required(
                 CONF_DEVICE_TYPE,
                 default=d.get(CONF_DEVICE_TYPE, DEVICE_TYPE_LIGHT),
             ): vol.In(SUPPORTED_DEVICE_TYPES),
-            vol.Required(
-                CONF_DP_MAP,
-                default=d.get(CONF_DP_MAP, '{"1": {"key": "power", "type": "bool"}}'),
-            ): str,
         }
     )
 
@@ -224,14 +231,40 @@ async def _test_device(
 
 
 # =========================================================================
-# Config flow
+# Config flow — multi-step onboarding
 # =========================================================================
 
 
 class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Conti."""
+    """Handle a multi-step config flow for Conti.
+
+    Flow: user → detect → (cloud_assist?) → review → (learn?) → create
+    """
 
     VERSION = 1
+
+    def __init__(self) -> None:
+        """Initialise per-flow state carried across steps."""
+        super().__init__()
+        # Accumulated data across steps
+        self._flow_data: dict[str, Any] = {}
+        self._detected_version: str | None = None
+        self._discovered_dps: dict[str, Any] = {}
+        self._auto_dp_map: dict[str, Any] = {}
+        self._cloud_dp_map: dict[str, Any] = {}
+        self._profile_dp_map: dict[str, Any] = {}
+        self._final_dp_map: dict[str, Any] = {}
+        self._matched_profile: dict[str, Any] | None = None
+        self._confidence: float = 0.0
+        self._mapping_source: str = "auto"
+        self._tuya_category: str | None = None
+        self._learn_session: Any = None
+        self._learn_steps: list[dict[str, Any]] = []
+        self._learn_step_idx: int = 0
+        self._device_family: str = "unknown"
+        self._gang_count: int = 0
+        self._family_reason: str = ""
+        self._learn_feedback: str = ""
 
     # -- Options flow entry point -------------------------------------------
 
@@ -242,95 +275,743 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Return the options flow handler."""
         return ContiOptionsFlow(config_entry)
 
-    # -- User step ----------------------------------------------------------
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 1: Credentials
+    # ═══════════════════════════════════════════════════════════════════
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Handle the initial step — device details form."""
+        """Step 1 — collect device credentials."""
         _LOGGER.debug("async_step_user called (user_input=%s)", user_input is not None)
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # ---- Validate DP map JSON ------------------------------------
-            try:
-                user_dp_map = json.loads(user_input[CONF_DP_MAP])
-                if not isinstance(user_dp_map, dict):
-                    raise ValueError  # noqa: TRY301
-            except (json.JSONDecodeError, ValueError):
-                errors[CONF_DP_MAP] = "invalid_dp_map"
+            # Ensure device isn't already configured
+            await self.async_set_unique_id(user_input[CONF_DEVICE_ID])
+            self._abort_if_unique_id_configured()
 
-            if not errors:
-                # ---- Ensure device isn't already configured --------------
-                await self.async_set_unique_id(user_input[CONF_DEVICE_ID])
-                self._abort_if_unique_id_configured()
+            # Store credentials for subsequent steps
+            self._flow_data = {
+                CONF_NAME: user_input[CONF_NAME],
+                CONF_HOST: user_input[CONF_HOST],
+                CONF_DEVICE_ID: user_input[CONF_DEVICE_ID],
+                CONF_LOCAL_KEY: user_input[CONF_LOCAL_KEY],
+                CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
+                CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
+            }
 
-                selected_version: str = user_input[CONF_PROTOCOL_VERSION]
-                _LOGGER.debug(
-                    "Config flow: selected protocol '%s' for %s (key=%s)",
-                    selected_version,
-                    user_input[CONF_DEVICE_ID],
-                    _mask_key(user_input[CONF_LOCAL_KEY]),
-                )
-
-                # ---- Connection test + DP discovery ----------------------
-                ok, detected_version, discovered_dps, err = await _test_device(
-                    device_id=user_input[CONF_DEVICE_ID],
-                    ip=user_input[CONF_HOST],
-                    local_key=user_input[CONF_LOCAL_KEY],
-                    version=selected_version,
-                    port=user_input.get(CONF_PORT, DEFAULT_PORT),
-                )
-
-                if not ok:
-                    errors["base"] = err or "cannot_connect"
-
-            if not errors:
-                # ---- Auto DP mapping + merge -----------------------------
-                from .dp_mapping import auto_map_dps, merge_dp_maps  # noqa: PLC0415
-
-                device_type = user_input[CONF_DEVICE_TYPE]
-                auto_dp_map: dict[str, Any] = {}
-                if discovered_dps:
-                    auto_dp_map = auto_map_dps(device_type, discovered_dps)
-                    _LOGGER.info(
-                        "Config flow: auto-mapped %d DP(s) for %s (%s)",
-                        len(auto_dp_map),
-                        user_input[CONF_DEVICE_ID],
-                        device_type,
-                    )
-
-                final_dp_map = merge_dp_maps(user_dp_map, auto_dp_map)
-
-                # ---- Build entry data ------------------------------------
-                entry_data: dict[str, Any] = {
-                    CONF_DEVICE_ID: user_input[CONF_DEVICE_ID],
-                    CONF_HOST: user_input[CONF_HOST],
-                    CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
-                    CONF_LOCAL_KEY: user_input[CONF_LOCAL_KEY],
-                    CONF_PROTOCOL_VERSION: selected_version,
-                    CONF_DEVICE_TYPE: device_type,
-                    CONF_DP_MAP: json.dumps(final_dp_map),
-                }
-
-                # Persist auto-detected version so future connects skip
-                # re-detection.
-                if selected_version == "auto" and detected_version:
-                    entry_data[CONF_DETECTED_VERSION] = detected_version
-
-                # Persist raw discovered DPS for diagnostics / re-mapping.
-                if discovered_dps:
-                    entry_data[CONF_DISCOVERED_DPS] = json.dumps(discovered_dps)
-
-                return self.async_create_entry(
-                    title=user_input[CONF_NAME],
-                    data=entry_data,
-                )
+            # Proceed to auto-detection step
+            return await self.async_step_detect()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_user_schema(user_input),
+            data_schema=_credentials_schema(user_input),
             errors=errors,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 2: Auto-detect protocol + discover DPs + match profile
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_detect(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 2 — auto-detect everything and show results.
+
+        First call (user_input=None): run detection, show form.
+        Second call (user_input set): process form, route forward.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # ── Form submission: route to cloud or review ──
+            proto_override = user_input.get("protocol_override", "auto")
+            if proto_override != "auto" and proto_override != self._detected_version:
+                # Re-test with specific version
+                ok, detected, discovered, err = await _test_device(
+                    device_id=self._flow_data[CONF_DEVICE_ID],
+                    ip=self._flow_data[CONF_HOST],
+                    local_key=self._flow_data[CONF_LOCAL_KEY],
+                    version=proto_override,
+                    port=self._flow_data[CONF_PORT],
+                )
+                if ok:
+                    self._detected_version = detected
+                    if discovered:
+                        self._discovered_dps = discovered
+
+            if user_input.get("use_cloud_assist", False):
+                return await self.async_step_cloud_assist()
+
+            return await self.async_step_review()
+
+        # ── First call: run detection ──
+        ok, detected_version, discovered_dps, err = await _test_device(
+            device_id=self._flow_data[CONF_DEVICE_ID],
+            ip=self._flow_data[CONF_HOST],
+            local_key=self._flow_data[CONF_LOCAL_KEY],
+            version="auto",
+            port=self._flow_data[CONF_PORT],
+        )
+
+        if not ok:
+            errors["base"] = err or "cannot_connect"
+            # Fall back to credentials with error
+            return self.async_show_form(
+                step_id="user",
+                data_schema=_credentials_schema(self._flow_data),
+                errors=errors,
+            )
+
+        self._detected_version = detected_version
+        self._discovered_dps = discovered_dps
+
+        # ── Heuristic auto-mapping ──
+        from .dp_mapping import auto_map_dps  # noqa: PLC0415
+
+        device_type = self._flow_data[CONF_DEVICE_TYPE]
+        if discovered_dps:
+            self._auto_dp_map = auto_map_dps(device_type, discovered_dps)
+
+        # ── Profile matching ──
+        from .device_profiles import (  # noqa: PLC0415
+            best_profile_for_dps,
+            dp_map_from_profile,
+        )
+
+        profile, confidence = best_profile_for_dps(
+            discovered_dps,
+            device_type=device_type,
+        )
+        self._matched_profile = profile
+        self._confidence = confidence
+
+        if profile:
+            self._profile_dp_map = dp_map_from_profile(
+                profile, discovered_dps, confidence
+            )
+
+        # ── Build merged map: heuristic < profile ──
+        from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+
+        self._final_dp_map = merge_all_dp_maps(
+            self._auto_dp_map,
+            self._profile_dp_map,
+        )
+        self._mapping_source = "auto"
+
+        _LOGGER.info(
+            "Config flow detect: device=%s v%s, %d DPs discovered, "
+            "profile=%s (confidence=%.2f), auto-map=%d, profile-map=%d",
+            self._flow_data[CONF_DEVICE_ID],
+            detected_version,
+            len(discovered_dps),
+            profile["id"] if profile else "none",
+            confidence,
+            len(self._auto_dp_map),
+            len(self._profile_dp_map),
+        )
+
+        # Show detection results with options
+        profile_name = profile["name"] if profile else "No match"
+        confidence_pct = int(confidence * 100)
+        dp_count = len(self._final_dp_map)
+
+        description_placeholders = {
+            "protocol_version": detected_version or "unknown",
+            "dp_count": str(len(discovered_dps)),
+            "mapped_count": str(dp_count),
+            "profile_name": profile_name,
+            "confidence": f"{confidence_pct}%",
+        }
+
+        return self.async_show_form(
+            step_id="detect",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("use_cloud_assist", default=False): bool,
+                    vol.Optional(
+                        "protocol_override",
+                        default="auto",
+                    ): vol.In(SUPPORTED_VERSIONS),
+                }
+            ),
+            description_placeholders=description_placeholders,
+            errors=errors,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 3: Cloud-assisted schema mapping (optional)
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_cloud_assist(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 3 — optional cloud-assisted DP schema fetch."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            access_id = user_input.get("tuya_access_id", "").strip()
+            access_secret = user_input.get("tuya_access_secret", "").strip()
+            region = user_input.get("tuya_region", "eu")
+
+            if not access_id or not access_secret:
+                # Skip cloud — proceed to review with local-only mapping
+                return await self.async_step_review()
+
+            # Fetch cloud schema
+            try:
+                from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+                helper = TuyaCloudSchemaHelper(access_id, access_secret, region)
+                schema = await helper.get_device_schema(
+                    self._flow_data[CONF_DEVICE_ID]
+                )
+
+                if schema:
+                    cloud_map, category, type_hint = helper.schema_to_dp_map(schema)
+                    if cloud_map:
+                        self._cloud_dp_map = cloud_map
+                        self._tuya_category = category
+                        self._mapping_source = "cloud"
+
+                        # Re-run profile matching with category hint
+                        from .device_profiles import (  # noqa: PLC0415
+                            best_profile_for_dps,
+                            dp_map_from_profile,
+                        )
+                        profile, confidence = best_profile_for_dps(
+                            self._discovered_dps,
+                            device_type=self._flow_data[CONF_DEVICE_TYPE],
+                            tuya_category=category,
+                        )
+                        if profile and confidence > self._confidence:
+                            self._matched_profile = profile
+                            self._confidence = confidence
+                            self._profile_dp_map = dp_map_from_profile(
+                                profile, self._discovered_dps, confidence
+                            )
+
+                        # Re-merge with cloud as highest-priority source
+                        from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+                        self._final_dp_map = merge_all_dp_maps(
+                            self._auto_dp_map,
+                            self._profile_dp_map,
+                            self._cloud_dp_map,
+                        )
+
+                        _LOGGER.info(
+                            "Cloud schema: %d DPs mapped (category=%s)",
+                            len(cloud_map),
+                            category,
+                        )
+                    else:
+                        _LOGGER.info("Cloud schema returned no mappable DPs")
+                else:
+                    errors["base"] = "cloud_fetch_failed"
+
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Cloud schema fetch failed")
+                errors["base"] = "cloud_fetch_failed"
+
+            if not errors:
+                return await self.async_step_review()
+
+        return self.async_show_form(
+            step_id="cloud_assist",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("tuya_access_id", default=""): str,
+                    vol.Optional("tuya_access_secret", default=""): str,
+                    vol.Optional("tuya_region", default="eu"): vol.In(
+                        {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 4: Review mapping and confirm
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_review(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 4 — review and confirm the DP mapping."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            action = user_input.get("action", "accept")
+
+            if action == "learn":
+                return await self.async_step_pre_learn()
+
+            if action == "edit":
+                # User wants manual edit — validate JSON
+                dp_map_raw = user_input.get(CONF_DP_MAP, "{}")
+                try:
+                    user_map = json.loads(dp_map_raw)
+                    if not isinstance(user_map, dict):
+                        raise ValueError
+                except (json.JSONDecodeError, ValueError):
+                    errors[CONF_DP_MAP] = "invalid_dp_map"
+                    # Fall through to re-show form
+                else:
+                    self._final_dp_map = user_map
+                    self._mapping_source = "manual"
+                    self._confidence = 1.0
+
+            if action == "accept" and not self._final_dp_map:
+                errors["base"] = "empty_dp_map"
+
+            if not errors and action in ("accept", "edit"):
+                return self._create_config_entry()
+
+        # Build description of what was detected
+        profile_name = self._matched_profile["name"] if self._matched_profile else "None"
+        confidence_pct = int(self._confidence * 100)
+        dp_summary = json.dumps(self._final_dp_map, indent=2)
+
+        # Confidence warning for the user
+        confidence_warning = ""
+        if not self._final_dp_map:
+            confidence_warning = (
+                "\u26a0 No data points have been mapped. "
+                "The device will not create any entities. "
+                "Use Guided Learn or Manual Edit to add mappings."
+            )
+        elif self._confidence < 0.4:
+            confidence_warning = (
+                "\u26a0 Mapping confidence is low. "
+                "Some data points may be missing or incorrectly assigned. "
+                "Guided Learn is recommended to improve accuracy."
+            )
+        elif self._confidence < _CONFIDENCE_THRESHOLD:
+            confidence_warning = (
+                "Mapping confidence is moderate. "
+                "You can accept or use Guided Learn to verify."
+            )
+
+        # Always show all action choices
+        default_action = (
+            "accept" if self._confidence >= _CONFIDENCE_THRESHOLD
+            else "learn"
+        )
+        action_choices: dict[str, str] = {
+            "accept": "Accept and finish",
+            "learn": (
+                "Guided learn (recommended)"
+                if self._confidence < _CONFIDENCE_THRESHOLD
+                else "Guided learn"
+            ),
+            "edit": "Manual edit (advanced)",
+        }
+
+        description_placeholders = {
+            "profile_name": profile_name,
+            "confidence": f"{confidence_pct}%",
+            "mapping_source": self._mapping_source,
+            "dp_summary": dp_summary,
+            "confidence_warning": confidence_warning,
+        }
+
+        return self.async_show_form(
+            step_id="review",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action", default=default_action): vol.In(
+                        action_choices
+                    ),
+                    vol.Optional(
+                        CONF_DP_MAP,
+                        default=json.dumps(self._final_dp_map),
+                    ): str,
+                }
+            ),
+            description_placeholders=description_placeholders,
+            errors=errors,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 5: Pre-learn — device classification + action plan
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_pre_learn(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show device classification and prepare guided learn."""
+        from .guided_learn import (  # noqa: PLC0415
+            classify_device_family,
+            generate_learn_steps,
+            build_action_plan,
+            family_display_name,
+            FAMILY_MULTI_GANG_SWITCH,
+            FAMILY_POWER_STRIP,
+        )
+
+        if user_input is not None:
+            # User confirmed — adjust gang count if provided
+            if "gang_count" in user_input:
+                self._gang_count = int(user_input["gang_count"])
+
+            # Generate steps and proceed to learn
+            self._learn_steps = generate_learn_steps(
+                self._device_family, self._gang_count
+            )
+            self._learn_step_idx = 0
+            self._learn_session = None  # Fresh session
+            self._learn_feedback = ""
+            return await self.async_step_learn()
+
+        # First call: classify device
+        family, gangs, reason = classify_device_family(
+            self._discovered_dps,
+            self._flow_data[CONF_DEVICE_TYPE],
+            profile=self._matched_profile,
+            tuya_category=self._tuya_category,
+        )
+        self._device_family = family
+        self._gang_count = gangs
+        self._family_reason = reason
+
+        # Generate steps for the action plan preview
+        steps = generate_learn_steps(family, gangs)
+        action_plan = build_action_plan(steps)
+        display_name = family_display_name(family, gangs)
+
+        description_placeholders = {
+            "device_family": display_name,
+            "classification_reason": reason,
+            "action_plan": action_plan,
+            "total_steps": str(len(steps)),
+        }
+
+        schema_dict: dict[Any, Any] = {}
+        if family in (FAMILY_MULTI_GANG_SWITCH, FAMILY_POWER_STRIP):
+            schema_dict[vol.Required("gang_count", default=gangs)] = vol.All(
+                int, vol.Range(min=1, max=8)
+            )
+
+        return self.async_show_form(
+            step_id="pre_learn",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders=description_placeholders,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 6: Guided learn mode (interactive)
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_learn(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Step 6 — interactive guided learn for DP mapping."""
+        from .guided_learn import (  # noqa: PLC0415
+            LearnSession,
+            family_display_name,
+            validate_evidence,
+            describe_missing,
+            get_required_roles,
+        )
+
+        # Initialise learn session on first entry
+        if self._learn_session is None:
+            baseline = dict(self._discovered_dps)
+            if not baseline:
+                _, _, baseline_dps, _ = await _test_device(
+                    device_id=self._flow_data[CONF_DEVICE_ID],
+                    ip=self._flow_data[CONF_HOST],
+                    local_key=self._flow_data[CONF_LOCAL_KEY],
+                    version=self._detected_version or "auto",
+                    port=self._flow_data[CONF_PORT],
+                )
+                baseline = baseline_dps or {}
+            self._learn_session = LearnSession(baseline)
+
+        session: LearnSession = self._learn_session
+
+        if user_input is not None:
+            action = user_input.get("learn_action", "check")
+
+            if action == "finish":
+                # Merge whatever was learned and return to review
+                from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+                self._final_dp_map = merge_all_dp_maps(
+                    self._final_dp_map,
+                    session.learned_map,
+                )
+                self._mapping_source = "learn"
+                # Update confidence based on evidence completeness
+                required = get_required_roles(
+                    self._device_family, self._gang_count
+                )
+                if required:
+                    matched = len(
+                        [r for r in required if r in session.learned_roles]
+                    )
+                    learn_conf = matched / len(required)
+                    self._confidence = max(self._confidence, learn_conf)
+                else:
+                    self._confidence = max(self._confidence, 0.7)
+                return await self.async_step_review()
+
+            if action == "skip":
+                self._learn_step_idx += 1
+                self._learn_feedback = "Skipped previous step."
+
+            elif action == "check":
+                # Read fresh DPS and find changes
+                _, _, fresh_dps, _ = await _test_device(
+                    device_id=self._flow_data[CONF_DEVICE_ID],
+                    ip=self._flow_data[CONF_HOST],
+                    local_key=self._flow_data[CONF_LOCAL_KEY],
+                    version=self._detected_version or "auto",
+                    port=self._flow_data[CONF_PORT],
+                )
+                if fresh_dps:
+                    changes = session.apply_diff(fresh_dps)
+                    if changes and len(changes) == 1:
+                        dp_id, _old, new_val = changes[0]
+                        current = self._learn_steps[self._learn_step_idx]
+                        session.set_pending_role(
+                            current["role"], current["type"]
+                        )
+                        session.assign_change(dp_id, new_val)
+                        self._learn_feedback = (
+                            f"\u2705 Detected! DP {dp_id} assigned to "
+                            f"'{current['role']}'."
+                        )
+                        self._learn_step_idx += 1
+                        _LOGGER.info(
+                            "Learn: DP %s changed \u2192 assigned to '%s'",
+                            dp_id,
+                            current["role"],
+                        )
+                    elif changes and len(changes) > 1:
+                        # Multiple DPs changed — pick the best one
+                        # based on expected type and change magnitude.
+                        current = self._learn_steps[self._learn_step_idx]
+                        expected_type = current["type"]
+
+                        # Filter by expected value type
+                        type_matches = []
+                        for dp_id, old_val, new_val in changes:
+                            if isinstance(new_val, bool):
+                                val_type = "bool"
+                            elif isinstance(new_val, (int, float)):
+                                val_type = "int"
+                            else:
+                                val_type = "str"
+                            if val_type == expected_type:
+                                type_matches.append(
+                                    (dp_id, old_val, new_val)
+                                )
+
+                        # Exclude already-learned DPs
+                        unlearned = [
+                            c for c in type_matches
+                            if c[0] not in session.learned_map
+                        ]
+                        candidates = unlearned if unlearned else type_matches
+
+                        if len(candidates) == 1:
+                            dp_id, _old, new_val = candidates[0]
+                            session.set_pending_role(
+                                current["role"], current["type"]
+                            )
+                            session.assign_change(dp_id, new_val)
+                            self._learn_feedback = (
+                                f"\u2705 Detected! DP {dp_id} assigned to "
+                                f"'{current['role']}'."
+                            )
+                            self._learn_step_idx += 1
+                            _LOGGER.info(
+                                "Learn: DP %s \u2192 '%s' "
+                                "(filtered from %d changes)",
+                                dp_id,
+                                current["role"],
+                                len(changes),
+                            )
+                        elif (
+                            len(candidates) > 1
+                            and expected_type == "int"
+                        ):
+                            # Multiple int changes: pick largest
+                            # absolute change (the user was asked to
+                            # change one specific setting).
+                            def _delta(
+                                entry: tuple[str, Any, Any],
+                            ) -> float:
+                                _, ov, nv = entry
+                                try:
+                                    return abs(
+                                        float(nv) - float(ov or 0)
+                                    )
+                                except (TypeError, ValueError):
+                                    return 0.0
+
+                            best = max(candidates, key=_delta)
+                            dp_id, _old, new_val = best
+                            session.set_pending_role(
+                                current["role"], current["type"]
+                            )
+                            session.assign_change(dp_id, new_val)
+                            self._learn_feedback = (
+                                f"\u2705 Detected! DP {dp_id} assigned "
+                                f"to '{current['role']}' "
+                                f"(picked by largest change "
+                                f"from {len(changes)} changes)."
+                            )
+                            self._learn_step_idx += 1
+                            _LOGGER.info(
+                                "Learn: DP %s \u2192 '%s' "
+                                "(largest delta, %d candidates)",
+                                dp_id,
+                                current["role"],
+                                len(candidates),
+                            )
+                        else:
+                            self._learn_feedback = (
+                                f"\u26a0 {len(changes)} data points "
+                                f"changed at once. Try changing "
+                                f"ONLY ONE thing at a time, "
+                                f"then check again."
+                            )
+                            _LOGGER.info(
+                                "Learn: %d DPs changed "
+                                "simultaneously \u2014 ambiguous",
+                                len(changes),
+                            )
+                    else:
+                        self._learn_feedback = (
+                            "\u26a0 No change detected. Make sure you "
+                            "performed the action, wait 2 seconds, "
+                            "and try again."
+                        )
+                else:
+                    self._learn_feedback = (
+                        "\u26a0 Could not read device state. "
+                        "Check that the device is still reachable."
+                    )
+
+        # Check if we've gone through all learn steps
+        if self._learn_step_idx >= len(self._learn_steps):
+            from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+            self._final_dp_map = merge_all_dp_maps(
+                self._final_dp_map,
+                session.learned_map,
+            )
+            self._mapping_source = "learn"
+            required = get_required_roles(
+                self._device_family, self._gang_count
+            )
+            if required:
+                matched = len(
+                    [r for r in required if r in session.learned_roles]
+                )
+                learn_conf = matched / len(required)
+                self._confidence = max(self._confidence, learn_conf)
+            else:
+                self._confidence = max(self._confidence, 0.7)
+            return await self.async_step_review()
+
+        # Show current learn instruction
+        current_step = self._learn_steps[self._learn_step_idx]
+        session.set_pending_role(current_step["role"], current_step["type"])
+
+        # Build progress info
+        _ev_ok, missing_roles = validate_evidence(
+            self._device_family,
+            session.learned_roles,
+            self._gang_count,
+        )
+        missing_text = describe_missing(missing_roles, self._device_family)
+
+        learned_summary = ""
+        if session.learned_count > 0:
+            parts = [
+                f"{info['key']} (DP {dp})"
+                for dp, info in session.learned_map.items()
+            ]
+            learned_summary = (
+                f"Learned {session.learned_count}: " + ", ".join(parts)
+            )
+
+        display_name = family_display_name(
+            self._device_family, self._gang_count
+        )
+
+        description_placeholders = {
+            "device_family": display_name,
+            "instruction": current_step["instruction"],
+            "step_number": str(self._learn_step_idx + 1),
+            "total_steps": str(len(self._learn_steps)),
+            "feedback": self._learn_feedback,
+            "learned_summary": learned_summary,
+            "missing_summary": missing_text,
+        }
+
+        # Build action choices
+        actions: dict[str, str] = {
+            "check": "I did it \u2014 check for changes",
+        }
+        if not current_step.get("required", True):
+            actions["skip"] = "Skip this step (optional)"
+        else:
+            actions["skip"] = "Skip this step"
+        actions["finish"] = "Finish learning and review"
+
+        return self.async_show_form(
+            step_id="learn",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("learn_action", default="check"): vol.In(
+                        actions
+                    ),
+                }
+            ),
+            description_placeholders=description_placeholders,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Entry creation helper
+    # ═══════════════════════════════════════════════════════════════════
+
+    def _create_config_entry(self) -> config_entries.ConfigFlowResult:
+        """Build and persist the config entry from accumulated flow data."""
+        entry_data: dict[str, Any] = {
+            CONF_DEVICE_ID: self._flow_data[CONF_DEVICE_ID],
+            CONF_HOST: self._flow_data[CONF_HOST],
+            CONF_PORT: self._flow_data.get(CONF_PORT, DEFAULT_PORT),
+            CONF_LOCAL_KEY: self._flow_data[CONF_LOCAL_KEY],
+            CONF_PROTOCOL_VERSION: "auto",
+            CONF_DEVICE_TYPE: self._flow_data[CONF_DEVICE_TYPE],
+            CONF_DP_MAP: json.dumps(self._final_dp_map),
+            CONF_MAPPING_SOURCE: self._mapping_source,
+            CONF_MAPPING_CONFIDENCE: self._confidence,
+        }
+
+        # Persist auto-detected version
+        if self._detected_version:
+            entry_data[CONF_DETECTED_VERSION] = self._detected_version
+
+        # Persist raw discovered DPS for diagnostics / re-mapping
+        if self._discovered_dps:
+            entry_data[CONF_DISCOVERED_DPS] = json.dumps(self._discovered_dps)
+
+        # Persist profile ID
+        if self._matched_profile:
+            entry_data[CONF_DEVICE_PROFILE] = self._matched_profile["id"]
+
+        # Persist Tuya category if from cloud
+        if self._tuya_category:
+            entry_data[CONF_TUYA_CATEGORY] = self._tuya_category
+
+        return self.async_create_entry(
+            title=self._flow_data[CONF_NAME],
+            data=entry_data,
         )
 
 

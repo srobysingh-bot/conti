@@ -218,3 +218,17 @@ def merge_dp_maps(
     merged = dict(auto_map)
     merged.update(user_map)
     return merged
+
+
+def merge_all_dp_maps(
+    *maps: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge multiple dp_maps.  Later maps override earlier ones.
+
+    Typical priority: auto-heuristic < profile < cloud-schema < user-manual.
+    """
+    result: dict[str, Any] = {}
+    for m in maps:
+        if m:
+            result.update(m)
+    return result
