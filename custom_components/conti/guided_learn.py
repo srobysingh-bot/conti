@@ -130,7 +130,9 @@ def _family_from_profile(profile: dict[str, Any]) -> tuple[str, int]:
 
     dt = profile.get("device_type", "")
     if dt == "light":
-        return FAMILY_WHITE_LIGHT, 0
+        # Generic "light" profile metadata alone is too weak to force a
+        # white-only classification; defer to category/DPS shape.
+        return FAMILY_UNKNOWN, 0
     if dt == "switch":
         return FAMILY_SINGLE_SWITCH, 1
     return FAMILY_UNKNOWN, 0

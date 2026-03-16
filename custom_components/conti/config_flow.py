@@ -1,25 +1,30 @@
 """Config flow for the Conti integration.
 
-Multi-step onboarding flow:
+Two onboarding paths are provided:
 
-Step 1 — **Credentials** (``user``)
-    Collects device name, IP, Device ID, Local Key, port, device type.
-    Protocol version defaults to "auto" (no user decision needed).
+Cloud-assisted path (recommended)
+    Step 1  (``user``)               — device name, IP, type, choose mode.
+    Step 2a (``cloud_credentials``)  — Tuya API credentials; Conti fetches
+                                       all linked devices and auto-fills
+                                       Device ID and Local Key.
+    Step 2b (``cloud_pick_device``)  — select device when multiple are found.
+    Step 3  (``detect``)             — auto-detect protocol + DP discovery.
+    Step 4  (``cloud_assist``)       — (optional) refine DP mapping via cloud.
+    Step 5  (``review``)             — review mapping, accept/edit/learn.
+    Step 6  (``learn``)              — (optional) guided interactive learning.
 
-Step 2 — **Detection** (``detect``)
-    Connects to the device, auto-detects protocol version, discovers DPs,
-    matches a device profile, scores confidence.  Shows results.
+Manual path (advanced fallback)
+    Step 1  (``user``)               — device name, IP, type, choose mode.
+    Step 2  (``manual_credentials``) — Device ID and Local Key entered by user.
+    Step 3  (``detect``)             — auto-detect protocol + DP discovery.
+    Step 4  (``cloud_assist``)       — (optional) refine DP mapping via cloud.
+    Step 5  (``review``)             — review mapping, accept/edit/learn.
+    Step 6  (``learn``)              — (optional) guided interactive learning.
 
-Step 3 — **Cloud Assist** (``cloud_assist``) — *optional*
-    If cloud credentials are provided, fetches Tuya Cloud device schema,
-    translates DP codes to Conti keys, improves the dp_map.
-
-Step 4 — **Review** (``review``)
-    Shows the final dp_map and profile.  User can accept, manually edit,
-    or enter guided learn mode.
-
-Step 5 — **Guided Learn** (``learn``) — *optional*
-    Interactive DP learning for low-confidence mappings.
+Runtime
+~~~~~~~
+Cloud is used **only** during onboarding.  All runtime communication is
+local-only.  Existing config entries continue to work unchanged.
 
 An options flow is provided for:
   * Toggling verbose/debug logging.
@@ -31,6 +36,7 @@ An options flow is provided for:
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 from typing import Any
@@ -95,15 +101,13 @@ def _mask_key(key: str) -> str:
     return key[:2] + "*" * (len(key) - 4) + key[-2:]
 
 
-def _credentials_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
-    """Step 1: Collect device credentials (no protocol/DP fields)."""
+def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Step 1: basic info + choose onboarding path (no device_id/local_key)."""
     d = defaults or {}
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=d.get(CONF_NAME, "")): str,
             vol.Required(CONF_HOST, default=d.get(CONF_HOST, "")): str,
-            vol.Required(CONF_DEVICE_ID, default=d.get(CONF_DEVICE_ID, "")): str,
-            vol.Required(CONF_LOCAL_KEY, default=d.get(CONF_LOCAL_KEY, "")): str,
             vol.Optional(
                 CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)
             ): int,
@@ -111,6 +115,50 @@ def _credentials_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                 CONF_DEVICE_TYPE,
                 default=d.get(CONF_DEVICE_TYPE, DEVICE_TYPE_LIGHT),
             ): vol.In(SUPPORTED_DEVICE_TYPES),
+            vol.Required(
+                "onboarding_mode",
+                default=d.get("onboarding_mode", "cloud_assisted"),
+            ): vol.In(
+                {
+                    "cloud_assisted": "Cloud-assisted (recommended)",
+                    "manual": "Manual / Advanced",
+                }
+            ),
+        }
+    )
+
+
+def _cloud_credentials_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Cloud path step 2: Tuya API credentials."""
+    d = defaults or {}
+    return vol.Schema(
+        {
+            vol.Required(
+                "tuya_access_id", default=d.get("tuya_access_id", "")
+            ): str,
+            vol.Required(
+                "tuya_access_secret", default=d.get("tuya_access_secret", "")
+            ): str,
+            vol.Required(
+                "tuya_region", default=d.get("tuya_region", "eu")
+            ): vol.In(
+                {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
+            ),
+        }
+    )
+
+
+def _manual_credentials_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Manual path step 2: Device ID and Local Key."""
+    d = defaults or {}
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_DEVICE_ID, default=d.get(CONF_DEVICE_ID, "")
+            ): str,
+            vol.Required(
+                CONF_LOCAL_KEY, default=d.get(CONF_LOCAL_KEY, "")
+            ): str,
         }
     )
 
@@ -265,6 +313,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._gang_count: int = 0
         self._family_reason: str = ""
         self._learn_feedback: str = ""
+        self._cloud_auth: dict[str, str] = {}
+        self._cloud_candidates: list[dict[str, Any]] = []
 
     # -- Options flow entry point -------------------------------------------
 
@@ -282,33 +332,320 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Step 1 — collect device credentials."""
-        _LOGGER.debug("async_step_user called (user_input=%s)", user_input is not None)
+        """Step 1 — collect basic info and choose onboarding path."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # Ensure device isn't already configured
-            await self.async_set_unique_id(user_input[CONF_DEVICE_ID])
-            self._abort_if_unique_id_configured()
-
-            # Store credentials for subsequent steps
             self._flow_data = {
                 CONF_NAME: user_input[CONF_NAME],
-                CONF_HOST: user_input[CONF_HOST],
-                CONF_DEVICE_ID: user_input[CONF_DEVICE_ID],
-                CONF_LOCAL_KEY: user_input[CONF_LOCAL_KEY],
+                CONF_HOST: user_input[CONF_HOST].strip(),
                 CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
                 CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
             }
-
-            # Proceed to auto-detection step
-            return await self.async_step_detect()
+            mode = user_input.get("onboarding_mode", "manual")
+            if mode == "cloud_assisted":
+                return await self.async_step_cloud_credentials()
+            return await self.async_step_manual_credentials()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_credentials_schema(user_input),
+            data_schema=_user_schema(),
             errors=errors,
         )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 2a: Cloud-assisted — Tuya credentials + device selection
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_cloud_credentials(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Cloud path — collect Tuya API credentials and fetch linked devices."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            access_id = user_input.get("tuya_access_id", "").strip()
+            access_secret = user_input.get("tuya_access_secret", "").strip()
+            region = user_input.get("tuya_region", "eu")
+
+            if not access_id or not access_secret:
+                errors["base"] = "cloud_credentials_required"
+            else:
+                self._cloud_auth = {
+                    "access_id": access_id,
+                    "access_secret": access_secret,
+                    "region": region,
+                }
+                try:
+                    candidates = await self._cloud_fetch_candidates()
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.exception("Cloud onboarding candidate fetch failed")
+                    errors["base"] = self._cloud_error_key(exc)
+                    candidates = []
+                if not candidates:
+                    if "base" not in errors:
+                        errors["base"] = "cloud_no_device_match"
+                elif len(candidates) == 1:
+                    selected = dict(candidates[0])
+                    try:
+                        refreshed = await self._cloud_get_credentials(
+                            selected.get("device_id", "")
+                        )
+                        if refreshed:
+                            selected.update(refreshed)
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.exception(
+                            "Cloud onboarding credential fetch failed for single candidate"
+                        )
+                        errors["base"] = self._cloud_error_key(exc)
+
+                    if "base" not in errors and not str(selected.get("local_key", "")).strip():
+                        errors["base"] = "cloud_device_missing_local_key"
+
+                    if "base" not in errors:
+                        self._apply_cloud_candidate(selected)
+                        await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
+                        self._abort_if_unique_id_configured()
+                        return await self.async_step_detect()
+                else:
+                    self._cloud_candidates = candidates
+                    return await self.async_step_cloud_pick_device()
+
+        return self.async_show_form(
+            step_id="cloud_credentials",
+            data_schema=_cloud_credentials_schema(
+                {
+                    "tuya_access_id": self._cloud_auth.get("access_id", ""),
+                    "tuya_access_secret": self._cloud_auth.get("access_secret", ""),
+                    "tuya_region": self._cloud_auth.get("region", "eu"),
+                }
+            ),
+            errors=errors,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step 2b: Manual path — Device ID + Local Key
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_manual_credentials(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Manual path — collect Device ID and Local Key."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            device_id = user_input.get(CONF_DEVICE_ID, "").strip()
+            local_key = user_input.get(CONF_LOCAL_KEY, "").strip()
+
+            if not device_id or not local_key:
+                errors["base"] = "manual_credentials_required"
+            else:
+                self._flow_data[CONF_DEVICE_ID] = device_id
+                self._flow_data[CONF_LOCAL_KEY] = local_key
+                await self.async_set_unique_id(device_id)
+                self._abort_if_unique_id_configured()
+                return await self.async_step_detect()
+
+        return self.async_show_form(
+            step_id="manual_credentials",
+            data_schema=_manual_credentials_schema(self._flow_data),
+            errors=errors,
+        )
+
+    async def async_step_cloud_pick_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Select a cloud device when multiple candidates are available."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_id = user_input.get("cloud_device_id", "")
+            selected = next(
+                (
+                    c for c in self._cloud_candidates
+                    if c.get("device_id") == selected_id
+                ),
+                None,
+            )
+            if not selected:
+                errors["base"] = "cloud_no_device_match"
+            else:
+                if not str(selected.get("local_key", "")).strip():
+                    try:
+                        refreshed = await self._cloud_get_credentials(selected_id)
+                        if refreshed:
+                            selected.update(refreshed)
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.exception(
+                            "Cloud onboarding credential refresh failed for %s",
+                            selected_id,
+                        )
+                        errors["base"] = self._cloud_error_key(exc)
+
+                if not str(selected.get("local_key", "")).strip():
+                    if "base" not in errors:
+                        errors["base"] = "cloud_device_missing_local_key"
+                else:
+                    self._apply_cloud_candidate(selected)
+                    await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
+                    self._abort_if_unique_id_configured()
+                    return await self.async_step_detect()
+
+        choices: dict[str, str] = {}
+        for cand in self._cloud_candidates:
+            dev_id = cand.get("device_id", "")
+            if not dev_id:
+                continue
+            label_parts = [
+                cand.get("name") or "Unnamed",
+                f"ID: {dev_id}",
+            ]
+            if cand.get("ip"):
+                label_parts.append(f"IP: {cand['ip']}")
+            if cand.get("category"):
+                label_parts.append(f"Category: {cand['category']}")
+            choices[dev_id] = " | ".join(label_parts)
+
+        if not choices:
+            return self.async_abort(reason="cloud_no_device_match")
+
+        return self.async_show_form(
+            step_id="cloud_pick_device",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("cloud_device_id"): vol.In(choices),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def _cloud_fetch_candidates(self) -> list[dict[str, Any]]:
+        """Fetch all cloud devices visible to the project for onboarding."""
+        auth = self._cloud_auth
+        if not auth:
+            return []
+
+        from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+        helper = TuyaCloudSchemaHelper(
+            auth["access_id"], auth["access_secret"], auth["region"]
+        )
+
+        cloud_devices = await helper.list_devices(strict=True)
+        if not cloud_devices:
+            return []
+
+        # If the user supplied an IP in step 1, prefer devices that match it
+        # but always fall back to the full list so nothing is hidden.
+        host = self._flow_data.get(CONF_HOST, "").strip()
+        if host:
+            ip_matches = [
+                d for d in cloud_devices
+                if str(d.get("ip", "")).strip() == host
+            ]
+            pool = ip_matches if ip_matches else cloud_devices
+        else:
+            pool = cloud_devices
+
+        seen: set[str] = set()
+        results: list[dict[str, Any]] = []
+        for dev in pool:
+            dev_id = str(
+                dev.get("id", "") or dev.get("device_id", "")
+            ).strip()
+            if not dev_id or dev_id in seen:
+                continue
+            seen.add(dev_id)
+
+            candidate: dict[str, Any] = {
+                "device_id": dev_id,
+                "name": dev.get("name", "") or dev.get("product_name", ""),
+                "ip": dev.get("ip", "") or dev.get("local_ip", "") or dev.get("lan_ip", ""),
+                "category": dev.get("category", ""),
+                "product_name": dev.get("product_name", ""),
+            }
+
+            results.append(candidate)
+
+        return results
+
+    async def _cloud_get_credentials(self, device_id: str) -> dict[str, Any] | None:
+        """Fetch credentials for a single cloud device ID."""
+        auth = self._cloud_auth
+        if not auth:
+            return None
+
+        from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+        helper = TuyaCloudSchemaHelper(
+            auth["access_id"], auth["access_secret"], auth["region"]
+        )
+        return await helper.get_device_credentials(device_id, strict=True)
+
+    @staticmethod
+    def _cloud_error_key(exc: Exception) -> str:
+        """Map cloud onboarding exceptions to config-flow error keys."""
+        from .cloud_schema import (  # noqa: PLC0415
+            TuyaCloudAPIError,
+            TuyaCloudAuthError,
+            TuyaCloudPaginationError,
+            TuyaCloudPathError,
+            TuyaCloudParseError,
+            TuyaCloudRegionError,
+        )
+
+        if isinstance(exc, TuyaCloudAuthError):
+            return "cloud_auth_failed"
+        if isinstance(exc, TuyaCloudRegionError):
+            return "cloud_region_mismatch"
+        if isinstance(exc, TuyaCloudPathError):
+            return "cloud_api_path_failed"
+        if isinstance(exc, TuyaCloudParseError):
+            return "cloud_parse_failed"
+        if isinstance(exc, TuyaCloudPaginationError):
+            return "cloud_pagination_failed"
+        if isinstance(exc, TuyaCloudAPIError):
+            return "cloud_api_failed"
+        return "cloud_fetch_failed"
+
+    def _apply_cloud_candidate(self, candidate: dict[str, Any]) -> None:
+        """Apply selected cloud candidate into flow data for local runtime."""
+        self._flow_data[CONF_DEVICE_ID] = str(candidate.get("device_id", "")).strip()
+        self._flow_data[CONF_LOCAL_KEY] = str(candidate.get("local_key", "")).strip()
+
+        # In cloud-assisted mode, never replace a user-entered local host.
+        # Only use cloud IP when host is missing and the cloud IP is private LAN.
+        cloud_ip = str(candidate.get("ip", "")).strip()
+        manual_host = self._flow_data.get(CONF_HOST, "").strip()
+        if manual_host:
+            if cloud_ip and manual_host != cloud_ip:
+                _LOGGER.info(
+                    "Cloud onboarding: keeping manual host %s (ignoring cloud IP %s) for device %s",
+                    manual_host,
+                    cloud_ip,
+                    self._flow_data.get(CONF_DEVICE_ID, ""),
+                )
+        elif cloud_ip:
+            try:
+                parsed_ip = ipaddress.ip_address(cloud_ip)
+                if parsed_ip.is_private:
+                    self._flow_data[CONF_HOST] = cloud_ip
+                else:
+                    _LOGGER.warning(
+                        "Cloud onboarding: cloud IP %s is public; not using it as local host for device %s",
+                        cloud_ip,
+                        self._flow_data.get(CONF_DEVICE_ID, ""),
+                    )
+            except ValueError:
+                _LOGGER.warning(
+                    "Cloud onboarding: invalid cloud IP '%s'; not using it as local host for device %s",
+                    cloud_ip,
+                    self._flow_data.get(CONF_DEVICE_ID, ""),
+                )
+
+        category = str(candidate.get("category", "")).strip()
+        if category:
+            self._tuya_category = category
 
     # ═══════════════════════════════════════════════════════════════════
     # Step 2: Auto-detect protocol + discover DPs + match profile
@@ -357,10 +694,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not ok:
             errors["base"] = err or "cannot_connect"
-            # Fall back to credentials with error
             return self.async_show_form(
                 step_id="user",
-                data_schema=_credentials_schema(self._flow_data),
+                data_schema=_user_schema(self._flow_data),
                 errors=errors,
             )
 
@@ -456,9 +792,22 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             access_secret = user_input.get("tuya_access_secret", "").strip()
             region = user_input.get("tuya_region", "eu")
 
+            if not access_id and self._cloud_auth.get("access_id"):
+                access_id = self._cloud_auth["access_id"]
+            if not access_secret and self._cloud_auth.get("access_secret"):
+                access_secret = self._cloud_auth["access_secret"]
+            if region == "eu" and self._cloud_auth.get("region"):
+                region = self._cloud_auth["region"]
+
             if not access_id or not access_secret:
                 # Skip cloud — proceed to review with local-only mapping
                 return await self.async_step_review()
+
+            self._cloud_auth = {
+                "access_id": access_id,
+                "access_secret": access_secret,
+                "region": region,
+            }
 
             # Fetch cloud schema
             try:
@@ -522,9 +871,18 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="cloud_assist",
             data_schema=vol.Schema(
                 {
-                    vol.Optional("tuya_access_id", default=""): str,
-                    vol.Optional("tuya_access_secret", default=""): str,
-                    vol.Optional("tuya_region", default="eu"): vol.In(
+                    vol.Optional(
+                        "tuya_access_id",
+                        default=self._cloud_auth.get("access_id", ""),
+                    ): str,
+                    vol.Optional(
+                        "tuya_access_secret",
+                        default=self._cloud_auth.get("access_secret", ""),
+                    ): str,
+                    vol.Optional(
+                        "tuya_region",
+                        default=self._cloud_auth.get("region", "eu"),
+                    ): vol.In(
                         {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
                     ),
                 }
@@ -565,6 +923,15 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if action == "accept" and not self._final_dp_map:
                 errors["base"] = "empty_dp_map"
+
+            if (
+                action == "accept"
+                and not errors
+                and self._mapping_source != "manual"
+                and self._looks_like_cct_light()
+                and self._is_incomplete_cct_mapping(self._final_dp_map)
+            ):
+                errors["base"] = "incomplete_cct_map"
 
             if not errors and action in ("accept", "edit"):
                 return self._create_config_entry()
@@ -838,21 +1205,36 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             len(candidates) > 1
                             and expected_type == "int"
                         ):
-                            # Multiple int changes: pick largest
-                            # absolute change (the user was asked to
-                            # change one specific setting).
-                            def _delta(
-                                entry: tuple[str, Any, Any],
-                            ) -> float:
+                            # Multiple int changes: score each candidate using
+                            # role-aware DP-ID hints and change magnitude.
+                            current_role = current["role"]
+                            preferred_ids = {
+                                "brightness": {"2", "22"},
+                                "color_temp": {"3", "23"},
+                            }.get(current_role, set())
+
+                            known_role_by_dp = {
+                                dp: spec.get("key")
+                                for dp, spec in self._final_dp_map.items()
+                                if isinstance(spec, dict)
+                            }
+
+                            def _delta(entry: tuple[str, Any, Any]) -> float:
                                 _, ov, nv = entry
                                 try:
-                                    return abs(
-                                        float(nv) - float(ov or 0)
-                                    )
+                                    return abs(float(nv) - float(ov or 0))
                                 except (TypeError, ValueError):
                                     return 0.0
 
-                            best = max(candidates, key=_delta)
+                            def _score(entry: tuple[str, Any, Any]) -> tuple[int, int, float]:
+                                dp_id, _ov, _nv = entry
+                                preferred = 1 if dp_id in preferred_ids else 0
+                                role_match = 0
+                                if known_role_by_dp.get(dp_id) == current_role:
+                                    role_match = 1
+                                return (role_match, preferred, _delta(entry))
+
+                            best = max(candidates, key=_score)
                             dp_id, _old, new_val = best
                             session.set_pending_role(
                                 current["role"], current["type"]
@@ -861,8 +1243,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             self._learn_feedback = (
                                 f"\u2705 Detected! DP {dp_id} assigned "
                                 f"to '{current['role']}' "
-                                f"(picked by largest change "
-                                f"from {len(changes)} changes)."
+                                f"(picked from {len(changes)} changes "
+                                f"using role-aware scoring)."
                             )
                             self._learn_step_idx += 1
                             _LOGGER.info(
@@ -974,6 +1356,35 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             description_placeholders=description_placeholders,
         )
+
+    def _looks_like_cct_light(self) -> bool:
+        """Return True when device evidence strongly suggests a CCT light."""
+        if self._flow_data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_LIGHT:
+            return False
+
+        from .guided_learn import (  # noqa: PLC0415
+            FAMILY_CCT_LIGHT,
+            classify_device_family,
+        )
+
+        family, _gangs, _reason = classify_device_family(
+            self._discovered_dps,
+            DEVICE_TYPE_LIGHT,
+            profile=self._matched_profile,
+            tuya_category=self._tuya_category,
+        )
+        return family == FAMILY_CCT_LIGHT
+
+    @staticmethod
+    def _is_incomplete_cct_mapping(dp_map: dict[str, Any]) -> bool:
+        """A CCT-capable light needs power + brightness + color_temp roles."""
+        roles = {
+            str(spec.get("key", ""))
+            for spec in dp_map.values()
+            if isinstance(spec, dict)
+        }
+        required = {"power", "brightness", "color_temp"}
+        return not required.issubset(roles)
 
     # ═══════════════════════════════════════════════════════════════════
     # Entry creation helper

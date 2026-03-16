@@ -421,7 +421,29 @@ def score_profile_against_dps(
     device_dp_count = len(discovered_dps)
     coverage = matches / device_dp_count if device_dp_count > 0 else 0.0
 
-    return template_score * 0.5 + coverage * 0.5 + matches * 0.001
+    base_score = template_score * 0.5 + coverage * 0.5 + matches * 0.001
+
+    # If the discovered DPS strongly indicates warm/cool capability,
+    # prefer light profiles that include a color_temp role.
+    if profile.get("device_type") == DEVICE_TYPE_LIGHT:
+        discovered_ints = {
+            dp_id for dp_id, val in discovered_dps.items()
+            if isinstance(val, (int, float)) and not isinstance(val, bool)
+        }
+        cct_signal = "23" in discovered_ints or (
+            len(discovered_ints) >= 2
+            and ("1" in discovered_dps or "20" in discovered_dps)
+        )
+        has_color_temp = any(
+            isinstance(spec, dict) and spec.get("key") == DP_KEY_COLOR_TEMP
+            for spec in template.values()
+        )
+        if cct_signal and has_color_temp:
+            base_score += 0.08
+        elif cct_signal and not has_color_temp:
+            base_score -= 0.08
+
+    return max(base_score, 0.0)
 
 
 def best_profile_for_dps(

@@ -3,17 +3,45 @@
     "step": {
       "user": {
         "title": "Add Tuya Device",
-        "description": "Enter the device credentials.  You can find the Device ID and Local Key using the Tuya IoT Platform developer tools.  Protocol version will be detected automatically.",
+        "description": "Enter basic device info and choose how you want to set up the device. Cloud-assisted is recommended — Conti will connect to your Tuya account, fetch your linked devices, and auto-fill Device ID and Local Key for you.",
         "data": {
           "name": "Device Name",
           "host": "Device IP Address",
-          "device_id": "Device ID",
-          "local_key": "Local Key",
           "port": "Port (default 6668)",
-          "device_type": "Device Type"
+          "device_type": "Device Type",
+          "onboarding_mode": "Onboarding Method"
         },
         "data_description": {
-          "local_key": "16-character key from Tuya IoT Platform"
+          "host": "Local IP address of the device on your home network.",
+          "onboarding_mode": "Cloud-assisted: Conti fetches your linked devices and auto-fills Device ID and Local Key. Manual: enter credentials yourself (advanced)."
+        }
+      },
+      "cloud_credentials": {
+        "title": "Tuya Cloud — Sign In",
+        "description": "Enter your Tuya IoT Platform API credentials. Conti will connect to your account, fetch your linked devices, and let you select the one to set up — no manual Device ID or Local Key required.\n\nCredentials are used only during setup and are **not** stored after onboarding.",
+        "data": {
+          "tuya_access_id": "Access ID / Client ID",
+          "tuya_access_secret": "Access Secret / Client Secret",
+          "tuya_region": "Data Centre Region"
+        }
+      },
+      "manual_credentials": {
+        "title": "Manual Device Credentials",
+        "description": "Enter the Device ID and Local Key for your device. Both values can be found in the Tuya IoT Platform under your device details.",
+        "data": {
+          "device_id": "Device ID",
+          "local_key": "Local Key"
+        },
+        "data_description": {
+          "device_id": "Unique device identifier from Tuya IoT Platform.",
+          "local_key": "16-character encryption key from Tuya IoT Platform."
+        }
+      },
+      "cloud_pick_device": {
+        "title": "Select Cloud Device",
+        "description": "Multiple cloud devices are available. Choose the correct device to auto-fill Device ID and Local Key.",
+        "data": {
+          "cloud_device_id": "Cloud Device"
         }
       },
       "detect": {
@@ -65,7 +93,18 @@
       "wrong_protocol": "Protocol mismatch. The device rejected all attempted protocol versions (3.3, 3.4, 3.5, 3.1). Check the device firmware version.",
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
       "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",
+      "cloud_auth_failed": "Tuya cloud authentication failed. Check Access ID, Access Secret, and selected region.",
+      "cloud_region_mismatch": "Tuya cloud region mismatch. The selected data centre does not match your linked project/account region.",
+      "cloud_api_path_failed": "Tuya cloud API path is not available for this project/region. Check project type and selected region.",
+      "cloud_parse_failed": "Received an unexpected response from Tuya cloud. Please try again; if it persists, check integration logs.",
+      "cloud_pagination_failed": "Cloud device list pagination did not complete safely. Please try again; if it persists, check integration logs.",
+      "cloud_api_failed": "Tuya cloud API request failed due to a network/API error. Please try again.",
+      "cloud_credentials_required": "Tuya cloud credentials are required when cloud auto-fill is enabled.",
+      "cloud_no_device_match": "No linked cloud devices were returned for this Tuya project/region. Check credentials, region, and project linkage.",
+      "cloud_device_missing_local_key": "The selected cloud device was found, but Tuya did not return a local key. This can happen with some account/project configurations. Use Manual onboarding as fallback.",
+      "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
+      "incomplete_cct_map": "This light looks like a warm/cool (CCT) device, but the mapping is missing brightness and/or colour temperature. Use Guided Learn or Manual Edit before finishing.",
       "unknown": "An unexpected error occurred."
     }
   },

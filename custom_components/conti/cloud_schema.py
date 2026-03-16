@@ -47,6 +47,34 @@ _BASE_URLS: dict[str, str] = {
 _API_TIMEOUT = 10
 
 
+class TuyaCloudOnboardingError(Exception):
+    """Base class for cloud onboarding failures."""
+
+
+class TuyaCloudAuthError(TuyaCloudOnboardingError):
+    """Auth/permission failure for Tuya cloud onboarding calls."""
+
+
+class TuyaCloudRegionError(TuyaCloudOnboardingError):
+    """Region/data-center mismatch for Tuya cloud onboarding calls."""
+
+
+class TuyaCloudParseError(TuyaCloudOnboardingError):
+    """Unexpected response shape while parsing Tuya cloud payloads."""
+
+
+class TuyaCloudPaginationError(TuyaCloudOnboardingError):
+    """Pagination did not converge safely while listing cloud devices."""
+
+
+class TuyaCloudPathError(TuyaCloudOnboardingError):
+    """Requested Tuya API path is not available for this project/region."""
+
+
+class TuyaCloudAPIError(TuyaCloudOnboardingError):
+    """Network/API failure for Tuya cloud onboarding calls."""
+
+
 class TuyaCloudSchemaHelper:
     """Fetch device schema from Tuya Cloud API for onboarding assistance.
 
@@ -71,7 +99,7 @@ class TuyaCloudSchemaHelper:
 
     # ── Token management ──────────────────────────────────────────────
 
-    async def _ensure_token(self) -> bool:
+    async def _ensure_token(self, strict: bool = False) -> bool:
         """Obtain or refresh an access token from Tuya Cloud."""
         if self._token and time.time() < self._token_expiry:
             return True
@@ -87,7 +115,19 @@ class TuyaCloudSchemaHelper:
                     timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
                     ssl=True,
                 ) as resp:
-                    data = await resp.json()
+                    try:
+                        data = await resp.json()
+                    except Exception as exc:  # noqa: BLE001
+                        if strict:
+                            raise TuyaCloudParseError("Non-JSON token response") from exc
+                        _LOGGER.warning("Tuya cloud token parse error: %s", exc)
+                        return False
+
+            if not isinstance(data, dict):
+                if strict:
+                    raise TuyaCloudParseError("Unexpected token response shape")
+                _LOGGER.warning("Tuya cloud token request returned non-dict payload")
+                return False
 
             if data.get("success"):
                 result = data["result"]
@@ -97,10 +137,31 @@ class TuyaCloudSchemaHelper:
                 _LOGGER.debug("Tuya cloud token obtained (expires in %ds)", result.get("expire_time", 0))
                 return True
 
-            _LOGGER.warning("Tuya cloud token request failed: %s", data.get("msg", "unknown"))
+            code = str(data.get("code", "")).strip()
+            msg = str(data.get("msg", "unknown"))
+            body_preview = str(data)[:1000]
+            _LOGGER.error(
+                "Tuya token request failed: status=%s code=%s msg=%s body=%s",
+                resp.status,
+                code or "none",
+                msg,
+                body_preview,
+            )
+
+            if strict:
+                self._raise_cloud_error_from_response(
+                    status=resp.status,
+                    path="/v1.0/token?grant_type=1",
+                    code=code,
+                    msg=msg,
+                )
             return False
 
         except Exception as exc:
+            if strict and isinstance(exc, TuyaCloudOnboardingError):
+                raise
+            if strict:
+                raise TuyaCloudAPIError(f"Token request failed: {exc}") from exc
             _LOGGER.warning("Tuya cloud token request error: %s", exc)
             return False
 
@@ -153,7 +214,7 @@ class TuyaCloudSchemaHelper:
 
         Returns ``None`` if the request fails or cloud is unavailable.
         """
-        if not await self._ensure_token():
+        if not await self._ensure_token(strict=False):
             return None
 
         # Fetch device details (includes category)
@@ -187,9 +248,195 @@ class TuyaCloudSchemaHelper:
 
         return result
 
-    async def _api_get(self, path: str) -> dict[str, Any] | None:
+    async def list_devices(
+        self,
+        max_items: int | None = None,
+        strict: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return cloud devices visible to this project/account.
+
+        Tuya OpenAPI deployments expose slightly different list endpoints
+        depending on project type and region. We try a short list of known
+        endpoints and normalize the result into:
+
+        ``[{"id": ..., "name": ..., "ip": ..., "category": ...}, ...]``
+
+        Pagination is handled for paged endpoints so linked devices from
+        additional pages are not missed.
+        """
+        if not await self._ensure_token(strict=strict):
+            if strict:
+                raise TuyaCloudAuthError("Unable to obtain Tuya cloud token")
+            return []
+
+        limit = max_items if isinstance(max_items, int) and max_items > 0 else 1000
+        page_size = 100
+
+        # Merge results across endpoint variants instead of returning from the
+        # first non-empty endpoint; different Tuya deployments expose different
+        # subsets.
+        merged_by_id: dict[str, dict[str, Any]] = {}
+        last_endpoint_error: TuyaCloudOnboardingError | None = None
+
+        # Primary flow for app-account linked devices.
+        # This is the onboarding-relevant list source and avoids the iot-03
+        # endpoint shape that can require explicit device_ids.
+        try:
+            linked_items = await self._list_associated_user_devices(
+                limit=limit,
+                strict=strict,
+            )
+            for item in linked_items:
+                dev_id = item.get("id")
+                if dev_id and dev_id not in merged_by_id:
+                    merged_by_id[dev_id] = item
+                if len(merged_by_id) >= limit:
+                    break
+        except (TuyaCloudPathError, TuyaCloudAPIError) as exc:
+            _LOGGER.warning("Tuya linked-device endpoint rejected: %s", exc)
+            last_endpoint_error = exc
+
+        # Fallback for project-level device lists in some deployments.
+        # Only run this when associated-users produced no devices.
+        if not merged_by_id:
+            paged_paths = ["/v1.0/devices"]
+            for base_path in paged_paths:
+                page_no = 1
+                while len(merged_by_id) < limit:
+                    if page_no > 50:
+                        raise TuyaCloudPaginationError(
+                            f"Exceeded pagination safety limit for {base_path}"
+                        )
+                    path = f"{base_path}?page_no={page_no}&page_size={page_size}"
+                    try:
+                        payload = await self._api_get(path, strict=strict)
+                    except (TuyaCloudPathError, TuyaCloudAPIError) as exc:
+                        # Some Tuya projects reject specific endpoint shapes
+                        # (e.g. code 1109 requiring device_ids). Treat this as an
+                        # endpoint mismatch and continue with alternate paths.
+                        _LOGGER.warning(
+                            "Tuya list endpoint rejected: %s (%s)",
+                            path,
+                            exc,
+                        )
+                        last_endpoint_error = exc
+                        break
+                    page_items = self._extract_device_list(payload)
+
+                    if page_items:
+                        for item in page_items:
+                            dev_id = item.get("id")
+                            if dev_id and dev_id not in merged_by_id:
+                                merged_by_id[dev_id] = item
+
+                    if not self._has_next_page(payload, page_no, page_size, len(page_items)):
+                        break
+
+                    page_no += 1
+
+        if not merged_by_id and strict and last_endpoint_error is not None:
+            raise last_endpoint_error
+
+        return list(merged_by_id.values())[:limit]
+
+    async def _list_associated_user_devices(
+        self,
+        limit: int,
+        strict: bool,
+    ) -> list[dict[str, Any]]:
+        """List devices via associated-users endpoint using cursor pagination."""
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        size = 100
+
+        for _ in range(50):
+            path = f"/v1.0/iot-01/associated-users/devices?size={size}"
+            if cursor:
+                path = f"{path}&last_row_key={cursor}"
+
+            payload = await self._api_get(path, strict=strict)
+            page_items = self._extract_device_list(payload)
+            if page_items:
+                items.extend(page_items)
+
+            if len(items) >= limit:
+                return items[:limit]
+
+            if not isinstance(payload, dict):
+                break
+
+            has_more = payload.get("has_more")
+            next_cursor = payload.get("last_row_key")
+
+            if not (isinstance(has_more, bool) and has_more):
+                break
+            if not isinstance(next_cursor, str) or not next_cursor:
+                break
+
+            cursor = next_cursor
+
+        return items[:limit]
+
+    async def get_device_credentials(
+        self,
+        device_id: str,
+        strict: bool = False,
+    ) -> dict[str, Any] | None:
+        """Fetch onboarding credentials and hints for one device.
+
+        Returns a dict with at least ``device_id`` and optionally ``local_key``,
+        ``name``, ``ip``, ``category``, ``product_name``.
+        """
+        if not await self._ensure_token(strict=strict):
+            if strict:
+                raise TuyaCloudAuthError("Unable to obtain Tuya cloud token")
+            return None
+
+        device_info = await self._api_get(
+            f"/v1.0/devices/{device_id}", strict=strict
+        )
+        if not device_info:
+            return None
+        if not isinstance(device_info, dict):
+            if strict:
+                raise TuyaCloudParseError(
+                    f"Unexpected credentials payload type for device {device_id}"
+                )
+            return None
+
+        result: dict[str, Any] = {
+            "device_id": str(device_info.get("id") or device_id),
+            "name": device_info.get("name") or device_info.get("product_name") or "",
+            "category": device_info.get("category") or "",
+            "product_name": device_info.get("product_name") or "",
+            "ip": (
+                device_info.get("ip")
+                or device_info.get("local_ip")
+                or device_info.get("lan_ip")
+                or ""
+            ),
+        }
+
+        local_key = (
+            device_info.get("local_key")
+            or device_info.get("key")
+            or device_info.get("uuid_key")
+            or ""
+        )
+        if local_key:
+            result["local_key"] = str(local_key)
+
+        return result
+
+    async def _api_get(
+        self,
+        path: str,
+        strict: bool = False,
+    ) -> dict[str, Any] | None:
         """Make an authenticated GET request to the Tuya Cloud API."""
         if not self._token:
+            if strict:
+                raise TuyaCloudAuthError("Missing Tuya access token")
             return None
 
         url = f"{self._base_url}{path}"
@@ -203,21 +450,165 @@ class TuyaCloudSchemaHelper:
                     timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
                     ssl=True,
                 ) as resp:
-                    data = await resp.json()
+                    try:
+                        data = await resp.json()
+                    except Exception as exc:  # noqa: BLE001
+                        if strict:
+                            raise TuyaCloudParseError(
+                                f"Non-JSON response for {path}"
+                            ) from exc
+                        _LOGGER.error(
+                            "Tuya cloud API parse error: path=%s status=%s error=%s",
+                            path,
+                            resp.status,
+                            exc,
+                        )
+                        return None
+
+                    if resp.status in (401, 403) and strict:
+                        raise TuyaCloudAuthError(f"HTTP {resp.status} for {path}")
+
+                    if resp.status == 404 and strict:
+                        raise TuyaCloudPathError(f"HTTP 404 for {path}")
+
+            if not isinstance(data, dict):
+                if strict:
+                    raise TuyaCloudParseError(
+                        f"Unexpected top-level response type for {path}"
+                    )
+                return None
 
             if data.get("success"):
                 return data.get("result", {})
 
+            code = str(data.get("code", "")).strip()
+            msg = data.get("msg", "unknown")
+            body_preview = str(data)[:1000]
+
+            _LOGGER.error(
+                "Tuya cloud API failed: path=%s status=%s code=%s msg=%s body=%s",
+                path,
+                resp.status,
+                code or "none",
+                msg,
+                body_preview,
+            )
+
+            if strict:
+                self._raise_cloud_error_from_response(
+                    status=resp.status,
+                    path=path,
+                    code=code,
+                    msg=str(msg),
+                )
+
             _LOGGER.debug(
                 "Tuya cloud API %s returned: %s",
                 path,
-                data.get("msg", "unknown"),
+                msg,
             )
             return None
 
         except Exception as exc:
+            if strict and isinstance(exc, TuyaCloudOnboardingError):
+                raise
+            if strict:
+                raise TuyaCloudAPIError(f"Cloud API call failed for {path}: {exc}") from exc
             _LOGGER.debug("Tuya cloud API %s error: %s", path, exc)
             return None
+
+    @staticmethod
+    def _raise_cloud_error_from_response(
+        *,
+        status: int,
+        path: str,
+        code: str,
+        msg: str,
+    ) -> None:
+        """Map Tuya HTTP/code/message into specific onboarding exceptions."""
+        msg_l = msg.lower()
+
+        if status in (401, 403) or code in {"1010", "1011", "1106", "2406", "28841002"}:
+            raise TuyaCloudAuthError(f"status={status} path={path} code={code} msg={msg}")
+
+        if status == 404:
+            raise TuyaCloudPathError(f"status=404 path={path} code={code} msg={msg}")
+
+        if code in {"1109"} or "device_ids param is illegal" in msg_l:
+            raise TuyaCloudPathError(f"status={status} path={path} code={code} msg={msg}")
+
+        if (
+            "region" in msg_l
+            or "data center" in msg_l
+            or "datacenter" in msg_l
+            or "endpoint" in msg_l
+        ):
+            raise TuyaCloudRegionError(f"status={status} path={path} code={code} msg={msg}")
+
+        if "path" in msg_l and ("invalid" in msg_l or "not found" in msg_l):
+            raise TuyaCloudPathError(f"status={status} path={path} code={code} msg={msg}")
+
+        raise TuyaCloudAPIError(f"status={status} path={path} code={code} msg={msg}")
+
+    @staticmethod
+    def _extract_device_list(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Extract/normalize device list from different Tuya response shapes."""
+        if not isinstance(payload, dict):
+            return []
+
+        if isinstance(payload.get("list"), list):
+            raw_items = payload["list"]
+        elif isinstance(payload.get("devices"), list):
+            raw_items = payload["devices"]
+        elif isinstance(payload.get("result"), list):
+            raw_items = payload["result"]
+        elif isinstance(payload.get("items"), list):
+            raw_items = payload["items"]
+        elif isinstance(payload.get("uid"), str):
+            # Some endpoints return a user shell object, not devices.
+            return []
+        else:
+            return []
+
+        devices: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            dev_id = item.get("id") or item.get("device_id")
+            if not dev_id:
+                continue
+            devices.append(
+                {
+                    "id": str(dev_id),
+                    "name": item.get("name") or item.get("product_name") or "",
+                    "ip": item.get("ip") or item.get("local_ip") or item.get("lan_ip") or "",
+                    "category": item.get("category") or "",
+                    "product_name": item.get("product_name") or "",
+                }
+            )
+        return devices
+
+    @staticmethod
+    def _has_next_page(
+        payload: dict[str, Any] | None,
+        page_no: int,
+        page_size: int,
+        page_count: int,
+    ) -> bool:
+        """Infer whether a paged list endpoint likely has another page."""
+        if not isinstance(payload, dict):
+            return False
+
+        has_more = payload.get("has_more")
+        if isinstance(has_more, bool):
+            return has_more
+
+        total = payload.get("total")
+        if isinstance(total, int) and total >= 0:
+            return page_no * page_size < total
+
+        # Fallback heuristic: full pages usually indicate there may be more.
+        return page_count >= page_size and page_count > 0
 
     # ── Schema → dp_map conversion ───────────────────────────────────
 
