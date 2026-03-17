@@ -56,6 +56,15 @@ ERR_EOF = "eof"
 ERR_EMPTY_STATUS = "empty_status"
 ERR_UNKNOWN = "unknown"
 
+# Minimum seconds between consecutive WARNING-level disconnect messages
+# for the same device (covers both the push-listener and the disconnect
+# callback paths).  Repeated drops within this window are demoted to
+# DEBUG.  The window runs from the last WARNING; it is NOT reset on
+# reconnect so flapping devices are suppressed across quick reconnect
+# cycles.  A fresh WARNING fires naturally once the device has been
+# stable for ≥ 300 s since the last WARNING.
+_PUSH_WARN_COOLDOWN: float = 300.0
+
 
 @dataclass
 class DeviceDiagnostics:
@@ -84,6 +93,7 @@ class _ManagedDevice:
         "online",
         "lock",
         "diag",
+        "_last_push_warn_time",
     )
 
     def __init__(self, client: TinyTuyaDevice, config: dict[str, Any]) -> None:
@@ -95,6 +105,7 @@ class _ManagedDevice:
         self.online: bool = False
         self.lock: asyncio.Lock = asyncio.Lock()
         self.diag: DeviceDiagnostics = DeviceDiagnostics()
+        self._last_push_warn_time: float = 0.0
 
 
 class DeviceManager:
@@ -669,11 +680,20 @@ class DeviceManager:
                     self._classify_error(
                         managed, "disconnected during push listen"
                     )
-                    _LOGGER.warning(
-                        "Conti device %s: connection lost (push listener) "
-                        "— scheduling reconnect",
-                        device_id,
-                    )
+                    _now = time.monotonic()
+                    if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
+                        managed._last_push_warn_time = _now
+                        _LOGGER.warning(
+                            "Conti device %s: connection lost (push listener) "
+                            "— scheduling reconnect",
+                            device_id,
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "Conti device %s: connection lost (push listener) "
+                            "— scheduling reconnect (repeated within cooldown)",
+                            device_id,
+                        )
                     self._schedule_reconnect(device_id)
                     break
 
@@ -700,9 +720,18 @@ class DeviceManager:
         managed.online = False
         self._classify_error(managed, "disconnected")
         if was_online:
-            _LOGGER.warning(
-                "Conti device %s disconnected - scheduling reconnect", device_id
-            )
+            _now = time.monotonic()
+            if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
+                managed._last_push_warn_time = _now
+                _LOGGER.warning(
+                    "Conti device %s disconnected - scheduling reconnect", device_id
+                )
+            else:
+                _LOGGER.debug(
+                    "Conti device %s disconnected - scheduling reconnect "
+                    "(repeated within cooldown)",
+                    device_id,
+                )
         else:
             _LOGGER.debug(
                 "Conti device %s disconnect callback while already offline", device_id
