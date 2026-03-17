@@ -67,6 +67,9 @@ SWITCH_HEURISTICS: Final[list[_HeuristicRule]] = [
          "20", "21", "22", "23", "24", "25"],
         DP_KEY_POWER, "bool", True,
     ),
+    # Power-monitoring plugs commonly expose active-power/energy style DPs
+    # on 19/17. Map one strong match as sensor-capable telemetry.
+    (["19", "17"], DP_KEY_POWER_USAGE, "int", False),
 ]
 
 FAN_HEURISTICS: Final[list[_HeuristicRule]] = [
@@ -193,6 +196,12 @@ def auto_map_dps(
                 dp_id, role, actual_type, discovered_dps[dp_id],
             )
 
+    # Signature-based enrichment for power-monitoring smart plugs.
+    # This keeps generic switch mapping conservative, and only adds
+    # richer known DPs when the observed DP shape strongly matches.
+    if device_type == DEVICE_TYPE_SWITCH:
+        _augment_power_monitoring_plug_map(result, discovered_dps)
+
     # Report unmapped DPs so the user knows what was ignored.
     unmapped = set(discovered_dps.keys()) - set(result.keys())
     if unmapped:
@@ -205,6 +214,87 @@ def auto_map_dps(
         )
 
     return result
+
+
+def _augment_power_monitoring_plug_map(
+    result: dict[str, dict[str, Any]],
+    discovered_dps: dict[str, Any],
+) -> None:
+    """Add richer DP mappings for known power-monitoring smart-plug layouts.
+
+    Applied only when there is strong evidence this is a monitoring plug,
+    not a generic switch:
+      * DP 1 is a bool relay
+      * at least two telemetry DPs among 17/18/19/20 are numeric
+      * plus at least one advanced-control DP among 26/38/39/40/41/42/43/44
+    """
+    if not isinstance(discovered_dps.get("1"), bool):
+        return
+
+    telemetry_ids = ("17", "18", "19", "20")
+    telemetry_hits = sum(
+        1
+        for dp_id in telemetry_ids
+        if isinstance(discovered_dps.get(dp_id), (int, float))
+        and not isinstance(discovered_dps.get(dp_id), bool)
+    )
+    if telemetry_hits < 2:
+        return
+
+    advanced_hits = 0
+    if isinstance(discovered_dps.get("26"), (int, float)) and not isinstance(discovered_dps.get("26"), bool):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("38"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("39"), bool):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("40"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("41"), bool):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("42"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("43"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("44"), str):
+        advanced_hits += 1
+    if advanced_hits < 1:
+        return
+
+    rich_map: dict[str, dict[str, Any]] = {
+        "1": {"key": DP_KEY_POWER, "type": "bool"},
+        "9": {"key": "countdown", "type": "int"},
+        "17": {"key": "energy_total", "type": "int"},
+        "18": {"key": "current", "type": "int"},
+        "19": {"key": DP_KEY_POWER_USAGE, "type": "int"},
+        "20": {"key": "voltage", "type": "int"},
+        "26": {"key": "fault", "type": "int"},
+        "38": {"key": "relay_status", "type": "str"},
+        "39": {"key": "overcharge_switch", "type": "bool"},
+        "40": {"key": "light_mode", "type": "str"},
+        "41": {"key": "child_lock", "type": "bool"},
+        "42": {"key": "cycle_time", "type": "str"},
+        "43": {"key": "random_time", "type": "str"},
+        "44": {"key": "switch_inching", "type": "str"},
+    }
+
+    added: list[str] = []
+    for dp_id, spec in rich_map.items():
+        if dp_id not in discovered_dps:
+            continue
+        actual_type = _classify_value(discovered_dps[dp_id])
+        if actual_type != spec["type"]:
+            continue
+        if dp_id not in result:
+            result[dp_id] = dict(spec)
+            added.append(dp_id)
+
+    if added:
+        _LOGGER.info(
+            "Auto-mapping (%s): enriched power-monitoring plug DPs: %s",
+            DEVICE_TYPE_SWITCH,
+            sorted(added),
+        )
 
 
 def merge_dp_maps(

@@ -148,10 +148,10 @@ def _family_from_category(
     if cat in ("tgq",):
         return FAMILY_DIMMER, 0
     if cat in ("kg",):
-        gangs = _count_bool_dps(discovered_dps)
+        gangs = _count_switch_channel_bool_dps(discovered_dps)
         return (FAMILY_SINGLE_SWITCH, 1) if gangs <= 1 else (FAMILY_MULTI_GANG_SWITCH, gangs)
     if cat in ("cz", "pc"):
-        gangs = _count_bool_dps(discovered_dps)
+        gangs = _count_switch_channel_bool_dps(discovered_dps)
         return (FAMILY_SINGLE_SWITCH, 1) if gangs <= 1 else (FAMILY_POWER_STRIP, gangs)
     if cat in ("fs",):
         return FAMILY_FAN, 0
@@ -170,7 +170,7 @@ def _family_from_dps_shape(
         family, _ = _classify_light_from_dps(discovered_dps)
         return family, 0, _light_reason(family, discovered_dps)
     if device_type == "switch":
-        gangs = _count_bool_dps(discovered_dps)
+        gangs = _count_switch_channel_bool_dps(discovered_dps)
         if gangs == 0:
             return FAMILY_UNKNOWN, 0, "No boolean data points found for switch"
         if gangs == 1:
@@ -259,6 +259,27 @@ def _light_reason(family: str, dps: dict[str, Any]) -> str:
 def _count_bool_dps(discovered_dps: dict[str, Any]) -> int:
     """Count boolean DPs (typical for switch channels)."""
     return sum(1 for v in discovered_dps.values() if isinstance(v, bool))
+
+
+def _count_switch_channel_bool_dps(discovered_dps: dict[str, Any]) -> int:
+    """Count bool DPs that are likely relay channels for switch/plug devices.
+
+    Some plugs expose extra bool telemetry/settings (for example lock/LED)
+    that should not increase gang count. Prefer classic relay DP IDs first,
+    and only fall back to all bool DPs when none of those IDs are present.
+    """
+    relay_like_ids = {
+        "1", "2", "3", "4", "5", "6", "7", "8",
+        "20", "21", "22", "23", "24", "25",
+    }
+    relay_bools = sum(
+        1
+        for dp_id, val in discovered_dps.items()
+        if dp_id in relay_like_ids and isinstance(val, bool)
+    )
+    if relay_bools > 0:
+        return relay_bools
+    return _count_bool_dps(discovered_dps)
 
 
 # ──────────────────────────────────────────────────────────────────────

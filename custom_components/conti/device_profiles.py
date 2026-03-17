@@ -77,7 +77,7 @@ TUYA_CODE_TO_CONTI_KEY: Final[dict[str, str]] = {
     "colour_data_v2": DP_KEY_COLOR_RGB,
     "work_mode": "mode",
     # ── Switches / sockets ──
-    "switch_1": "switch_1",
+    "switch_1": DP_KEY_POWER,
     "switch_2": "switch_2",
     "switch_3": "switch_3",
     "switch_4": "switch_4",
@@ -86,10 +86,19 @@ TUYA_CODE_TO_CONTI_KEY: Final[dict[str, str]] = {
     "switch": DP_KEY_POWER,
     "switch_usb1": "switch_usb1",
     "switch_usb2": "switch_usb2",
-    "countdown_1": "countdown_1",
+    "countdown_1": "countdown",
     "countdown_2": "countdown_2",
     "countdown_3": "countdown_3",
     "countdown_4": "countdown_4",
+    "add_ele": "energy_total",
+    "fault": "fault",
+    "relay_status": "relay_status",
+    "overcharge_switch": "overcharge_switch",
+    "light_mode": "light_mode",
+    "child_lock": "child_lock",
+    "cycle_time": "cycle_time",
+    "random_time": "random_time",
+    "switch_inching": "switch_inching",
     # ── Fans ──
     "fan_switch": DP_KEY_POWER,
     "switch_fan": DP_KEY_POWER,
@@ -314,7 +323,19 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "tuya_categories": ["cz"],
         "dp_template": {
             "1": {"key": DP_KEY_POWER, "type": "bool"},
-            "9": {"key": DP_KEY_POWER_USAGE, "type": "int", "scale": 10},
+            "9": {"key": "countdown", "type": "int"},
+            "17": {"key": "energy_total", "type": "int"},
+            "18": {"key": "current", "type": "int"},
+            "19": {"key": DP_KEY_POWER_USAGE, "type": "int"},
+            "20": {"key": "voltage", "type": "int"},
+            "26": {"key": "fault", "type": "int"},
+            "38": {"key": "relay_status", "type": "str"},
+            "39": {"key": "overcharge_switch", "type": "bool"},
+            "40": {"key": "light_mode", "type": "str"},
+            "41": {"key": "child_lock", "type": "bool"},
+            "42": {"key": "cycle_time", "type": "str"},
+            "43": {"key": "random_time", "type": "str"},
+            "44": {"key": "switch_inching", "type": "str"},
         },
     },
     # ── Motion Sensor ──
@@ -442,6 +463,20 @@ def score_profile_against_dps(
             base_score += 0.08
         elif cct_signal and not has_color_temp:
             base_score -= 0.08
+
+    # Power-monitoring smart plug signature (switch category family):
+    # DP 1 bool relay + telemetry-style integer DPs (commonly 17/19/20).
+    # This helps prefer the dedicated power-plug profile over a generic
+    # single-switch profile when strong evidence exists.
+    if profile.get("id") == "sensor_power_plug":
+        has_relay = isinstance(discovered_dps.get("1"), bool)
+        has_monitor = any(
+            isinstance(discovered_dps.get(dp), (int, float))
+            and not isinstance(discovered_dps.get(dp), bool)
+            for dp in ("17", "19", "20")
+        )
+        if has_relay and has_monitor:
+            base_score += 0.12
 
     return max(base_score, 0.0)
 

@@ -1411,6 +1411,65 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                                 current["role"],
                                 len(candidates),
                             )
+                        elif (
+                            len(candidates) > 1
+                            and expected_type == "bool"
+                        ):
+                            # Multiple bool changes are common on plugs/switches
+                            # (e.g. relay + indicator/lock). Prefer channel-like
+                            # IDs and existing role hints instead of failing.
+                            current_role = current["role"]
+                            preferred_ids: set[str] = set()
+                            if current_role == "power":
+                                preferred_ids = {"1", "20"}
+                            elif current_role.startswith("switch_"):
+                                suffix = current_role.replace("switch_", "")
+                                if suffix.isdigit():
+                                    preferred_ids = {suffix}
+
+                            known_role_by_dp = {
+                                dp: spec.get("key")
+                                for dp, spec in self._final_dp_map.items()
+                                if isinstance(spec, dict)
+                            }
+
+                            channel_like_ids = {
+                                "1", "2", "3", "4", "5", "6", "7", "8",
+                                "20", "21", "22", "23", "24", "25",
+                            }
+
+                            def _score_bool(entry: tuple[str, Any, Any]) -> tuple[int, int, int, int]:
+                                dp_id, _ov, _nv = entry
+                                role_match = 1 if known_role_by_dp.get(dp_id) == current_role else 0
+                                preferred = 1 if dp_id in preferred_ids else 0
+                                channel_like = 1 if dp_id in channel_like_ids else 0
+                                # Smaller numeric IDs are more commonly main relays.
+                                try:
+                                    inv_numeric = -int(dp_id)
+                                except (TypeError, ValueError):
+                                    inv_numeric = -10_000
+                                return (role_match, preferred, channel_like, inv_numeric)
+
+                            best = max(candidates, key=_score_bool)
+                            dp_id, _old, new_val = best
+                            session.set_pending_role(
+                                current["role"], current["type"]
+                            )
+                            session.assign_change(dp_id, new_val)
+                            self._learn_feedback = (
+                                f"\u2705 Detected! DP {dp_id} assigned "
+                                f"to '{current['role']}' "
+                                f"(picked from {len(changes)} changes "
+                                f"using bool-role scoring)."
+                            )
+                            self._learn_step_idx += 1
+                            _LOGGER.info(
+                                "Learn: DP %s \u2192 '%s' "
+                                "(bool-role scoring, %d candidates)",
+                                dp_id,
+                                current["role"],
+                                len(candidates),
+                            )
                         else:
                             self._learn_feedback = (
                                 f"\u26a0 {len(changes)} data points "
