@@ -4,10 +4,10 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/conti-addon/conti",
+  "documentation": "https://github.com/srobysingh-bot/conti",
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/conti-addon/conti/issues",
+  "issue_tracker": "https://github.com/srobysingh-bot/conti/issues",
   "requirements": ["cryptography>=41.0.0", "tinytuya>=1.13.0"],
   "version": "0.2.0"
 }
