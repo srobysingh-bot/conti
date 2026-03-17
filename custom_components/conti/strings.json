@@ -12,7 +12,7 @@
           "onboarding_mode": "Onboarding Method"
         },
         "data_description": {
-          "host": "Local IP address of the device on your home network.",
+          "host": "Local IP address of the device on your home network. Leave blank in cloud-assisted mode — Conti will try to detect it automatically.",
           "onboarding_mode": "Cloud-assisted: Conti fetches your linked devices and auto-fills Device ID and Local Key. Manual: enter credentials yourself (advanced)."
         }
       },
@@ -42,6 +42,16 @@
         "description": "Multiple cloud devices are available. Choose the correct device to auto-fill Device ID and Local Key.",
         "data": {
           "cloud_device_id": "Cloud Device"
+        }
+      },
+      "confirm_host": {
+        "title": "Enter Device IP Address",
+        "description": "Conti fetched your device credentials but could not automatically detect the local IP address.\n\n{candidates_hint}\n\nPlease enter the device\u2019s local IP address to continue.",
+        "data": {
+          "host": "Device IP Address"
+        },
+        "data_description": {
+          "host": "Local IP address of the device on your home network (e.g. 192.168.1.100)."
         }
       },
       "detect": {
@@ -103,6 +113,7 @@
       "cloud_no_device_match": "No linked cloud devices were returned for this Tuya project/region. Check credentials, region, and project linkage.",
       "cloud_device_missing_local_key": "The selected cloud device was found, but Tuya did not return a local key. This can happen with some account/project configurations. Use Manual onboarding as fallback.",
       "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
+      "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
       "incomplete_cct_map": "This light looks like a warm/cool (CCT) device, but the mapping is missing brightness and/or colour temperature. Use Guided Learn or Manual Edit before finishing.",
       "unknown": "An unexpected error occurred."

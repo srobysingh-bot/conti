@@ -93,6 +93,9 @@ _LOGGER = logging.getLogger(__name__)
 # Minimum confidence score to skip guided learn prompt
 _CONFIDENCE_THRESHOLD = 0.6
 
+# LAN discovery timeout during onboarding (seconds)
+_LAN_DISCOVERY_TIMEOUT = 8.0
+
 
 def _mask_key(key: str) -> str:
     """Redact a local key for safe logging — first 2 + last 2 chars."""
@@ -101,13 +104,84 @@ def _mask_key(key: str) -> str:
     return key[:2] + "*" * (len(key) - 4) + key[-2:]
 
 
+def _is_private_lan_ip(ip: str) -> bool:
+    """Return True only for valid private IPv4 addresses."""
+    try:
+        parsed = ipaddress.ip_address(ip)
+        return parsed.version == 4 and parsed.is_private
+    except ValueError:
+        return False
+
+
+def _scan_lan_for_device_id_sync(device_id: str) -> list[str]:
+    """Run a local TinyTuya scan and return private LAN IPs matching device_id."""
+    try:
+        import tinytuya  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug("LAN discovery unavailable (tinytuya import failed): %s", exc)
+        return []
+
+    try:
+        raw = tinytuya.deviceScan(
+            verbose=False,
+            maxretry=1,
+            color=False,
+            poll=False,
+            forcescan=False,
+            byID=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug("LAN discovery scan failed for %s: %s", device_id, exc)
+        return []
+
+    if not isinstance(raw, dict):
+        return []
+
+    matches: list[str] = []
+    for fallback_ip, payload in raw.items():
+        if not isinstance(payload, dict):
+            continue
+
+        found_id = str(payload.get("gwId") or payload.get("id") or "").strip()
+        if found_id != device_id:
+            continue
+
+        ip = str(payload.get("ip") or fallback_ip or "").strip()
+        if _is_private_lan_ip(ip):
+            matches.append(ip)
+
+    # Preserve order, drop duplicates.
+    return list(dict.fromkeys(matches))
+
+
+async def _discover_confident_lan_host(device_id: str) -> tuple[str | None, list[str]]:
+    """Discover local host by device_id; return (single_confident_match, candidates)."""
+    try:
+        candidates = await asyncio.wait_for(
+            asyncio.to_thread(_scan_lan_for_device_id_sync, device_id),
+            timeout=_LAN_DISCOVERY_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        _LOGGER.info(
+            "LAN discovery timed out for %s after %.1fs; using manual fallback",
+            device_id,
+            _LAN_DISCOVERY_TIMEOUT,
+        )
+        return None, []
+
+    if len(candidates) == 1:
+        return candidates[0], candidates
+
+    return None, candidates
+
+
 def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     """Step 1: basic info + choose onboarding path (no device_id/local_key)."""
     d = defaults or {}
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=d.get(CONF_NAME, "")): str,
-            vol.Required(CONF_HOST, default=d.get(CONF_HOST, "")): str,
+            vol.Optional(CONF_HOST, default=d.get(CONF_HOST, "")): str,
             vol.Optional(
                 CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)
             ): int,
@@ -315,6 +389,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._learn_feedback: str = ""
         self._cloud_auth: dict[str, str] = {}
         self._cloud_candidates: list[dict[str, Any]] = []
+        self._lan_candidates: list[str] = []
 
     # -- Options flow entry point -------------------------------------------
 
@@ -338,14 +413,18 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._flow_data = {
                 CONF_NAME: user_input[CONF_NAME],
-                CONF_HOST: user_input[CONF_HOST].strip(),
+                CONF_HOST: user_input.get(CONF_HOST, "").strip(),
                 CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
                 CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
             }
             mode = user_input.get("onboarding_mode", "manual")
             if mode == "cloud_assisted":
                 return await self.async_step_cloud_credentials()
-            return await self.async_step_manual_credentials()
+            # Manual mode: host is required to be able to connect
+            if not self._flow_data[CONF_HOST]:
+                errors["base"] = "host_required_manual"
+            else:
+                return await self.async_step_manual_credentials()
 
         return self.async_show_form(
             step_id="user",
@@ -403,9 +482,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors["base"] = "cloud_device_missing_local_key"
 
                     if "base" not in errors:
-                        self._apply_cloud_candidate(selected)
+                        await self._apply_cloud_candidate(selected)
                         await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
                         self._abort_if_unique_id_configured()
+                        if not self._flow_data.get(CONF_HOST, "").strip():
+                            return await self.async_step_confirm_host()
                         return await self.async_step_detect()
                 else:
                     self._cloud_candidates = candidates
@@ -486,9 +567,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if "base" not in errors:
                         errors["base"] = "cloud_device_missing_local_key"
                 else:
-                    self._apply_cloud_candidate(selected)
+                    await self._apply_cloud_candidate(selected)
                     await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
                     self._abort_if_unique_id_configured()
+                    if not self._flow_data.get(CONF_HOST, "").strip():
+                        return await self.async_step_confirm_host()
                     return await self.async_step_detect()
 
         choices: dict[str, str] = {}
@@ -608,7 +691,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return "cloud_api_failed"
         return "cloud_fetch_failed"
 
-    def _apply_cloud_candidate(self, candidate: dict[str, Any]) -> None:
+    async def _apply_cloud_candidate(self, candidate: dict[str, Any]) -> None:
         """Apply selected cloud candidate into flow data for local runtime."""
         self._flow_data[CONF_DEVICE_ID] = str(candidate.get("device_id", "")).strip()
         self._flow_data[CONF_LOCAL_KEY] = str(candidate.get("local_key", "")).strip()
@@ -617,6 +700,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Only use cloud IP when host is missing and the cloud IP is private LAN.
         cloud_ip = str(candidate.get("ip", "")).strip()
         manual_host = self._flow_data.get(CONF_HOST, "").strip()
+        host_set = False
         if manual_host:
             if cloud_ip and manual_host != cloud_ip:
                 _LOGGER.info(
@@ -625,11 +709,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     cloud_ip,
                     self._flow_data.get(CONF_DEVICE_ID, ""),
                 )
+            host_set = True
         elif cloud_ip:
             try:
                 parsed_ip = ipaddress.ip_address(cloud_ip)
                 if parsed_ip.is_private:
                     self._flow_data[CONF_HOST] = cloud_ip
+                    host_set = True
                 else:
                     _LOGGER.warning(
                         "Cloud onboarding: cloud IP %s is public; not using it as local host for device %s",
@@ -643,9 +729,80 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._flow_data.get(CONF_DEVICE_ID, ""),
                 )
 
+        # If host not set, try LAN IP discovery
+        if not host_set:
+            device_id = self._flow_data.get(CONF_DEVICE_ID, "")
+            local_host, lan_candidates = await _discover_confident_lan_host(device_id)
+            self._lan_candidates = lan_candidates
+            if local_host:
+                self._flow_data[CONF_HOST] = local_host
+                _LOGGER.info(
+                    "LAN discovery: matched device %s to host %s via local scan",
+                    device_id,
+                    local_host,
+                )
+            elif len(lan_candidates) > 1:
+                _LOGGER.info(
+                    "LAN discovery: multiple local matches for %s (%s); showing confirm_host",
+                    device_id,
+                    lan_candidates,
+                )
+            else:
+                _LOGGER.info(
+                    "LAN discovery: no match for %s; showing confirm_host",
+                    device_id,
+                )
+
         category = str(candidate.get("category", "")).strip()
         if category:
             self._tuya_category = category
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Step (cloud only): Confirm host when auto-detection could not fill it
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_confirm_host(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Cloud path — ask for host when LAN auto-detection did not produce
+        a confident single match.  Already-set host is never reached here."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input.get(CONF_HOST, "").strip()
+            if not host:
+                errors["base"] = "host_required_manual"
+            else:
+                self._flow_data[CONF_HOST] = host
+                return await self.async_step_detect()
+
+        # Build a helpful hint listing any LAN scan candidates.
+        candidates = self._lan_candidates
+        if candidates:
+            candidates_hint = (
+                "Possible device(s) found on your LAN: "
+                + ", ".join(candidates)
+                + ".  Pick the correct IP or enter it manually below."
+            )
+        else:
+            candidates_hint = (
+                "No device matching your selection was found on the local network.  "
+                "Please enter the device\u2019s local IP address below."
+            )
+
+        return self.async_show_form(
+            step_id="confirm_host",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_HOST,
+                        default=self._flow_data.get(CONF_HOST, ""),
+                    ): str,
+                }
+            ),
+            description_placeholders={"candidates_hint": candidates_hint},
+            errors=errors,
+        )
 
     # ═══════════════════════════════════════════════════════════════════
     # Step 2: Auto-detect protocol + discover DPs + match profile
