@@ -55,6 +55,7 @@ _HeuristicRule = tuple[list[str], str, str, bool]
 
 LIGHT_HEURISTICS: Final[list[_HeuristicRule]] = [
     (["1", "20"],            DP_KEY_POWER,      "bool", False),
+    (["21"],                 "mode",            "str",  False),
     (["2", "22"],            DP_KEY_BRIGHTNESS,  "int",  False),
     (["3", "23"],            DP_KEY_COLOR_TEMP,  "int",  False),
     (["5", "24"],            DP_KEY_COLOR_RGB,   "str",  False),

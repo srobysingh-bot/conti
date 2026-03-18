@@ -390,6 +390,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._cloud_auth: dict[str, str] = {}
         self._cloud_candidates: list[dict[str, Any]] = []
         self._lan_candidates: list[str] = []
+        self._onboarding_mode: str = "manual"
+        self._host_resolution_note: str = ""
 
     # -- Options flow entry point -------------------------------------------
 
@@ -418,6 +420,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
             }
             mode = user_input.get("onboarding_mode", "manual")
+            self._onboarding_mode = mode
             if mode == "cloud_assisted":
                 return await self.async_step_cloud_credentials()
             # Manual mode: host is required to be able to connect
@@ -695,6 +698,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Apply selected cloud candidate into flow data for local runtime."""
         self._flow_data[CONF_DEVICE_ID] = str(candidate.get("device_id", "")).strip()
         self._flow_data[CONF_LOCAL_KEY] = str(candidate.get("local_key", "")).strip()
+        self._host_resolution_note = ""
 
         # In cloud-assisted mode, never replace a user-entered local host.
         # Only use cloud IP when host is missing and the cloud IP is private LAN.
@@ -710,23 +714,35 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._flow_data.get(CONF_DEVICE_ID, ""),
                 )
             host_set = True
+            self._host_resolution_note = (
+                "Using your provided host value."
+            )
         elif cloud_ip:
             try:
                 parsed_ip = ipaddress.ip_address(cloud_ip)
                 if parsed_ip.is_private:
                     self._flow_data[CONF_HOST] = cloud_ip
                     host_set = True
+                    self._host_resolution_note = (
+                        "Host was filled from Tuya cloud device metadata."
+                    )
                 else:
                     _LOGGER.warning(
                         "Cloud onboarding: cloud IP %s is public; not using it as local host for device %s",
                         cloud_ip,
                         self._flow_data.get(CONF_DEVICE_ID, ""),
                     )
+                    self._host_resolution_note = (
+                        "Cloud returned a non-local IP, so Conti requires manual local host confirmation."
+                    )
             except ValueError:
                 _LOGGER.warning(
                     "Cloud onboarding: invalid cloud IP '%s'; not using it as local host for device %s",
                     cloud_ip,
                     self._flow_data.get(CONF_DEVICE_ID, ""),
+                )
+                self._host_resolution_note = (
+                    "Cloud returned an invalid IP value, so Conti requires manual local host confirmation."
                 )
 
         # If host not set, try LAN IP discovery
@@ -736,18 +752,28 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._lan_candidates = lan_candidates
             if local_host:
                 self._flow_data[CONF_HOST] = local_host
+                self._host_resolution_note = (
+                    "Host was auto-detected from local LAN scan."
+                )
                 _LOGGER.info(
                     "LAN discovery: matched device %s to host %s via local scan",
                     device_id,
                     local_host,
                 )
             elif len(lan_candidates) > 1:
+                self._host_resolution_note = (
+                    "Multiple possible local IPs were detected. Please confirm the correct host."
+                )
                 _LOGGER.info(
                     "LAN discovery: multiple local matches for %s (%s); showing confirm_host",
                     device_id,
                     lan_candidates,
                 )
             else:
+                if not self._host_resolution_note:
+                    self._host_resolution_note = (
+                        "No confident LAN IP was detected. This is common in inter-VLAN setups."
+                    )
                 _LOGGER.info(
                     "LAN discovery: no match for %s; showing confirm_host",
                     device_id,
@@ -790,6 +816,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "Please enter the device\u2019s local IP address below."
             )
 
+        host_resolution = self._host_resolution_note or (
+            "Cloud credentials were fetched successfully. "
+            "Only local host confirmation is needed before local protocol detection."
+        )
+
         return self.async_show_form(
             step_id="confirm_host",
             data_schema=vol.Schema(
@@ -800,7 +831,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): str,
                 }
             ),
-            description_placeholders={"candidates_hint": candidates_hint},
+            description_placeholders={
+                "candidates_hint": candidates_hint,
+                "host_resolution": host_resolution,
+            },
             errors=errors,
         )
 
@@ -851,6 +885,43 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not ok:
             errors["base"] = err or "cannot_connect"
+
+            # Cloud-assisted flow: keep user in host-confirmation context for
+            # host/network failures, which are common in inter-VLAN setups.
+            if errors["base"] == "cannot_connect" and self._onboarding_mode == "cloud_assisted":
+                if not self._host_resolution_note:
+                    self._host_resolution_note = (
+                        "Cloud credentials were fetched successfully, but local TCP connection failed. "
+                        "Confirm the local host/IP and network routing/firewall rules."
+                    )
+                return await self.async_step_confirm_host()
+
+            # Keep protocol/auth failures in detect step so the user sees the
+            # correct error classification and can try protocol override.
+            if errors["base"] in {"wrong_protocol", "invalid_auth"}:
+                return self.async_show_form(
+                    step_id="detect",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Optional("use_cloud_assist", default=False): bool,
+                            vol.Optional(
+                                "protocol_override",
+                                default="auto",
+                            ): vol.In(SUPPORTED_VERSIONS),
+                        }
+                    ),
+                    description_placeholders={
+                        "protocol_version": self._detected_version or "unknown",
+                        "dp_count": "0",
+                        "mapped_count": str(len(self._final_dp_map)),
+                        "profile_name": (
+                            self._matched_profile["name"] if self._matched_profile else "No match"
+                        ),
+                        "confidence": f"{int(self._confidence * 100)}%",
+                    },
+                    errors=errors,
+                )
+
             return self.async_show_form(
                 step_id="user",
                 data_schema=_user_schema(self._flow_data),

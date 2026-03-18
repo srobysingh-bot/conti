@@ -55,7 +55,7 @@ def create_conti_light(
     Factory rules (checked most-specific first):
     1. power + brightness + color_temp + color_rgb + mode → RgbCctLight
     2. power + brightness + color_rgb + mode             → RgbStripLight
-    3. power + brightness + color_temp + mode             → WhiteStripLight
+    3. power + brightness + color_temp (no RGB required)  → WhiteStripLight
     4. power + brightness (DP 20–29 range, triac-style)  → TriacDimmerLight
     5. power + brightness                                → DimmerLight
     6. fallback                                          → DimmerLight
@@ -72,7 +72,9 @@ def create_conti_light(
     if has_power and has_brightness and has_rgb and has_mode:
         return ContiRgbStripLight(coordinator, entry, device_id, dp_map)
 
-    if has_power and has_brightness and has_color_temp and has_mode:
+    # CCT lights do not always expose a separate mode DP. If a light has
+    # power + brightness + color_temp (and no RGB), expose tunable-white.
+    if has_power and has_brightness and has_color_temp and not has_rgb:
         return ContiWhiteStripLight(coordinator, entry, device_id, dp_map)
 
     # Triac dimmers typically use DP ids in the 20–29 range for power.

@@ -46,7 +46,7 @@
       },
       "confirm_host": {
         "title": "Enter Device IP Address",
-        "description": "Conti fetched your device credentials but could not automatically detect the local IP address.\n\n{candidates_hint}\n\nPlease enter the device\u2019s local IP address to continue.",
+        "description": "Conti fetched your device credentials successfully, but local host confirmation is still required.\n\n{host_resolution}\n\n{candidates_hint}\n\nPlease enter the device\u2019s local IP address to continue.",
         "data": {
           "host": "Device IP Address"
         },
@@ -98,7 +98,7 @@
       "already_configured": "This device is already configured."
     },
     "error": {
-      "cannot_connect": "Unable to connect to the device. Check IP address, port, and that the device is on the same network.",
+      "cannot_connect": "Unable to connect to the device over local TCP. Check host/IP, port, and routing/firewall rules between Home Assistant and the device.",
       "invalid_auth": "Authentication failed. The local key is likely incorrect.  Verify the 16-character key from the Tuya IoT Platform.",
       "wrong_protocol": "Protocol mismatch. The device rejected all attempted protocol versions (3.3, 3.4, 3.5, 3.1). Check the device firmware version.",
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
