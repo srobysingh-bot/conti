@@ -947,6 +947,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         profile, confidence = best_profile_for_dps(
             discovered_dps,
             device_type=device_type,
+            tuya_category=self._tuya_category,
         )
         self._matched_profile = profile
         self._confidence = confidence
@@ -963,6 +964,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._auto_dp_map,
             self._profile_dp_map,
         )
+        self._apply_safe_profile_fallback_if_needed()
         self._mapping_source = "auto"
 
         _LOGGER.info(
@@ -1048,35 +1050,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 if schema:
                     cloud_map, category, type_hint = helper.schema_to_dp_map(schema)
+                    if category:
+                        self._tuya_category = category
+
                     if cloud_map:
                         self._cloud_dp_map = cloud_map
-                        self._tuya_category = category
                         self._mapping_source = "cloud"
-
-                        # Re-run profile matching with category hint
-                        from .device_profiles import (  # noqa: PLC0415
-                            best_profile_for_dps,
-                            dp_map_from_profile,
-                        )
-                        profile, confidence = best_profile_for_dps(
-                            self._discovered_dps,
-                            device_type=self._flow_data[CONF_DEVICE_TYPE],
-                            tuya_category=category,
-                        )
-                        if profile and confidence > self._confidence:
-                            self._matched_profile = profile
-                            self._confidence = confidence
-                            self._profile_dp_map = dp_map_from_profile(
-                                profile, self._discovered_dps, confidence
-                            )
-
-                        # Re-merge with cloud as highest-priority source
-                        from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
-                        self._final_dp_map = merge_all_dp_maps(
-                            self._auto_dp_map,
-                            self._profile_dp_map,
-                            self._cloud_dp_map,
-                        )
 
                         _LOGGER.info(
                             "Cloud schema: %d DPs mapped (category=%s)",
@@ -1085,6 +1064,39 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         )
                     else:
                         _LOGGER.info("Cloud schema returned no mappable DPs")
+
+                    # Re-run profile matching with category hint even when
+                    # cloud schema conversion yields an empty dp_map.
+                    from .device_profiles import (  # noqa: PLC0415
+                        best_profile_for_dps,
+                        dp_map_from_profile,
+                    )
+                    profile, confidence = best_profile_for_dps(
+                        self._discovered_dps,
+                        device_type=self._flow_data[CONF_DEVICE_TYPE],
+                        tuya_category=self._tuya_category,
+                    )
+                    if profile and (confidence > self._confidence or not self._profile_dp_map):
+                        self._matched_profile = profile
+                        self._confidence = max(self._confidence, confidence)
+                        self._profile_dp_map = dp_map_from_profile(
+                            profile,
+                            self._discovered_dps,
+                            self._confidence,
+                        )
+
+                    # Last-resort safe fallback: if still empty, use a
+                    # category-selected profile template only when choice is
+                    # unambiguous or discovery evidence is strong enough.
+                    self._apply_safe_profile_fallback_if_needed()
+
+                    # Re-merge with cloud as highest-priority source.
+                    from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+                    self._final_dp_map = merge_all_dp_maps(
+                        self._auto_dp_map,
+                        self._profile_dp_map,
+                        self._cloud_dp_map,
+                    )
                 else:
                     errors["base"] = "cloud_fetch_failed"
 
@@ -1642,6 +1654,77 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             description_placeholders=description_placeholders,
+        )
+
+    def _apply_safe_profile_fallback_if_needed(self) -> None:
+        """Apply category/profile fallback only when evidence is safe.
+
+        This avoids reaching review with an empty map in cloud-assisted
+        onboarding when local DP discovery is weak, while keeping conservative
+        behavior for ambiguous categories.
+        """
+        if self._final_dp_map:
+            return
+
+        category = (self._tuya_category or "").strip()
+        if not category:
+            return
+
+        from .device_profiles import (  # noqa: PLC0415
+            dp_map_from_profile,
+            match_profile_by_category,
+            score_profile_against_dps,
+        )
+
+        device_type = self._flow_data.get(CONF_DEVICE_TYPE)
+        candidates = [
+            p for p in match_profile_by_category(category)
+            if p.get("device_type") == device_type
+        ]
+        if not candidates:
+            return
+
+        discovered = self._discovered_dps or {}
+        scored = [
+            (score_profile_against_dps(p, discovered), p)
+            for p in candidates
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        chosen: dict[str, Any] | None = None
+        score = 0.0
+
+        if scored and scored[0][0] > 0:
+            score, chosen = scored[0]
+            if len(scored) > 1 and scored[1][0] == score:
+                chosen = None
+        elif len(candidates) == 1:
+            chosen = candidates[0]
+            score = 0.5
+
+        if not chosen:
+            return
+
+        self._matched_profile = chosen
+        self._confidence = max(self._confidence, score)
+        self._profile_dp_map = dp_map_from_profile(
+            chosen,
+            discovered,
+            self._confidence,
+        )
+
+        from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+
+        self._final_dp_map = merge_all_dp_maps(
+            self._auto_dp_map,
+            self._profile_dp_map,
+            self._cloud_dp_map,
+        )
+        _LOGGER.info(
+            "Profile fallback applied from category '%s': profile=%s, mapped=%d",
+            category,
+            chosen.get("id", "unknown"),
+            len(self._final_dp_map),
         )
 
     def _looks_like_cct_light(self) -> bool:
