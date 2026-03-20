@@ -202,6 +202,7 @@ def auto_map_dps(
     # richer known DPs when the observed DP shape strongly matches.
     if device_type == DEVICE_TYPE_SWITCH:
         _augment_power_monitoring_plug_map(result, discovered_dps)
+        _augment_multi_gang_switch_family_map(result, discovered_dps)
 
     # Report unmapped DPs so the user knows what was ignored.
     unmapped = set(discovered_dps.keys()) - set(result.keys())
@@ -295,6 +296,87 @@ def _augment_power_monitoring_plug_map(
             "Auto-mapping (%s): enriched power-monitoring plug DPs: %s",
             DEVICE_TYPE_SWITCH,
             sorted(added),
+        )
+
+
+def _augment_multi_gang_switch_family_map(
+    result: dict[str, dict[str, Any]],
+    discovered_dps: dict[str, Any],
+) -> None:
+    """Enrich known multi-gang wall-switch families using strong DP signatures.
+
+    Current signature (strict):
+      * relay channels on DPs 1/2/3/4 are bool
+      * countdown DPs 7/8/9/10 are integer-like
+      * at least two advanced settings among 14/17/18/19/47 exist with
+        expected value types
+
+    This stays conservative and only applies when evidence is strong,
+    leaving generic switch fallback behavior unchanged.
+    """
+    relay_ids = ("1", "2", "3", "4")
+    countdown_ids = ("7", "8", "9", "10")
+
+    if not all(isinstance(discovered_dps.get(dp_id), bool) for dp_id in relay_ids):
+        return
+
+    if not all(
+        isinstance(discovered_dps.get(dp_id), (int, float))
+        and not isinstance(discovered_dps.get(dp_id), bool)
+        for dp_id in countdown_ids
+    ):
+        return
+
+    advanced_hits = 0
+    if isinstance(discovered_dps.get("14"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("17"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("18"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("19"), str):
+        advanced_hits += 1
+    if isinstance(discovered_dps.get("47"), str):
+        advanced_hits += 1
+
+    if advanced_hits < 2:
+        return
+
+    family_map: dict[str, dict[str, Any]] = {
+        "1": {"key": "switch_1", "type": "bool"},
+        "2": {"key": "switch_2", "type": "bool"},
+        "3": {"key": "switch_3", "type": "bool"},
+        "4": {"key": "switch_4", "type": "bool"},
+        "7": {"key": "countdown_1", "type": "int"},
+        "8": {"key": "countdown_2", "type": "int"},
+        "9": {"key": "countdown_3", "type": "int"},
+        "10": {"key": "countdown_4", "type": "int"},
+        "14": {"key": "relay_status", "type": "str"},
+        "17": {"key": "cycle_time", "type": "str"},
+        "18": {"key": "random_time", "type": "str"},
+        "19": {"key": "switch_inching", "type": "str"},
+        "47": {"key": "switch_type", "type": "str"},
+    }
+
+    added_or_updated: list[str] = []
+    for dp_id, spec in family_map.items():
+        if dp_id not in discovered_dps:
+            continue
+        actual_type = _classify_value(discovered_dps[dp_id])
+        if actual_type != spec["type"]:
+            continue
+
+        # Force family-specific role naming for relay channels and
+        # advanced DPs when the signature is strongly matched.
+        if result.get(dp_id) != spec:
+            result[dp_id] = dict(spec)
+            added_or_updated.append(dp_id)
+
+    if added_or_updated:
+        _LOGGER.info(
+            "Auto-mapping (%s): enriched multi-gang switch family DPs: %s",
+            DEVICE_TYPE_SWITCH,
+            sorted(added_or_updated),
         )
 
 

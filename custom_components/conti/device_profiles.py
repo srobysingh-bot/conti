@@ -256,10 +256,10 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "device_type": DEVICE_TYPE_SWITCH,
         "tuya_categories": ["kg"],
         "dp_template": {
-            "1": {"key": DP_KEY_POWER, "type": "bool"},
-            "2": {"key": DP_KEY_POWER, "type": "bool"},
-            "3": {"key": DP_KEY_POWER, "type": "bool"},
-            "4": {"key": DP_KEY_POWER, "type": "bool"},
+            "1": {"key": "switch_1", "type": "bool"},
+            "2": {"key": "switch_2", "type": "bool"},
+            "3": {"key": "switch_3", "type": "bool"},
+            "4": {"key": "switch_4", "type": "bool"},
         },
     },
     # ── Power Strip / Extension Board ──
@@ -476,6 +476,26 @@ def score_profile_against_dps(
             for dp in ("17", "19", "20")
         )
         if has_relay and has_monitor:
+            base_score += 0.12
+
+    # 4-gang wall-switch family signature:
+    # relays on 1..4 + countdowns on 7..10 + advanced control DPs.
+    if profile.get("id") == "switch_4gang":
+        has_relays_1_4 = all(
+            isinstance(discovered_dps.get(dp), bool)
+            for dp in ("1", "2", "3", "4")
+        )
+        has_countdown_7_10 = all(
+            isinstance(discovered_dps.get(dp), (int, float))
+            and not isinstance(discovered_dps.get(dp), bool)
+            for dp in ("7", "8", "9", "10")
+        )
+        advanced_hits = sum(
+            1
+            for dp in ("14", "17", "18", "19", "47")
+            if isinstance(discovered_dps.get(dp), str)
+        )
+        if has_relays_1_4 and has_countdown_7_10 and advanced_hits >= 2:
             base_score += 0.12
 
     return max(base_score, 0.0)
