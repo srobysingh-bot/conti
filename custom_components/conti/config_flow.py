@@ -675,11 +675,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             TuyaCloudAPIError,
             TuyaCloudAuthError,
             TuyaCloudPaginationError,
+            TuyaCloudPermissionExpiredError,
             TuyaCloudPathError,
             TuyaCloudParseError,
             TuyaCloudRegionError,
         )
 
+        if isinstance(exc, TuyaCloudPermissionExpiredError):
+            return "cloud_permission_expired"
         if isinstance(exc, TuyaCloudAuthError):
             return "cloud_auth_failed"
         if isinstance(exc, TuyaCloudRegionError):

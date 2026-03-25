@@ -55,6 +55,10 @@ class TuyaCloudAuthError(TuyaCloudOnboardingError):
     """Auth/permission failure for Tuya cloud onboarding calls."""
 
 
+class TuyaCloudPermissionExpiredError(TuyaCloudOnboardingError):
+    """Cloud project permission/subscription is expired for onboarding calls."""
+
+
 class TuyaCloudRegionError(TuyaCloudOnboardingError):
     """Region/data-center mismatch for Tuya cloud onboarding calls."""
 
@@ -528,7 +532,19 @@ class TuyaCloudSchemaHelper:
         """Map Tuya HTTP/code/message into specific onboarding exceptions."""
         msg_l = msg.lower()
 
-        if status in (401, 403) or code in {"1010", "1011", "1106", "2406", "28841002"}:
+        if code == "28841002":
+            _LOGGER.error(
+                "Tuya cloud permission expired: path=%s status=%s code=%s msg=%s",
+                path,
+                status,
+                code,
+                msg,
+            )
+            raise TuyaCloudPermissionExpiredError(
+                f"status={status} path={path} code={code} msg={msg}"
+            )
+
+        if status in (401, 403) or code in {"1010", "1011", "1106", "2406"}:
             raise TuyaCloudAuthError(f"status={status} path={path} code={code} msg={msg}")
 
         if status == 404:

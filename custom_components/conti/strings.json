@@ -104,6 +104,7 @@
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
       "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",
       "cloud_auth_failed": "Tuya cloud authentication failed. Check Access ID, Access Secret, and selected region.",
+      "cloud_permission_expired": "Tuya cloud development plan permission has expired for this project (code 28841002). Renew the plan/subscription in Tuya IoT Cloud and retry.",
       "cloud_region_mismatch": "Tuya cloud region mismatch. The selected data centre does not match your linked project/account region.",
       "cloud_api_path_failed": "Tuya cloud API path is not available for this project/region. Check project type and selected region.",
       "cloud_parse_failed": "Received an unexpected response from Tuya cloud. Please try again; if it persists, check integration logs.",
