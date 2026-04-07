@@ -53,6 +53,11 @@ _SENSOR_META: dict[str, tuple[SensorDeviceClass | None, str | None, SensorStateC
     DP_KEY_MOTION: (None, None, None, "mdi:motion-sensor"),
     DP_KEY_CONTACT: (None, None, None, "mdi:door-closed"),
     DP_KEY_DOOR_STATE: (None, None, None, "mdi:door-closed"),
+    # Alarm-capable contact sensor DPs
+    "alarm_switch": (None, None, None, "mdi:bell"),
+    "delay_alarm": (None, None, None, "mdi:timer"),
+    "time_alarm": (None, None, None, "mdi:clock"),
+    "alarm_volume": (None, PERCENTAGE, None, "mdi:volume-high"),
 }
 
 

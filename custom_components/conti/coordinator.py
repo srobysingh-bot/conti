@@ -67,6 +67,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         # Track DPs commanded via HA so we can label source in activity
         self._commanded_dps: dict[str, float] = {}  # dp_id → monotonic ts
 
+        # Track previous state for low-power sensors to detect changes for activity
+        self._previous_dps: dict[str, Any] = {}
+
         # Register per-device push callback
         if self._low_power_cloud is None:
             self.device_manager.register_state_callback(
@@ -116,6 +119,8 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
             if dps:
                 self._consecutive_failures = 0
+                # Detect state changes for activity logging in low-power sensors
+                self._detect_lowpower_state_changes(dps)
                 return {self._device_id: dps}
 
             # Empty cloud status is normal for sleepy sensors; keep last state.
@@ -183,6 +188,66 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if self._low_power_cloud is not None:
             return True
         return self.device_manager.is_online(self._device_id)
+
+    def _detect_lowpower_state_changes(self, new_dps: dict[str, Any]) -> None:
+        """Detect state changes in low-power sensors and fire activity events.
+        
+        Called after cloud polling updates for low-power sensors.
+        Detects changes in door_state (DP 1) and logs them as activity.
+        """
+        # Key DPs we want to track for activity (door_state on DP 1)
+        tracked_keys = {"1"}  # DP 1 is typically door_state for contact sensors
+        
+        for dp_id in tracked_keys:
+            prev_val = self._previous_dps.get(dp_id)
+            new_val = new_dps.get(dp_id)
+            
+            # Only log if value actually changed and we have both values
+            if prev_val is not None and new_val is not None and prev_val != new_val:
+                # Don't log if this was a recent command (avoid double-logging)
+                if self.is_dp_commanded(dp_id):
+                    continue
+                
+                # Map door_state value to human-readable action
+                if dp_id == "1":
+                    action = "opened" if bool(new_val) else "closed"
+                    self._fire_activity_event(f"door {action} by external device")
+        
+        # Update previous state for next comparison
+        self._previous_dps = dict(new_dps)
+
+    def _fire_activity_event(self, message: str) -> None:
+        """Fire a logbook entry event for device activity.
+        
+        Safe to call; handles entry lookup gracefully.
+        """
+        try:
+            # Find the config entry for this device to get the display name
+            device_name = self._device_id  # fallback to device_id
+            for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and entry_data.get("device_id") == self._device_id:
+                    # Find the actual ConfigEntry to get the title
+                    for entry in self.hass.config_entries.async_entries(DOMAIN):
+                        if entry.entry_id == entry_id:
+                            device_name = entry.title
+                            break
+                    break
+            
+            self.hass.bus.async_fire(
+                "logbook_entry",
+                {
+                    "name": device_name,
+                    "message": message,
+                    "entity_id": f"{DOMAIN}.{self._device_id}",
+                    "domain": DOMAIN,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "Failed to fire activity event for %s: %s",
+                self._device_id,
+                exc,
+            )
 
     # -- Push callback -------------------------------------------------------
 

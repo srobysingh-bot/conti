@@ -23,6 +23,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
     CONF_DP_MAP,
+    DEVICE_TYPE_SENSOR,
     DEVICE_TYPE_SWITCH,
     DOMAIN,
     MANUFACTURER,
@@ -43,7 +44,12 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    if entry.data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_SWITCH:
+    device_type = entry.data.get(CONF_DEVICE_TYPE)
+    
+    # Support switch entities on:
+    # - DEVICE_TYPE_SWITCH: all bool DPs
+    # - DEVICE_TYPE_SENSOR: only alarm-related bool DPs (alarm_switch, arming_switch)
+    if device_type not in (DEVICE_TYPE_SWITCH, DEVICE_TYPE_SENSOR):
         return
 
     coordinator: ContiCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
@@ -51,19 +57,30 @@ async def async_setup_entry(
     dp_map: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else (raw or {})
     device_id: str = entry.data[CONF_DEVICE_ID]
 
-    # Collect ALL DPs whose type is "bool" — covers single-switch, multi-gang,
-    # and power-strip devices without requiring a specific "power" key.
-    bool_dps: list[tuple[str, str]] = [
-        (str(dp_id), info.get("key", f"switch_{dp_id}"))
-        for dp_id, info in dp_map.items()
-        if isinstance(info, dict) and info.get("type") == "bool"
-    ]
+    # Collect bool DPs appropriate for this device type
+    bool_dps: list[tuple[str, str]] = []
+    
+    # Keys that should never become switches (these are sensor-only)
+    sensor_only_keys = {"door_state", "motion", "contact"}
+    # Alarm-related keys that CAN become switches on sensor devices
+    alarm_switch_keys = {"alarm_switch", "arming_switch"}
+    
+    for dp_id, info in dp_map.items():
+        if not isinstance(info, dict) or info.get("type") != "bool":
+            continue
+        
+        key = info.get("key", f"switch_{dp_id}")
+        
+        # For switch devices: include all bool DPs except sensor-only keys
+        if device_type == DEVICE_TYPE_SWITCH:
+            if key not in sensor_only_keys:
+                bool_dps.append((str(dp_id), key))
+        # For sensor devices: only include alarm switch DPs
+        elif device_type == DEVICE_TYPE_SENSOR:
+            if key in alarm_switch_keys:
+                bool_dps.append((str(dp_id), key))
 
     if not bool_dps:
-        _LOGGER.warning(
-            "Switch device %s has no bool DPs in dp_map — no entities created",
-            device_id,
-        )
         return
 
     entities: list[ContiSwitch] = []
@@ -73,8 +90,8 @@ async def async_setup_entry(
         )
 
     _LOGGER.debug(
-        "Creating %d switch entit(y/ies) for %s (DPs: %s)",
-        len(entities), device_id, [dp for dp, _ in bool_dps],
+        "Creating %d switch entit(y/ies) for %s (DPs: %s, device_type=%s)",
+        len(entities), device_id, [dp for dp, _ in bool_dps], device_type,
     )
     async_add_entities(entities, update_before_add=True)
 
