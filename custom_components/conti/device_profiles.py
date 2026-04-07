@@ -28,6 +28,7 @@ from .const import (
     DP_KEY_COLOR_RGB,
     DP_KEY_COLOR_TEMP,
     DP_KEY_CONTACT,
+    DP_KEY_DOOR_STATE,
     DP_KEY_CURRENT_TEMP,
     DP_KEY_FAN_DIRECTION,
     DP_KEY_FAN_MODE,
@@ -124,7 +125,12 @@ TUYA_CODE_TO_CONTI_KEY: Final[dict[str, str]] = {
     "cur_current": "current",
     "cur_voltage": "voltage",
     "pir": DP_KEY_MOTION,
-    "doorcontact_state": DP_KEY_CONTACT,
+    "doorcontact_state": DP_KEY_DOOR_STATE,
+    "alarm_switch": "alarm_switch",
+    "arming_switch": "arming_switch",
+    "delay_alarm": "delay_alarm",
+    "time_alarm": "time_alarm",
+    "alarm_volume_value": "alarm_volume",
 }
 
 # Type that maps Tuya code → expected Python type string
@@ -356,8 +362,24 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "device_type": DEVICE_TYPE_SENSOR,
         "tuya_categories": ["mcs"],
         "dp_template": {
-            "1": {"key": DP_KEY_CONTACT, "type": "bool"},
-            "3": {"key": DP_KEY_BATTERY, "type": "int"},
+            "1": {"key": DP_KEY_DOOR_STATE, "type": "bool"},
+            "2": {"key": DP_KEY_BATTERY, "type": "int"},
+        },
+    },
+    # ── Contact Sensor (alarm-capable family) ──
+    {
+        "id": "sensor_contact_alarm",
+        "name": "Contact / Door Sensor (Alarm-capable)",
+        "device_type": DEVICE_TYPE_SENSOR,
+        "tuya_categories": ["mcs"],
+        "dp_template": {
+            "1": {"key": DP_KEY_DOOR_STATE, "type": "bool"},
+            "2": {"key": DP_KEY_BATTERY, "type": "int"},
+            "101": {"key": "alarm_switch", "type": "bool"},
+            "102": {"key": "arming_switch", "type": "bool"},
+            "103": {"key": "delay_alarm", "type": "int"},
+            "104": {"key": "time_alarm", "type": "int"},
+            "105": {"key": "alarm_volume", "type": "int"},
         },
     },
 ]
@@ -497,6 +519,31 @@ def score_profile_against_dps(
         )
         if has_relays_1_4 and has_countdown_7_10 and advanced_hits >= 2:
             base_score += 0.12
+
+    # Contact/alarm sensor signature:
+    # DP 1 bool door state + DP 2 integer battery + optional alarm DPs.
+    if profile.get("id") == "sensor_contact_alarm":
+        has_main = isinstance(discovered_dps.get("1"), bool)
+        has_battery = (
+            isinstance(discovered_dps.get("2"), (int, float))
+            and not isinstance(discovered_dps.get("2"), bool)
+        )
+        alarm_hits = 0
+        for dp, expected in {
+            "101": "bool",
+            "102": "bool",
+            "103": "int",
+            "104": "int",
+            "105": "int",
+        }.items():
+            val = discovered_dps.get(dp)
+            if val is None:
+                continue
+            if _classify_value(val) == expected:
+                alarm_hits += 1
+
+        if has_main and has_battery and alarm_hits >= 2:
+            base_score += 0.14
 
     return max(base_score, 0.0)
 

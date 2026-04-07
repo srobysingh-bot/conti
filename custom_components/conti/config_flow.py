@@ -23,8 +23,10 @@ Manual path (advanced fallback)
 
 Runtime
 ~~~~~~~
-Cloud is used **only** during onboarding.  All runtime communication is
-local-only.  Existing config entries continue to work unchanged.
+Cloud is used during onboarding for mapping and metadata.
+Runtime remains local-only for standard always-on devices.
+Low-power sleepy sensors can be flagged to use a separate cloud-backed
+status path. Existing local config entries continue to work unchanged.
 
 An options flow is provided for:
   * Toggling verbose/debug logging.
@@ -52,6 +54,9 @@ from .const import (
     CONF_DAY_END,
     CONF_DAY_KELVIN,
     CONF_DAY_START,
+    CONF_CLOUD_ACCESS_ID,
+    CONF_CLOUD_ACCESS_SECRET,
+    CONF_CLOUD_REGION,
     CONF_DETECTED_VERSION,
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
@@ -63,6 +68,7 @@ from .const import (
     CONF_LOCAL_KEY,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
+    CONF_LOW_POWER_DEVICE,
     CONF_MORNING_BRIGHTNESS,
     CONF_MORNING_END,
     CONF_MORNING_KELVIN,
@@ -77,7 +83,10 @@ from .const import (
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
     DEVICE_TYPE_LIGHT,
+    DEVICE_TYPE_SENSOR,
     DOMAIN,
+    RUNTIME_CHANNEL_CLOUD_SENSOR,
+    RUNTIME_CHANNEL_LOCAL,
     SUPPORTED_DEVICE_TYPES,
     SUPPORTED_VERSIONS,
 )
@@ -95,6 +104,21 @@ _CONFIDENCE_THRESHOLD = 0.6
 
 # LAN discovery timeout during onboarding (seconds)
 _LAN_DISCOVERY_TIMEOUT = 8.0
+
+_LOW_POWER_SENSOR_CATEGORIES = {
+    "mcs",     # contact/door
+    "pir",     # motion
+    "wsdcg",   # temp/humidity
+    "sj",      # leak
+    "ywbj",    # smoke
+    "rqbj",    # gas
+}
+
+_LOW_POWER_SENSOR_PROFILE_IDS = {
+    "sensor_contact",
+    "sensor_motion",
+    "sensor_temp_humidity",
+}
 
 
 def _mask_key(key: str) -> str:
@@ -392,6 +416,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._lan_candidates: list[str] = []
         self._onboarding_mode: str = "manual"
         self._host_resolution_note: str = ""
+        self._low_power_sensor: bool = False
 
     # -- Options flow entry point -------------------------------------------
 
@@ -888,6 +913,31 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not ok:
             errors["base"] = err or "cannot_connect"
+
+            # Low-power battery sensors may be intentionally sleepy and not
+            # continuously reachable on local TCP. Keep normal local behavior
+            # unchanged for all other device classes.
+            if self._is_strong_low_power_sensor_candidate(errors["base"]):
+                self._low_power_sensor = True
+                _LOGGER.info(
+                    "Config flow: treating %s as low-power sleepy sensor "
+                    "after local TCP failure; continuing with cloud-backed mapping",
+                    self._flow_data[CONF_DEVICE_ID],
+                )
+
+                if not self._final_dp_map:
+                    self._apply_safe_profile_fallback_if_needed()
+
+                if not self._final_dp_map:
+                    return await self.async_step_cloud_assist(
+                        {
+                            "tuya_access_id": self._cloud_auth.get("access_id", ""),
+                            "tuya_access_secret": self._cloud_auth.get("access_secret", ""),
+                            "tuya_region": self._cloud_auth.get("region", "eu"),
+                        }
+                    )
+
+                return await self.async_step_review()
 
             # Cloud-assisted flow: keep user in host-confirmation context for
             # host/network failures, which are common in inter-VLAN setups.
@@ -1759,6 +1809,41 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         required = {"power", "brightness", "color_temp"}
         return not required.issubset(roles)
 
+    def _is_strong_low_power_sensor_candidate(self, error_key: str) -> bool:
+        """Return True when evidence strongly suggests a sleepy battery sensor."""
+        if error_key != "cannot_connect":
+            return False
+
+        if self._flow_data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_SENSOR:
+            return False
+
+        # We only auto-switch to low-power path when cloud-assisted onboarding
+        # is active and cloud credentials are available.
+        if self._onboarding_mode != "cloud_assisted" or not self._cloud_auth:
+            return False
+
+        category = (self._tuya_category or "").strip().lower()
+        if category in _LOW_POWER_SENSOR_CATEGORIES:
+            return True
+
+        profile_id = str((self._matched_profile or {}).get("id", "")).strip()
+        if profile_id in _LOW_POWER_SENSOR_PROFILE_IDS:
+            return True
+
+        sensor_keys = {
+            "contact",
+            "door_state",
+            "motion",
+            "battery",
+            "temperature",
+            "humidity",
+        }
+        for info in self._final_dp_map.values():
+            if isinstance(info, dict) and str(info.get("key", "")) in sensor_keys:
+                return True
+
+        return False
+
     # ═══════════════════════════════════════════════════════════════════
     # Entry creation helper
     # ═══════════════════════════════════════════════════════════════════
@@ -1792,6 +1877,16 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Persist Tuya category if from cloud
         if self._tuya_category:
             entry_data[CONF_TUYA_CATEGORY] = self._tuya_category
+
+        if self._low_power_sensor:
+            entry_data[CONF_LOW_POWER_DEVICE] = True
+            entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_CLOUD_SENSOR
+            if self._cloud_auth.get("access_id") and self._cloud_auth.get("access_secret"):
+                entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
+                entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth["access_secret"]
+                entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get("region", "eu")
+        else:
+            entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_LOCAL
 
         return self.async_create_entry(
             title=self._flow_data[CONF_NAME],

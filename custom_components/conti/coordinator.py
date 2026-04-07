@@ -51,6 +51,7 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         device_manager: DeviceManager,
         device_id: str,
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
+        low_power_cloud: Any | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -61,14 +62,16 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self.device_manager = device_manager
         self._device_id = device_id
         self._consecutive_failures: int = 0
+        self._low_power_cloud = low_power_cloud
 
         # Track DPs commanded via HA so we can label source in activity
         self._commanded_dps: dict[str, float] = {}  # dp_id → monotonic ts
 
         # Register per-device push callback
-        self.device_manager.register_state_callback(
-            device_id, self._on_device_push
-        )
+        if self._low_power_cloud is None:
+            self.device_manager.register_state_callback(
+                device_id, self._on_device_push
+            )
 
     @property
     def device_id(self) -> str:
@@ -78,9 +81,10 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     async def async_shutdown(self) -> None:
         """Unregister push callback when coordinator is stopped/unloaded."""
-        self.device_manager.unregister_state_callback(
-            self._device_id, self._on_device_push
-        )
+        if self._low_power_cloud is None:
+            self.device_manager.unregister_state_callback(
+                self._device_id, self._on_device_push
+            )
         # Parent class may or may not have async_shutdown
         parent_shutdown = getattr(super(), "async_shutdown", None)
         if parent_shutdown is not None:
@@ -97,6 +101,25 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         marks entities as unavailable.
         """
         result: dict[str, dict[str, Any]] = {}
+
+        if self._low_power_cloud is not None:
+            try:
+                dps = await self._low_power_cloud.async_get_dps()
+            except Exception as exc:  # noqa: BLE001
+                self._consecutive_failures += 1
+                _LOGGER.debug(
+                    "Low-power cloud polling error for %s: %s",
+                    self._device_id,
+                    exc,
+                )
+                return self.data or {}
+
+            if dps:
+                self._consecutive_failures = 0
+                return {self._device_id: dps}
+
+            # Empty cloud status is normal for sleepy sensors; keep last state.
+            return self.data or {}
 
         try:
             dps = await self.device_manager.query_device(self._device_id)
@@ -154,6 +177,12 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             )
 
         return result
+
+    def is_device_available(self) -> bool:
+        """Availability helper used by entities."""
+        if self._low_power_cloud is not None:
+            return True
+        return self.device_manager.is_online(self._device_id)
 
     # -- Push callback -------------------------------------------------------
 

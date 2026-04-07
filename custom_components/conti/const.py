@@ -25,6 +25,11 @@ CONF_DEVICE_PROFILE: Final = "device_profile"  # profile id from device_profiles
 CONF_MAPPING_SOURCE: Final = "mapping_source"  # "auto" | "cloud" | "learn" | "manual"
 CONF_MAPPING_CONFIDENCE: Final = "mapping_confidence"  # 0.0–1.0
 CONF_TUYA_CATEGORY: Final = "tuya_category"  # Tuya product category (e.g. "dj")
+CONF_LOW_POWER_DEVICE: Final = "low_power_device"
+CONF_RUNTIME_CHANNEL: Final = "runtime_channel"
+CONF_CLOUD_ACCESS_ID: Final = "cloud_access_id"
+CONF_CLOUD_ACCESS_SECRET: Final = "cloud_access_secret"
+CONF_CLOUD_REGION: Final = "cloud_region"
 CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
 
 # External-ON correction — individual UI fields
@@ -63,6 +68,9 @@ SUPPORTED_DEVICE_TYPES: Final = [
 # ---------------------------------------------------------------------------
 # Protocol defaults
 # ---------------------------------------------------------------------------
+RUNTIME_CHANNEL_LOCAL: Final = "local"
+RUNTIME_CHANNEL_CLOUD_SENSOR: Final = "cloud_sensor"
+
 DEFAULT_PORT: Final = 6668
 DEFAULT_PROTOCOL_VERSION: Final = "auto"
 SUPPORTED_VERSIONS: Final = ["auto", "3.1", "3.3", "3.4", "3.5"]
@@ -109,6 +117,7 @@ DP_KEY_POWER_USAGE: Final = "power_usage"
 DP_KEY_BATTERY: Final = "battery"
 DP_KEY_MOTION: Final = "motion"
 DP_KEY_CONTACT: Final = "contact"
+DP_KEY_DOOR_STATE: Final = "door_state"
 
 # ---------------------------------------------------------------------------
 # Reconnect

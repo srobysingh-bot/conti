@@ -1,9 +1,10 @@
 """Conti — Local LAN Control for Tuya-based IoT Devices.
 
-A pure Home Assistant custom integration that communicates directly with
-Tuya-firmware devices over the local network.  No cloud, no add-on, no
-external database — just async TCP sockets, AES encryption, and HA-native
-patterns (DataUpdateCoordinator, ConfigEntry, Store).
+A local-first Home Assistant custom integration for Tuya devices.
+
+Standard devices (lights, switches, plugs, fans, climate) use local TCP
+runtime only. Low-power sleepy sensors can use an isolated cloud status
+runtime path when explicitly flagged during onboarding.
 
 Architecture
 ~~~~~~~~~~~~
@@ -26,8 +27,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import (
+    CONF_CLOUD_ACCESS_ID,
+    CONF_CLOUD_ACCESS_SECRET,
+    CONF_CLOUD_REGION,
     CONF_DETECTED_VERSION,
     CONF_DEVICE_ID,
+    CONF_LOW_POWER_DEVICE,
     CONF_DEVICE_PROFILE,
     CONF_DEVICE_TYPE,
     CONF_DISCOVERED_DPS,
@@ -35,11 +40,15 @@ from .const import (
     CONF_LOCAL_KEY,
     CONF_MAPPING_SOURCE,
     CONF_PROTOCOL_VERSION,
+    CONF_RUNTIME_CHANNEL,
+    CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
+    DEVICE_TYPE_SENSOR,
     DOMAIN,
     PLATFORMS,
+    RUNTIME_CHANNEL_CLOUD_SENSOR,
     STORAGE_VERSION,
 )
 from .dp_mapping import mask_key
@@ -136,6 +145,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "dp_map": dp_map,
     }
 
+    low_power_sensor = bool(
+        entry.data.get(CONF_LOW_POWER_DEVICE, False)
+        and entry.data.get(CONF_DEVICE_TYPE) == DEVICE_TYPE_SENSOR
+        and entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_CLOUD_SENSOR
+    )
+
     _LOGGER.info(
         "Setting up Conti device %s at %s:%d (v%s, key=%s, dp_map keys=%s, "
         "profile=%s, mapping_source=%s)",
@@ -149,7 +164,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_MAPPING_SOURCE, "legacy"),
     )
 
-    await manager.add_device(device_config)
+    low_power_runtime = None
+    if low_power_sensor:
+        access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
+        access_secret = str(entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
+        region = str(entry.data.get(CONF_CLOUD_REGION, "eu")).strip() or "eu"
+
+        if access_id and access_secret:
+            from .low_power_runtime import LowPowerSensorCloudRuntime  # noqa: PLC0415
+
+            low_power_runtime = LowPowerSensorCloudRuntime(
+                device_id=device_id,
+                access_id=access_id,
+                access_secret=access_secret,
+                region=region,
+                dp_map=dp_map,
+            )
+            _LOGGER.info(
+                "Setting up low-power cloud runtime for sensor %s (category=%s)",
+                device_id,
+                entry.data.get(CONF_TUYA_CATEGORY, ""),
+            )
+        else:
+            _LOGGER.warning(
+                "Low-power sensor %s has no cloud credentials; falling back to local runtime",
+                device_id,
+            )
+            low_power_sensor = False
+
+    if not low_power_sensor:
+        await manager.add_device(device_config)
 
     # ---- Persist auto-detected version back to entry data -----------------
     if (
@@ -175,7 +219,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         manager.seed_cached_dps(device_id, cached_dps)
 
     # ---- Per-device coordinator -------------------------------------------
-    coordinator = ContiCoordinator(hass, manager, device_id)
+    coordinator = ContiCoordinator(
+        hass,
+        manager,
+        device_id,
+        low_power_cloud=low_power_runtime,
+    )
 
     hass.data[DOMAIN][entry.entry_id] = {
         "coordinator": coordinator,
@@ -186,7 +235,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     # ---- Save discovered DPS to persistent cache --------------------------
-    current_dps = manager.get_cached_dps(device_id)
+    current_dps = manager.get_cached_dps(device_id) if not low_power_sensor else {}
     if current_dps:
         await _save_dps_cache(hass, device_id, current_dps)
 

@@ -18,7 +18,7 @@
       },
       "cloud_credentials": {
         "title": "Tuya Cloud — Sign In",
-        "description": "Enter your Tuya IoT Platform API credentials. Conti will connect to your account, fetch your linked devices, and let you select the one to set up — no manual Device ID or Local Key required.\n\nCredentials are used only during setup and are **not** stored after onboarding.",
+        "description": "Enter your Tuya IoT Platform API credentials. Conti will connect to your account, fetch your linked devices, and let you select the one to set up - no manual Device ID or Local Key required.\n\nCredentials are used only during setup for normal local devices. For low-power sleepy sensors that require cloud runtime polling, credentials are stored for that device.",
         "data": {
           "tuya_access_id": "Access ID / Client ID",
           "tuya_access_secret": "Access Secret / Client Secret",
@@ -64,7 +64,7 @@
       },
       "cloud_assist": {
         "title": "Tuya Cloud Assist (Optional)",
-        "description": "Provide your Tuya IoT Platform API credentials to fetch the device schema.  This improves DP mapping accuracy.  Leave blank to skip.\n\nCredentials are used only during setup and are NOT stored.",
+        "description": "Provide your Tuya IoT Platform API credentials to fetch the device schema.  This improves DP mapping accuracy.  Leave blank to skip.\n\nCredentials are used only during setup for normal local devices. For low-power sleepy sensors that require cloud runtime polling, credentials are stored for that device.",
         "data": {
           "tuya_access_id": "Access ID / Client ID",
           "tuya_access_secret": "Access Secret / Client Secret",

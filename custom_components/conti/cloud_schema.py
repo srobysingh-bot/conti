@@ -1,9 +1,8 @@
-"""Optional Tuya Cloud schema helper for Conti onboarding.
+"""Tuya Cloud helper for onboarding and low-power sensor status polling.
 
-This module is used **only during config flow** to fetch device schema
-(DP definitions) from the Tuya Cloud API.  It is NEVER imported at runtime
-by ``__init__.py``, ``device_manager.py``, ``coordinator.py``, or any
-entity platform.
+This module is primarily used during config flow to fetch device schema
+(DP definitions). It is also used at runtime only for explicitly flagged
+low-power sleepy sensors that use cloud-backed status polling.
 
 The cloud helper translates Tuya DP code names (e.g. ``switch_led``,
 ``bright_value_v2``) into Conti internal keys (``power``, ``brightness``)
@@ -15,8 +14,9 @@ mandatory.
 
 Security
 ~~~~~~~~
-* API credentials are stored in ``hass.data`` only during the config flow
-  session and **not** persisted in config entries.
+* API credentials are normally used only during config flow.
+* For low-power sleepy sensors, credentials may be persisted in the
+    config entry to allow cloud runtime status polling for that device.
 * HTTPS requests use standard ``aiohttp`` with TLS verification.
 * No device commands or state changes are made through the cloud.
 """
@@ -432,6 +432,49 @@ class TuyaCloudSchemaHelper:
 
         return result
 
+    async def get_device_status(
+        self,
+        device_id: str,
+        strict: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch current cloud status list for one device.
+
+        Returns a normalized list of ``{"code": ..., "value": ...}`` items.
+        """
+        if not await self._ensure_token(strict=strict):
+            if strict:
+                raise TuyaCloudAuthError("Unable to obtain Tuya cloud token")
+            return []
+
+        payload = await self._api_get(
+            f"/v1.0/devices/{device_id}/status",
+            strict=strict,
+        )
+        if payload is None:
+            return []
+
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            nested = payload.get("status")
+            raw_items = nested if isinstance(nested, list) else []
+        else:
+            if strict:
+                raise TuyaCloudParseError(
+                    f"Unexpected status payload type for device {device_id}"
+                )
+            return []
+
+        result: list[dict[str, Any]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code", "")).strip()
+            if not code:
+                continue
+            result.append({"code": code, "value": item.get("value")})
+        return result
+
     async def _api_get(
         self,
         path: str,
@@ -673,7 +716,11 @@ class TuyaCloudSchemaHelper:
             tuya_type = dp_def.get("type", "")
             conti_type = TUYA_TYPE_MAP.get(tuya_type, "str")
 
-            entry: dict[str, Any] = {"key": conti_key, "type": conti_type}
+            entry: dict[str, Any] = {
+                "key": conti_key,
+                "type": conti_type,
+                "code": code,
+            }
 
             # Extract range constraints from values JSON
             values = dp_def.get("values", "")

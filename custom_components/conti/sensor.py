@@ -33,6 +33,7 @@ from .const import (
     DOMAIN,
     DP_KEY_BATTERY,
     DP_KEY_CONTACT,
+    DP_KEY_DOOR_STATE,
     DP_KEY_HUMIDITY,
     DP_KEY_MOTION,
     DP_KEY_POWER_USAGE,
@@ -51,6 +52,7 @@ _SENSOR_META: dict[str, tuple[SensorDeviceClass | None, str | None, SensorStateC
     DP_KEY_BATTERY: (SensorDeviceClass.BATTERY, PERCENTAGE, SensorStateClass.MEASUREMENT, None),
     DP_KEY_MOTION: (None, None, None, "mdi:motion-sensor"),
     DP_KEY_CONTACT: (None, None, None, "mdi:door-closed"),
+    DP_KEY_DOOR_STATE: (None, None, None, "mdi:door-closed"),
 }
 
 
@@ -131,7 +133,7 @@ class ContiSensor(CoordinatorEntity[ContiCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.device_manager.is_online(self._device_id)
+        return self.coordinator.is_device_available()
 
     @property
     def native_value(self) -> float | int | str | None:

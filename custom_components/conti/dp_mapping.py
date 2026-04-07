@@ -24,6 +24,7 @@ from .const import (
     DP_KEY_COLOR_RGB,
     DP_KEY_COLOR_TEMP,
     DP_KEY_CONTACT,
+    DP_KEY_DOOR_STATE,
     DP_KEY_CURRENT_TEMP,
     DP_KEY_FAN_DIRECTION,
     DP_KEY_FAN_MODE,
@@ -203,6 +204,8 @@ def auto_map_dps(
     if device_type == DEVICE_TYPE_SWITCH:
         _augment_power_monitoring_plug_map(result, discovered_dps)
         _augment_multi_gang_switch_family_map(result, discovered_dps)
+    elif device_type == DEVICE_TYPE_SENSOR:
+        _augment_contact_alarm_sensor_family_map(result, discovered_dps)
 
     # Report unmapped DPs so the user knows what was ignored.
     unmapped = set(discovered_dps.keys()) - set(result.keys())
@@ -376,6 +379,73 @@ def _augment_multi_gang_switch_family_map(
         _LOGGER.info(
             "Auto-mapping (%s): enriched multi-gang switch family DPs: %s",
             DEVICE_TYPE_SWITCH,
+            sorted(added_or_updated),
+        )
+
+
+def _augment_contact_alarm_sensor_family_map(
+    result: dict[str, dict[str, Any]],
+    discovered_dps: dict[str, Any],
+) -> None:
+    """Enrich contact/alarm sensor family when the DP signature is strong.
+
+    Expected shape (common Tuya Wi-Fi contact sensors):
+      * DP 1: door/contact state (bool)
+      * DP 2: battery percentage (int)
+      * optional alarm controls on 101..105 with fixed types
+    """
+    if not isinstance(discovered_dps.get("1"), bool):
+        return
+
+    if not (
+        isinstance(discovered_dps.get("2"), (int, float))
+        and not isinstance(discovered_dps.get("2"), bool)
+    ):
+        return
+
+    expected_optional_types: dict[str, str] = {
+        "101": "bool",
+        "102": "bool",
+        "103": "int",
+        "104": "int",
+        "105": "int",
+    }
+    optional_hits = 0
+    for dp_id, expected in expected_optional_types.items():
+        if dp_id not in discovered_dps:
+            continue
+        if _classify_value(discovered_dps[dp_id]) == expected:
+            optional_hits += 1
+
+    # Require strong evidence so we don't over-map unrelated sensors.
+    if optional_hits < 2:
+        return
+
+    family_map: dict[str, dict[str, Any]] = {
+        "1": {"key": DP_KEY_DOOR_STATE, "type": "bool"},
+        "2": {"key": DP_KEY_BATTERY, "type": "int"},
+        "101": {"key": "alarm_switch", "type": "bool"},
+        "102": {"key": "arming_switch", "type": "bool"},
+        "103": {"key": "delay_alarm", "type": "int"},
+        "104": {"key": "time_alarm", "type": "int"},
+        "105": {"key": "alarm_volume", "type": "int"},
+    }
+
+    added_or_updated: list[str] = []
+    for dp_id, spec in family_map.items():
+        if dp_id not in discovered_dps:
+            continue
+        actual_type = _classify_value(discovered_dps[dp_id])
+        if actual_type != spec["type"]:
+            continue
+        if result.get(dp_id) != spec:
+            result[dp_id] = dict(spec)
+            added_or_updated.append(dp_id)
+
+    if added_or_updated:
+        _LOGGER.info(
+            "Auto-mapping (%s): enriched contact/alarm sensor DPs: %s",
+            DEVICE_TYPE_SENSOR,
             sorted(added_or_updated),
         )
 
