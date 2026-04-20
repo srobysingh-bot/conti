@@ -18,15 +18,11 @@
       },
       "oauth_login": {
         "title": "Login with Smart Life",
-        "description": "Select your data centre region to begin. On the next screen you will scan a QR code with the Smart Life app to authorise Conti.\n\nIf this is your first time, enter your Tuya IoT project Access ID and Secret (from iot.tuya.com). They will be saved securely and you won't need to enter them again.",
+        "description": "Select your data centre region to begin. On the next screen you will scan a QR code with the Smart Life app to authorise Conti.\n\nNo Tuya IoT project credentials are needed — just your Smart Life app.",
         "data": {
-          "tuya_access_id": "Access ID / Client ID",
-          "tuya_access_secret": "Access Secret / Client Secret",
           "tuya_region": "Data Centre Region"
         },
         "data_description": {
-          "tuya_access_id": "From your Tuya IoT Platform project (iot.tuya.com → Cloud → your project → Overview).",
-          "tuya_access_secret": "From your Tuya IoT Platform project (iot.tuya.com → Cloud → your project → Overview).",
           "tuya_region": "Select the Tuya data centre closest to your region."
         }
       },

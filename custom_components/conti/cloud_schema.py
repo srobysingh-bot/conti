@@ -46,6 +46,10 @@ _BASE_URLS: dict[str, str] = {
 # Tuya QR-login gateway (centralised, not regional)
 _QR_LOGIN_BASE = "https://apigw.iotbing.com"
 
+# Shared Tuya client ID used by the official HA integration for QR login.
+# This is a public, well-known value — NOT a secret.
+TUYA_HA_CLIENT_ID = "HA_3y9q4ak7g4ephrvke"
+
 # QR content format scanned by the Smart Life / Tuya Smart app
 _QR_CONTENT_FMT = "tuyaSmart--qrLogin?token={token}"
 
@@ -767,15 +771,17 @@ class TuyaCloudSchemaHelper:
             _LOGGER.debug("Tuya cloud POST %s error: %s", path, exc)
             return None
 
+    @staticmethod
     async def get_login_qr_code(
-        self,
         schema: str = "smartlife",
+        client_id: str = TUYA_HA_CLIENT_ID,
     ) -> dict[str, Any]:
         """Request a QR code for Smart Life app authorization.
 
         Uses the centralised Tuya QR-login gateway (``apigw.iotbing.com``)
         which does **not** require HMAC signing — only query-string
-        parameters.
+        parameters.  The default ``client_id`` is the shared HA Tuya
+        client so that **no project credentials are needed**.
 
         Returns a dict with:
         * ``url`` — the content to encode as a QR code image
@@ -786,7 +792,7 @@ class TuyaCloudSchemaHelper:
         """
         url = (
             f"{_QR_LOGIN_BASE}/v1.0/m/life/home-assistant/qrcode/tokens"
-            f"?clientid={self._access_id}&schema={schema}"
+            f"?clientid={client_id}&schema={schema}"
         )
         _LOGGER.debug("QR login request: POST %s", url)
 
@@ -824,20 +830,23 @@ class TuyaCloudSchemaHelper:
             "token": qr_token,
         }
 
+    @staticmethod
     async def poll_login_qr_code(
-        self,
         token: str,
+        client_id: str = TUYA_HA_CLIENT_ID,
     ) -> dict[str, Any] | None:
         """Poll the QR code scan status.
 
         Uses the centralised Tuya QR-login gateway (no HMAC signing).
 
-        Returns the result dict when the user has scanned and authorised
-        (contains ``uid``), or ``None`` if still pending.
+        Returns the result dict when the user has scanned and authorised,
+        or ``None`` if still pending.  On success the dict contains at
+        least ``uid``, ``access_token``, ``refresh_token``,
+        ``expire_time``, ``endpoint``, and ``terminal_id``.
         """
         url = (
             f"{_QR_LOGIN_BASE}/v1.0/m/life/home-assistant/qrcode/tokens/{token}"
-            f"?clientid={self._access_id}"
+            f"?clientid={client_id}"
         )
 
         try:

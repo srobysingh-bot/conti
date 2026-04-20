@@ -150,36 +150,22 @@ class TuyaOAuthManager:
 
     async def async_start_qr_login(
         self,
-        access_id: str,
-        access_secret: str,
-        region: str,
+        region: str = "eu",
     ) -> dict[str, Any]:
         """Generate a QR code for Smart Life app authorization.
 
-        Sets up app credentials on the manager, then requests a QR code
-        from the Tuya QR-login gateway.  Also obtains a management token
-        in the background for subsequent device-listing calls.
+        Uses the shared Tuya HA client ID — **no project credentials needed**.
+        The region is stored so device-listing calls after scan can use the
+        correct data centre.
 
         Returns a dict with ``url`` (QR content) and ``token`` (poll ticket).
         """
-        self._access_id = access_id
-        self._access_secret = access_secret
+        from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
         self._region = region
-        self._helper = None  # Force re-creation
-
-        helper = self._get_helper()
-
-        # QR code generation (uses apigw.iotbing.com, no HMAC signing)
-        qr_data = await helper.get_login_qr_code(schema="smartlife")
-
-        # Obtain a management token for later API calls (device listing etc.)
-        # Non-critical — don't let a failure here block the QR flow.
-        try:
-            await helper._ensure_token(strict=False)
-            self._sync_from_helper(helper)
-        except Exception:  # noqa: BLE001
-            _LOGGER.debug("Management token acquisition deferred to poll phase")
-
+        qr_data = await TuyaCloudSchemaHelper.get_login_qr_code(
+            schema="smartlife",
+        )
         await self.async_save()
         return qr_data
 
@@ -188,24 +174,57 @@ class TuyaOAuthManager:
 
         Returns the user UID if the QR code has been scanned and
         authorized, or ``None`` if still pending.
+
+        On success the poll response contains a full token set
+        (``uid``, ``access_token``, ``refresh_token``, ``expire_time``,
+        ``endpoint``).  These are captured into the manager so that
+        subsequent device-listing calls work immediately.
         """
-        helper = self._get_helper()
-        result = await helper.poll_login_qr_code(token)
+        from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+        result = await TuyaCloudSchemaHelper.poll_login_qr_code(token)
 
         if not result or not isinstance(result, dict):
             return None
 
-        # Tuya returns {"status": true, "uid": "..."} when scanned.
-        # Some API versions return {"uid": "..."} directly.
         uid = result.get("uid")
-        if uid:
-            self._uid = str(uid)
-            self._sync_from_helper(helper)
-            await self.async_save()
-            _LOGGER.info("Smart Life QR login successful, uid=%s", self._uid)
-            return self._uid
+        if not uid:
+            return None
 
-        return None
+        self._uid = str(uid)
+
+        # Capture tokens returned by the QR-login gateway so that
+        # subsequent OpenAPI calls (device listing, schema, etc.) work.
+        access_token = result.get("access_token", "")
+        refresh_token = result.get("refresh_token", "")
+        expire_time = result.get("expire_time", 7200)
+        endpoint = result.get("endpoint", "")
+
+        if access_token:
+            self._access_token = str(access_token)
+            self._refresh_token = str(refresh_token)
+            self._token_expiry = time.time() + int(expire_time) - 60
+
+        # If the gateway returned an endpoint URL, use it as the
+        # regional base for subsequent OpenAPI calls.
+        if endpoint:
+            self._region = str(endpoint)
+
+        # Propagate tokens into the helper so device-listing works.
+        self._helper = None  # Re-create with updated creds
+        if self._access_id and self._access_secret:
+            helper = self._get_helper()
+            if access_token:
+                helper.restore_tokens(
+                    self._access_token,
+                    self._refresh_token,
+                    self._token_expiry,
+                    self._uid,
+                )
+
+        await self.async_save()
+        _LOGGER.info("Smart Life QR login successful, uid=%s", self._uid)
+        return self._uid
 
     # ── Token lifecycle ───────────────────────────────────────────────
 
