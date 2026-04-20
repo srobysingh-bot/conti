@@ -131,6 +131,10 @@ DP_KEY_BATTERY: Final = "battery"
 DP_KEY_MOTION: Final = "motion"
 DP_KEY_CONTACT: Final = "contact"
 DP_KEY_DOOR_STATE: Final = "door_state"
+# Energy monitoring (switches / plugs)
+DP_KEY_ENERGY_TOTAL: Final = "energy_total"
+DP_KEY_CURRENT: Final = "current"
+DP_KEY_VOLTAGE: Final = "voltage"
 
 # ---------------------------------------------------------------------------
 # Reconnect

@@ -28,8 +28,10 @@ from .const import (
     DP_KEY_COLOR_RGB,
     DP_KEY_COLOR_TEMP,
     DP_KEY_CONTACT,
+    DP_KEY_CURRENT,
     DP_KEY_DOOR_STATE,
     DP_KEY_CURRENT_TEMP,
+    DP_KEY_ENERGY_TOTAL,
     DP_KEY_FAN_DIRECTION,
     DP_KEY_FAN_MODE,
     DP_KEY_FAN_OSCILLATION,
@@ -41,6 +43,7 @@ from .const import (
     DP_KEY_POWER_USAGE,
     DP_KEY_TARGET_TEMP,
     DP_KEY_TEMPERATURE,
+    DP_KEY_VOLTAGE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -239,8 +242,8 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "device_type": DEVICE_TYPE_SWITCH,
         "tuya_categories": ["kg"],
         "dp_template": {
-            "1": {"key": DP_KEY_POWER, "type": "bool"},
-            "2": {"key": DP_KEY_POWER, "type": "bool"},
+            "1": {"key": "switch_1", "type": "bool"},
+            "2": {"key": "switch_2", "type": "bool"},
         },
     },
     # ── 3-gang Switch ──
@@ -250,9 +253,9 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "device_type": DEVICE_TYPE_SWITCH,
         "tuya_categories": ["kg"],
         "dp_template": {
-            "1": {"key": DP_KEY_POWER, "type": "bool"},
-            "2": {"key": DP_KEY_POWER, "type": "bool"},
-            "3": {"key": DP_KEY_POWER, "type": "bool"},
+            "1": {"key": "switch_1", "type": "bool"},
+            "2": {"key": "switch_2", "type": "bool"},
+            "3": {"key": "switch_3", "type": "bool"},
         },
     },
     # ── 4-gang Switch ──
@@ -275,11 +278,11 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "device_type": DEVICE_TYPE_SWITCH,
         "tuya_categories": ["cz", "pc"],
         "dp_template": {
-            "1": {"key": DP_KEY_POWER, "type": "bool"},
-            "2": {"key": DP_KEY_POWER, "type": "bool"},
-            "3": {"key": DP_KEY_POWER, "type": "bool"},
-            "4": {"key": DP_KEY_POWER, "type": "bool"},
-            "5": {"key": DP_KEY_POWER, "type": "bool"},
+            "1": {"key": "switch_1", "type": "bool"},
+            "2": {"key": "switch_2", "type": "bool"},
+            "3": {"key": "switch_3", "type": "bool"},
+            "4": {"key": "switch_4", "type": "bool"},
+            "5": {"key": "switch_5", "type": "bool"},
         },
     },
     # ── Fan ──
@@ -330,10 +333,10 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         "dp_template": {
             "1": {"key": DP_KEY_POWER, "type": "bool"},
             "9": {"key": "countdown", "type": "int"},
-            "17": {"key": "energy_total", "type": "int"},
-            "18": {"key": "current", "type": "int"},
-            "19": {"key": DP_KEY_POWER_USAGE, "type": "int"},
-            "20": {"key": "voltage", "type": "int"},
+            "17": {"key": DP_KEY_ENERGY_TOTAL, "type": "int", "scale": 100},
+            "18": {"key": DP_KEY_CURRENT, "type": "int"},
+            "19": {"key": DP_KEY_POWER_USAGE, "type": "int", "scale": 10},
+            "20": {"key": DP_KEY_VOLTAGE, "type": "int", "scale": 10},
             "26": {"key": "fault", "type": "int"},
             "38": {"key": "relay_status", "type": "str"},
             "39": {"key": "overcharge_switch", "type": "bool"},

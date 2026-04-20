@@ -24,8 +24,10 @@ from .const import (
     DP_KEY_COLOR_RGB,
     DP_KEY_COLOR_TEMP,
     DP_KEY_CONTACT,
+    DP_KEY_CURRENT,
     DP_KEY_DOOR_STATE,
     DP_KEY_CURRENT_TEMP,
+    DP_KEY_ENERGY_TOTAL,
     DP_KEY_FAN_DIRECTION,
     DP_KEY_FAN_MODE,
     DP_KEY_FAN_OSCILLATION,
@@ -37,6 +39,7 @@ from .const import (
     DP_KEY_POWER_USAGE,
     DP_KEY_TARGET_TEMP,
     DP_KEY_TEMPERATURE,
+    DP_KEY_VOLTAGE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,6 +75,10 @@ SWITCH_HEURISTICS: Final[list[_HeuristicRule]] = [
     # Power-monitoring plugs commonly expose active-power/energy style DPs
     # on 19/17. Map one strong match as sensor-capable telemetry.
     (["19", "17"], DP_KEY_POWER_USAGE, "int", False),
+    # Energy monitoring DPs — present on plugs and some multi-gang switches.
+    (["17"],  DP_KEY_ENERGY_TOTAL, "int", False),
+    (["18"],  DP_KEY_CURRENT,      "int", False),
+    (["20"],  DP_KEY_VOLTAGE,      "int", False),
 ]
 
 FAN_HEURISTICS: Final[list[_HeuristicRule]] = [
@@ -269,10 +276,10 @@ def _augment_power_monitoring_plug_map(
     rich_map: dict[str, dict[str, Any]] = {
         "1": {"key": DP_KEY_POWER, "type": "bool"},
         "9": {"key": "countdown", "type": "int"},
-        "17": {"key": "energy_total", "type": "int"},
-        "18": {"key": "current", "type": "int"},
-        "19": {"key": DP_KEY_POWER_USAGE, "type": "int"},
-        "20": {"key": "voltage", "type": "int"},
+        "17": {"key": DP_KEY_ENERGY_TOTAL, "type": "int", "scale": 100},
+        "18": {"key": DP_KEY_CURRENT, "type": "int"},
+        "19": {"key": DP_KEY_POWER_USAGE, "type": "int", "scale": 10},
+        "20": {"key": DP_KEY_VOLTAGE, "type": "int", "scale": 10},
         "26": {"key": "fault", "type": "int"},
         "38": {"key": "relay_status", "type": "str"},
         "39": {"key": "overcharge_switch", "type": "bool"},
@@ -306,79 +313,75 @@ def _augment_multi_gang_switch_family_map(
     result: dict[str, dict[str, Any]],
     discovered_dps: dict[str, Any],
 ) -> None:
-    """Enrich known multi-gang wall-switch families using strong DP signatures.
+    """Give distinct ``switch_N`` key names to multi-gang relay DPs.
 
-    Current signature (strict):
-      * relay channels on DPs 1/2/3/4 are bool
-      * countdown DPs 7/8/9/10 are integer-like
-      * at least two advanced settings among 14/17/18/19/47 exist with
-        expected value types
+    Applied when **two or more** relay-class bool DPs (1–7) are present.
+    Also enriches countdown and advanced DPs when the signature matches.
 
-    This stays conservative and only applies when evidence is strong,
-    leaving generic switch fallback behavior unchanged.
+    This replaces the generic ``"power"`` key with ``"switch_1"``,
+    ``"switch_2"``, etc. so that Home Assistant shows distinct entity names.
     """
-    relay_ids = ("1", "2", "3", "4")
-    countdown_ids = ("7", "8", "9", "10")
+    relay_ids = ["1", "2", "3", "4", "5", "6", "7"]
+    found_relays = [
+        dp_id for dp_id in relay_ids
+        if isinstance(discovered_dps.get(dp_id), bool)
+    ]
 
-    if not all(isinstance(discovered_dps.get(dp_id), bool) for dp_id in relay_ids):
-        return
+    if len(found_relays) < 2:
+        return  # Not multi-gang
 
-    if not all(
-        isinstance(discovered_dps.get(dp_id), (int, float))
-        and not isinstance(discovered_dps.get(dp_id), bool)
-        for dp_id in countdown_ids
-    ):
-        return
+    # Countdown DPs paired with relay DPs (DP 7-13 map to relay 1-7).
+    countdown_map = {"1": "7", "2": "8", "3": "9", "4": "10",
+                     "5": "11", "6": "12", "7": "13"}
 
-    advanced_hits = 0
-    if isinstance(discovered_dps.get("14"), str):
-        advanced_hits += 1
-    if isinstance(discovered_dps.get("17"), str):
-        advanced_hits += 1
-    if isinstance(discovered_dps.get("18"), str):
-        advanced_hits += 1
-    if isinstance(discovered_dps.get("19"), str):
-        advanced_hits += 1
-    if isinstance(discovered_dps.get("47"), str):
-        advanced_hits += 1
-
-    if advanced_hits < 2:
-        return
-
-    family_map: dict[str, dict[str, Any]] = {
-        "1": {"key": "switch_1", "type": "bool"},
-        "2": {"key": "switch_2", "type": "bool"},
-        "3": {"key": "switch_3", "type": "bool"},
-        "4": {"key": "switch_4", "type": "bool"},
-        "7": {"key": "countdown_1", "type": "int"},
-        "8": {"key": "countdown_2", "type": "int"},
-        "9": {"key": "countdown_3", "type": "int"},
-        "10": {"key": "countdown_4", "type": "int"},
+    # Known advanced-settings DPs for multi-gang wall switches.
+    advanced_specs: dict[str, dict[str, Any]] = {
         "14": {"key": "relay_status", "type": "str"},
         "17": {"key": "cycle_time", "type": "str"},
         "18": {"key": "random_time", "type": "str"},
         "19": {"key": "switch_inching", "type": "str"},
+        "38": {"key": "relay_status", "type": "str"},
+        "40": {"key": "light_mode", "type": "str"},
+        "41": {"key": "child_lock", "type": "bool"},
+        "44": {"key": "switch_inching", "type": "str"},
         "47": {"key": "switch_type", "type": "str"},
     }
 
     added_or_updated: list[str] = []
-    for dp_id, spec in family_map.items():
+
+    # Rename relay DPs to switch_N.
+    for idx, dp_id in enumerate(found_relays, start=1):
+        spec = {"key": f"switch_{idx}", "type": "bool"}
+        if result.get(dp_id) != spec:
+            result[dp_id] = spec
+            added_or_updated.append(dp_id)
+
+        # Pair countdown DP if present.
+        cd_dp = countdown_map.get(dp_id)
+        if cd_dp and cd_dp in discovered_dps:
+            cd_type = _classify_value(discovered_dps[cd_dp])
+            if cd_type == "int":
+                cd_spec = {"key": f"countdown_{idx}", "type": "int"}
+                if result.get(cd_dp) != cd_spec:
+                    result[cd_dp] = cd_spec
+                    added_or_updated.append(cd_dp)
+
+    # Enrich with advanced DPs if present.
+    for dp_id, spec in advanced_specs.items():
         if dp_id not in discovered_dps:
             continue
         actual_type = _classify_value(discovered_dps[dp_id])
         if actual_type != spec["type"]:
             continue
-
-        # Force family-specific role naming for relay channels and
-        # advanced DPs when the signature is strongly matched.
-        if result.get(dp_id) != spec:
+        if dp_id not in result:
             result[dp_id] = dict(spec)
             added_or_updated.append(dp_id)
 
     if added_or_updated:
         _LOGGER.info(
-            "Auto-mapping (%s): enriched multi-gang switch family DPs: %s",
+            "Auto-mapping (%s): enriched multi-gang switch DPs (%d relays): %s",
             DEVICE_TYPE_SWITCH,
+            len(found_relays),
             sorted(added_or_updated),
         )
 

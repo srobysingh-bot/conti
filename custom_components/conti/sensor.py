@@ -18,7 +18,10 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
     UnitOfEnergy,
+    UnitOfPower,
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
@@ -33,11 +36,14 @@ from .const import (
     DOMAIN,
     DP_KEY_BATTERY,
     DP_KEY_CONTACT,
+    DP_KEY_CURRENT,
     DP_KEY_DOOR_STATE,
+    DP_KEY_ENERGY_TOTAL,
     DP_KEY_HUMIDITY,
     DP_KEY_MOTION,
     DP_KEY_POWER_USAGE,
     DP_KEY_TEMPERATURE,
+    DP_KEY_VOLTAGE,
     MANUFACTURER,
 )
 from .coordinator import ContiCoordinator
@@ -48,11 +54,15 @@ _LOGGER = logging.getLogger(__name__)
 _SENSOR_META: dict[str, tuple[SensorDeviceClass | None, str | None, SensorStateClass | None, str | None]] = {
     DP_KEY_TEMPERATURE: (SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS, SensorStateClass.MEASUREMENT, None),
     DP_KEY_HUMIDITY: (SensorDeviceClass.HUMIDITY, PERCENTAGE, SensorStateClass.MEASUREMENT, None),
-    DP_KEY_POWER_USAGE: (SensorDeviceClass.ENERGY, UnitOfEnergy.WATT_HOUR, SensorStateClass.TOTAL_INCREASING, None),
+    DP_KEY_POWER_USAGE: (SensorDeviceClass.POWER, UnitOfPower.WATT, SensorStateClass.MEASUREMENT, None),
     DP_KEY_BATTERY: (SensorDeviceClass.BATTERY, PERCENTAGE, SensorStateClass.MEASUREMENT, None),
     DP_KEY_MOTION: (None, None, None, "mdi:motion-sensor"),
     DP_KEY_CONTACT: (None, None, None, "mdi:door-closed"),
     DP_KEY_DOOR_STATE: (None, None, None, "mdi:door-closed"),
+    # Energy monitoring (switches / plugs)
+    DP_KEY_ENERGY_TOTAL: (SensorDeviceClass.ENERGY, UnitOfEnergy.KILO_WATT_HOUR, SensorStateClass.TOTAL_INCREASING, None),
+    DP_KEY_CURRENT: (SensorDeviceClass.CURRENT, UnitOfElectricCurrent.MILLIAMPERE, SensorStateClass.MEASUREMENT, None),
+    DP_KEY_VOLTAGE: (SensorDeviceClass.VOLTAGE, UnitOfElectricPotential.VOLT, SensorStateClass.MEASUREMENT, None),
     # Alarm-capable contact sensor alarm settings
     "alarm_switch": (None, None, None, "mdi:bell"),
     "delay_alarm": (None, None, None, "mdi:timer"),
