@@ -485,11 +485,15 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_oauth_login(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Smart Life login — select region, then scan QR code.
+        """Smart Life login — resolve project credentials, then QR code.
 
-        App-level Tuya project credentials are read from environment
-        variables.  No username or password is collected.  The user
-        authorises by scanning a QR code with the Smart Life app.
+        Credential resolution order:
+        1. Previously stored in HA .storage (from a prior successful login).
+        2. Environment variables (``TUYA_APP_ACCESS_ID`` / ``TUYA_APP_ACCESS_SECRET``).
+        3. User-provided via the config-flow form (first-time setup).
+
+        Once credentials are available the user selects a region and a
+        QR code is generated for Smart Life app authorization.
         """
         import os  # noqa: PLC0415
 
@@ -499,36 +503,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
 
-        # Read app-level credentials from environment.
-        app_access_id = os.environ.get(TUYA_APP_ACCESS_ID_ENV, "").strip()
-        app_access_secret = os.environ.get(TUYA_APP_ACCESS_SECRET_ENV, "").strip()
-
-        if not app_access_id or not app_access_secret:
-            _LOGGER.error(
-                "Smart Life login unavailable: set %s and %s environment "
-                "variables in your Home Assistant environment",
-                TUYA_APP_ACCESS_ID_ENV,
-                TUYA_APP_ACCESS_SECRET_ENV,
-            )
-            return self.async_show_form(
-                step_id="oauth_login",
-                data_schema=vol.Schema(
-                    {
-                        vol.Required("tuya_region", default="eu"): vol.In(
-                            {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
-                        ),
-                    }
-                ),
-                errors={"base": "app_credentials_missing"},
-            )
-
         oauth = TuyaOAuthManager(self.hass)
         await oauth.async_load()
 
         errors: dict[str, str] = {}
 
+        # ── If already fully configured, skip straight to device picker ──
         if oauth.is_configured and user_input is None:
-            # Already authenticated — validate token is still usable.
             token_ok = await oauth.async_ensure_token()
             if token_ok:
                 self._cloud_auth = {
@@ -539,32 +520,67 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_oauth_pick_device()
             _LOGGER.info("Stored OAuth token is no longer valid; re-authenticating")
 
-        if user_input is not None:
-            region = user_input.get("tuya_region", "eu")
-            try:
-                qr_data = await oauth.async_start_qr_login(
-                    app_access_id, app_access_secret, region,
-                )
-                # Store transient state for the QR scan step.
-                self._qr_code_url = qr_data["url"]
-                self._qr_code_token = qr_data["token"]
-                self._app_access_id = app_access_id
-                self._app_access_secret = app_access_secret
-                self._selected_region = region
-                return await self.async_step_oauth_qr_scan()
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.exception("Smart Life QR code generation failed")
-                errors["base"] = self._cloud_error_key(exc)
+        # ── Resolve app-level project credentials ──
+        # Priority: stored > env vars > user input
+        stored_id = oauth.access_id
+        stored_secret = oauth.access_secret
+        env_id = os.environ.get(TUYA_APP_ACCESS_ID_ENV, "").strip()
+        env_secret = os.environ.get(TUYA_APP_ACCESS_SECRET_ENV, "").strip()
 
-        return self.async_show_form(
-            step_id="oauth_login",
-            data_schema=vol.Schema(
+        app_access_id = stored_id or env_id
+        app_access_secret = stored_secret or env_secret
+        creds_available = bool(app_access_id and app_access_secret)
+
+        if user_input is not None:
+            # Override with user-provided values if they were on the form.
+            if not creds_available:
+                app_access_id = user_input.get("tuya_access_id", "").strip()
+                app_access_secret = user_input.get("tuya_access_secret", "").strip()
+                if not app_access_id or not app_access_secret:
+                    errors["base"] = "cloud_credentials_required"
+
+            region = user_input.get("tuya_region", "eu")
+
+            if not errors:
+                try:
+                    qr_data = await oauth.async_start_qr_login(
+                        app_access_id, app_access_secret, region,
+                    )
+                    self._qr_code_url = qr_data["url"]
+                    self._qr_code_token = qr_data["token"]
+                    self._app_access_id = app_access_id
+                    self._app_access_secret = app_access_secret
+                    self._selected_region = region
+                    return await self.async_step_oauth_qr_scan()
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.exception("Smart Life QR code generation failed")
+                    errors["base"] = self._cloud_error_key(exc)
+
+        # ── Build the form schema dynamically ──
+        if creds_available:
+            # Credentials already known — only ask for region.
+            schema = vol.Schema(
                 {
                     vol.Required("tuya_region", default="eu"): vol.In(
                         {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
                     ),
                 }
-            ),
+            )
+        else:
+            # First-time setup — ask for project credentials + region.
+            schema = vol.Schema(
+                {
+                    vol.Required("tuya_access_id"): str,
+                    vol.Required("tuya_access_secret"): str,
+                    vol.Required("tuya_region", default="eu"): vol.In(
+                        {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
+                    ),
+                }
+            )
+
+        return self.async_show_form(
+            step_id="oauth_login",
+            data_schema=schema,
             errors=errors,
         )
 
