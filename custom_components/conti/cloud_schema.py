@@ -50,6 +50,9 @@ _QR_LOGIN_BASE = "https://apigw.iotbing.com"
 # This is a public, well-known value — NOT a secret.
 TUYA_HA_CLIENT_ID = "HA_3y9q4ak7g4ephrvke"
 
+# Default schema for the QR-login gateway (matches official HA integration).
+TUYA_HA_SCHEMA = "haauthorize"
+
 # QR content format scanned by the Smart Life / Tuya Smart app
 _QR_CONTENT_FMT = "tuyaSmart--qrLogin?token={token}"
 
@@ -773,8 +776,9 @@ class TuyaCloudSchemaHelper:
 
     @staticmethod
     async def get_login_qr_code(
-        schema: str = "smartlife",
+        user_code: str,
         client_id: str = TUYA_HA_CLIENT_ID,
+        schema: str = TUYA_HA_SCHEMA,
     ) -> dict[str, Any]:
         """Request a QR code for Smart Life app authorization.
 
@@ -783,6 +787,10 @@ class TuyaCloudSchemaHelper:
         parameters.  The default ``client_id`` is the shared HA Tuya
         client so that **no project credentials are needed**.
 
+        ``user_code`` is the account identifier shown under "User Code"
+        on the Tuya IoT platform or simply the user's country-code-based
+        identifier.  It is **required** by the gateway.
+
         Returns a dict with:
         * ``url`` — the content to encode as a QR code image
           (format: ``tuyaSmart--qrLogin?token=…``).
@@ -790,9 +798,13 @@ class TuyaCloudSchemaHelper:
 
         Raises :class:`TuyaCloudAPIError` on failure.
         """
+        import json as _json  # noqa: PLC0415
+
         url = (
             f"{_QR_LOGIN_BASE}/v1.0/m/life/home-assistant/qrcode/tokens"
-            f"?clientid={client_id}&schema={schema}"
+            f"?clientid={client_id}"
+            f"&usercode={user_code}"
+            f"&schema={schema}"
         )
         _LOGGER.debug("QR login request: POST %s", url)
 
@@ -803,13 +815,27 @@ class TuyaCloudSchemaHelper:
                     timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
                     ssl=True,
                 ) as resp:
-                    data = await resp.json()
+                    raw_body = await resp.text()
+                    content_type = resp.headers.get("Content-Type", "")
+                    _LOGGER.debug(
+                        "QR login response: status=%s ct=%s body=%s",
+                        resp.status, content_type, raw_body[:500],
+                    )
         except Exception as exc:
             raise TuyaCloudAPIError(
                 f"QR code request failed: {exc}"
             ) from exc
 
-        _LOGGER.debug("QR login response: %s", data)
+        # Parse JSON safely — the gateway sometimes returns text/plain.
+        try:
+            data = _json.loads(raw_body)
+        except (ValueError, TypeError) as exc:
+            raise TuyaCloudAPIError(
+                "Tuya QR login endpoint returned an unexpected response "
+                f"(content-type={content_type}). "
+                "Check region, project type, and QR login parameters. "
+                f"Body preview: {raw_body[:200]}"
+            ) from exc
 
         if not isinstance(data, dict) or not data.get("success"):
             code = data.get("code", "") if isinstance(data, dict) else ""
@@ -833,6 +859,7 @@ class TuyaCloudSchemaHelper:
     @staticmethod
     async def poll_login_qr_code(
         token: str,
+        user_code: str,
         client_id: str = TUYA_HA_CLIENT_ID,
     ) -> dict[str, Any] | None:
         """Poll the QR code scan status.
@@ -844,9 +871,12 @@ class TuyaCloudSchemaHelper:
         least ``uid``, ``access_token``, ``refresh_token``,
         ``expire_time``, ``endpoint``, and ``terminal_id``.
         """
+        import json as _json  # noqa: PLC0415
+
         url = (
             f"{_QR_LOGIN_BASE}/v1.0/m/life/home-assistant/qrcode/tokens/{token}"
             f"?clientid={client_id}"
+            f"&usercode={user_code}"
         )
 
         try:
@@ -856,9 +886,18 @@ class TuyaCloudSchemaHelper:
                     timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
                     ssl=True,
                 ) as resp:
-                    data = await resp.json()
+                    raw_body = await resp.text()
         except Exception:  # noqa: BLE001
             _LOGGER.debug("QR poll request failed for token=%s", token)
+            return None
+
+        try:
+            data = _json.loads(raw_body)
+        except (ValueError, TypeError):
+            _LOGGER.debug(
+                "QR poll returned non-JSON for token=%s: %s",
+                token, raw_body[:200],
+            )
             return None
 
         if not isinstance(data, dict) or not data.get("success"):

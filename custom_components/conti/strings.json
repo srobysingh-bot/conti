@@ -18,11 +18,13 @@
       },
       "oauth_login": {
         "title": "Login with Smart Life",
-        "description": "Select your data centre region to begin. On the next screen you will scan a QR code with the Smart Life app to authorise Conti.\n\nNo Tuya IoT project credentials are needed — just your Smart Life app.",
+        "description": "Enter your User Code and select your data centre region. On the next screen you will scan a QR code with the Smart Life / Tuya Smart app to authorise Conti.\n\nYour User Code is shown on the Tuya IoT Platform under **Cloud → Link Tuya App Account → Add App Account** (also called \u201cApp Account UID\u201d in some regions).",
         "data": {
+          "user_code": "User Code",
           "tuya_region": "Data Centre Region"
         },
         "data_description": {
+          "user_code": "Account identifier from the Tuya IoT Platform (Cloud → Link Tuya App Account → Add App Account).",
           "tuya_region": "Select the Tuya data centre closest to your region."
         }
       },
@@ -138,6 +140,7 @@
       "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
       "smart_life_login_failed": "Smart Life QR code authorization failed. Please try again.",
       "qr_not_scanned": "QR code has not been scanned yet. Open the Smart Life app, scan the QR code, then click Submit.",
+      "user_code_required": "User Code is required for Smart Life QR login. Find it in the Tuya IoT Platform under Cloud → Link Tuya App Account.",
       "app_credentials_missing": "Smart Life login is unavailable. The Home Assistant administrator must set TUYA_APP_ACCESS_ID and TUYA_APP_ACCESS_SECRET environment variables. See integration documentation.",
       "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",

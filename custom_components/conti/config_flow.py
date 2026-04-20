@@ -515,20 +515,30 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             region = user_input.get("tuya_region", "eu")
-            _LOGGER.debug("Smart Life QR login: selected region=%s", region)
+            user_code = user_input.get("user_code", "").strip()
+            _LOGGER.debug(
+                "Smart Life QR login: region=%s user_code=%s",
+                region, user_code,
+            )
 
-            try:
-                qr_data = await oauth.async_start_qr_login(region=region)
-                self._qr_code_url = qr_data["url"]
-                self._qr_code_token = qr_data["token"]
-                self._selected_region = region
-                return await self.async_step_oauth_qr_scan()
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.exception("Smart Life QR code generation failed")
-                errors["base"] = self._cloud_error_key(exc)
+            if not user_code:
+                errors["base"] = "user_code_required"
+            else:
+                try:
+                    qr_data = await oauth.async_start_qr_login(
+                        user_code=user_code, region=region,
+                    )
+                    self._qr_code_url = qr_data["url"]
+                    self._qr_code_token = qr_data["token"]
+                    self._selected_region = region
+                    return await self.async_step_oauth_qr_scan()
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.exception("Smart Life QR code generation failed")
+                    errors["base"] = self._cloud_error_key(exc)
 
         schema = vol.Schema(
             {
+                vol.Required("user_code"): str,
                 vol.Required("tuya_region", default="eu"): vol.In(
                     {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
                 ),

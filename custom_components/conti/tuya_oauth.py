@@ -51,6 +51,7 @@ class TuyaOAuthManager:
         self._access_id: str = ""
         self._access_secret: str = ""
         self._region: str = "eu"
+        self._user_code: str = ""
         self._access_token: str = ""
         self._refresh_token: str = ""
         self._token_expiry: float = 0.0
@@ -62,7 +63,11 @@ class TuyaOAuthManager:
 
     @property
     def is_configured(self) -> bool:
-        """Return True when cloud credentials have been stored."""
+        """Return True when a prior login has stored usable credentials."""
+        # QR-login flow stores uid + tokens (no access_id/access_secret).
+        if self._uid and self._access_token:
+            return True
+        # Legacy project-credential flow.
         return bool(self._access_id and self._access_secret and self._uid)
 
     @property
@@ -81,6 +86,10 @@ class TuyaOAuthManager:
     def access_secret(self) -> str:
         return self._access_secret
 
+    @property
+    def user_code(self) -> str:
+        return self._user_code
+
 
     # ── Persistent storage ────────────────────────────────────────────
 
@@ -93,6 +102,7 @@ class TuyaOAuthManager:
             self._access_id = str(data.get("access_id", ""))
             self._access_secret = str(data.get("access_secret", ""))
             self._region = str(data.get("region", "eu"))
+            self._user_code = str(data.get("user_code", ""))
             self._access_token = str(data.get("access_token", ""))
             self._refresh_token = str(data.get("refresh_token", ""))
             self._token_expiry = float(data.get("token_expiry", 0.0))
@@ -105,6 +115,7 @@ class TuyaOAuthManager:
                 "access_id": self._access_id,
                 "access_secret": self._access_secret,
                 "region": self._region,
+                "user_code": self._user_code,
                 "access_token": self._access_token,
                 "refresh_token": self._refresh_token,
                 "token_expiry": self._token_expiry,
@@ -150,21 +161,23 @@ class TuyaOAuthManager:
 
     async def async_start_qr_login(
         self,
+        user_code: str,
         region: str = "eu",
     ) -> dict[str, Any]:
         """Generate a QR code for Smart Life app authorization.
 
         Uses the shared Tuya HA client ID — **no project credentials needed**.
-        The region is stored so device-listing calls after scan can use the
-        correct data centre.
+        ``user_code`` is the identifier shown as “User Code” in the Tuya
+        IoT platform or simply the user’s country dial code.
 
         Returns a dict with ``url`` (QR content) and ``token`` (poll ticket).
         """
         from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
 
         self._region = region
+        self._user_code = user_code
         qr_data = await TuyaCloudSchemaHelper.get_login_qr_code(
-            schema="smartlife",
+            user_code=user_code,
         )
         await self.async_save()
         return qr_data
@@ -182,7 +195,9 @@ class TuyaOAuthManager:
         """
         from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
 
-        result = await TuyaCloudSchemaHelper.poll_login_qr_code(token)
+        result = await TuyaCloudSchemaHelper.poll_login_qr_code(
+            token, user_code=self._user_code,
+        )
 
         if not result or not isinstance(result, dict):
             return None
