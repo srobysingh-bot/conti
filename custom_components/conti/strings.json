@@ -18,10 +18,8 @@
       },
       "oauth_login": {
         "title": "Login with Smart Life",
-        "description": "Enter your Tuya IoT Platform API credentials to connect your Smart Life account. This is a one-time setup — Conti will store your credentials securely and reuse them for all future device additions.\n\nAfter connecting, Conti will auto-discover all devices linked to your account.",
+        "description": "Select your data-centre region and Conti will connect to your Smart Life account automatically. No Tuya developer credentials are needed.\n\nAfter connecting, Conti will auto-discover all devices linked to your account.",
         "data": {
-          "tuya_access_id": "Access ID / Client ID",
-          "tuya_access_secret": "Access Secret / Client Secret",
           "tuya_region": "Data Centre Region"
         }
       },
