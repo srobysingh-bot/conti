@@ -271,6 +271,34 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
             "4": {"key": "switch_4", "type": "bool"},
         },
     },
+    # ── 4-gang Switch with Energy Monitoring ──
+    {
+        "id": "switch_4gang_monitoring",
+        "name": "4-Gang Switch with Energy Monitoring",
+        "device_type": DEVICE_TYPE_SWITCH,
+        "tuya_categories": ["kg", "cz", "pc"],
+        "dp_template": {
+            "1": {"key": "switch_1", "type": "bool"},
+            "2": {"key": "switch_2", "type": "bool"},
+            "3": {"key": "switch_3", "type": "bool"},
+            "4": {"key": "switch_4", "type": "bool"},
+            "9": {"key": "countdown_1", "type": "int"},
+            "10": {"key": "countdown_2", "type": "int"},
+            "11": {"key": "countdown_3", "type": "int"},
+            "12": {"key": "countdown_4", "type": "int"},
+            "17": {"key": DP_KEY_ENERGY_TOTAL, "type": "int", "scale": 100},
+            "18": {"key": DP_KEY_CURRENT, "type": "int"},
+            "19": {"key": DP_KEY_POWER_USAGE, "type": "int", "scale": 10},
+            "20": {"key": DP_KEY_VOLTAGE, "type": "int", "scale": 10},
+            "26": {"key": "fault", "type": "int"},
+            "38": {"key": "relay_status", "type": "str"},
+            "40": {"key": "light_mode", "type": "str"},
+            "41": {"key": "child_lock", "type": "bool"},
+            "42": {"key": "cycle_time", "type": "str"},
+            "43": {"key": "random_time", "type": "str"},
+            "44": {"key": "switch_inching", "type": "str"},
+        },
+    },
     # ── Power Strip / Extension Board ──
     {
         "id": "switch_powerstrip",
@@ -504,8 +532,8 @@ def score_profile_against_dps(
             base_score += 0.12
 
     # 4-gang wall-switch family signature:
-    # relays on 1..4 + countdowns on 7..10 + advanced control DPs.
-    if profile.get("id") == "switch_4gang":
+    # relays on 1..4 + countdowns on 7..10 or 9..12 + advanced control DPs.
+    if profile.get("id") in ("switch_4gang", "switch_4gang_monitoring"):
         has_relays_1_4 = all(
             isinstance(discovered_dps.get(dp), bool)
             for dp in ("1", "2", "3", "4")
@@ -515,13 +543,26 @@ def score_profile_against_dps(
             and not isinstance(discovered_dps.get(dp), bool)
             for dp in ("7", "8", "9", "10")
         )
+        has_countdown_9_12 = all(
+            isinstance(discovered_dps.get(dp), (int, float))
+            and not isinstance(discovered_dps.get(dp), bool)
+            for dp in ("9", "10", "11", "12")
+        )
+        has_energy = sum(
+            1
+            for dp in ("17", "18", "19", "20")
+            if isinstance(discovered_dps.get(dp), (int, float))
+            and not isinstance(discovered_dps.get(dp), bool)
+        ) >= 2
         advanced_hits = sum(
             1
-            for dp in ("14", "17", "18", "19", "47")
-            if isinstance(discovered_dps.get(dp), str)
+            for dp in ("14", "26", "38", "40", "41", "42", "43", "44", "47")
+            if dp in discovered_dps
         )
-        if has_relays_1_4 and has_countdown_7_10 and advanced_hits >= 2:
+        if has_relays_1_4 and (has_countdown_7_10 or has_countdown_9_12):
             base_score += 0.12
+        if has_relays_1_4 and has_energy and advanced_hits >= 2:
+            base_score += 0.10
 
     # Contact/alarm sensor signature:
     # DP 1 bool door state + DP 2 integer battery + optional alarm DPs.

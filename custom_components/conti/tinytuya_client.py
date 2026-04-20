@@ -426,23 +426,30 @@ class TinyTuyaDevice:
     # -- DP discovery --------------------------------------------------------
 
     async def detect_dps(self) -> dict[str, Any]:
-        """Auto-detect available data-points on the device."""
+        """Auto-detect available data-points on the device.
+
+        Uses ``detect_available_dps()`` first (probes DPs 1-255).
+        If the result is sparse (≤3 DPs), a secondary forced re-query
+        with ``updatedps()`` + ``set_dpsUsed()`` recovers additional
+        DPs that multi-gang devices may not report in the initial probe.
+        """
         if not self._device:
             return {}
 
         def _detect() -> dict[str, Any]:
+            dps: dict[str, Any] = {}
+
+            # ── Phase 1: standard detection ──
             try:
                 if hasattr(self._device, "detect_available_dps"):
                     result = self._device.detect_available_dps()  # type: ignore[union-attr]
                 else:
-                    # Fallback for older tinytuya: use plain status
                     raw = self._device.status()  # type: ignore[union-attr]
                     result = raw.get("dps", {}) if isinstance(raw, dict) else {}
 
                 if result and isinstance(result, dict):
                     dps = {str(k): v for k, v in result.items()}
                     self._cached_dps.update(dps)
-                    return dps
             except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug(
                     "Conti detect_dps() raised for %s: %s",
@@ -450,24 +457,61 @@ class TinyTuyaDevice:
                     exc,
                 )
 
-            # Secondary fallback: if both detect_available_dps and cached_dps
-            # are empty, try a plain status() call.  Some devices respond to
-            # status but not to the DP detection probe.
-            if not self._cached_dps:
+            # ── Phase 2: forced broad re-query for sparse results ──
+            # Multi-gang switches and monitoring devices often report
+            # only DP 1 initially.  Explicitly requesting a broader
+            # DP range forces the firmware to report all channels.
+            if len(dps) <= 3 and self._device:
+                try:
+                    broad_ids = {str(i): None for i in range(1, 51)}
+                    try:
+                        self._device.set_dpsUsed(broad_ids)  # type: ignore[union-attr]
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if hasattr(self._device, "updatedps"):
+                        try:
+                            self._device.updatedps(  # type: ignore[union-attr]
+                                list(range(1, 51))
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    raw = self._device.status()  # type: ignore[union-attr]
+                    if isinstance(raw, dict) and raw.get("dps"):
+                        extra = {str(k): v for k, v in raw["dps"].items()}
+                        new_count = len(set(extra) - set(dps))
+                        dps.update(extra)
+                        self._cached_dps.update(dps)
+                        if new_count:
+                            _LOGGER.info(
+                                "detect_dps: forced re-query found %d new DPs "
+                                "for %s (total: %d)",
+                                new_count,
+                                self._device_id,
+                                len(dps),
+                            )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "detect_dps: forced re-query failed for %s",
+                        self._device_id,
+                    )
+
+            # ── Phase 3: last-resort plain status ──
+            if not dps and not self._cached_dps:
                 try:
                     raw = self._device.status()  # type: ignore[union-attr]
                     if isinstance(raw, dict) and raw.get("dps"):
                         dps = {str(k): v for k, v in raw["dps"].items()}
                         self._cached_dps.update(dps)
                         _LOGGER.debug(
-                            "Conti detect_dps() recovered %d DPs via status() fallback for %s",
+                            "detect_dps: recovered %d DPs via status() "
+                            "fallback for %s",
                             len(dps),
                             self._device_id,
                         )
                 except Exception:  # noqa: BLE001
                     pass
 
-            return dict(self._cached_dps)
+            return dps if dps else dict(self._cached_dps)
 
         return await asyncio.to_thread(_detect)
 

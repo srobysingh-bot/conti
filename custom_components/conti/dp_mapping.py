@@ -205,12 +205,15 @@ def auto_map_dps(
                 dp_id, role, actual_type, discovered_dps[dp_id],
             )
 
-    # Signature-based enrichment for power-monitoring smart plugs.
-    # This keeps generic switch mapping conservative, and only adds
-    # richer known DPs when the observed DP shape strongly matches.
+    # Signature-based enrichment for switches.
+    # Multi-gang detection runs FIRST — if it triggers (2+ relays),
+    # power-monitoring plug enrichment is skipped to avoid conflicts.
     if device_type == DEVICE_TYPE_SWITCH:
-        _augment_power_monitoring_plug_map(result, discovered_dps)
-        _augment_multi_gang_switch_family_map(result, discovered_dps)
+        is_multi_gang = _augment_multi_gang_switch_family_map(
+            result, discovered_dps
+        )
+        if not is_multi_gang:
+            _augment_power_monitoring_plug_map(result, discovered_dps)
     elif device_type == DEVICE_TYPE_SENSOR:
         _augment_contact_alarm_sensor_family_map(result, discovered_dps)
 
@@ -309,17 +312,23 @@ def _augment_power_monitoring_plug_map(
         )
 
 
+def _is_int_dp(discovered_dps: dict[str, Any], dp_id: str) -> bool:
+    """Return True if *dp_id* is a non-bool numeric DP."""
+    val = discovered_dps.get(dp_id)
+    return isinstance(val, (int, float)) and not isinstance(val, bool)
+
+
 def _augment_multi_gang_switch_family_map(
     result: dict[str, dict[str, Any]],
     discovered_dps: dict[str, Any],
-) -> None:
+) -> bool:
     """Give distinct ``switch_N`` key names to multi-gang relay DPs.
 
     Applied when **two or more** relay-class bool DPs (1–7) are present.
-    Also enriches countdown and advanced DPs when the signature matches.
+    Also enriches countdown, energy-monitoring, and advanced DPs when
+    the DP signature matches.
 
-    This replaces the generic ``"power"`` key with ``"switch_1"``,
-    ``"switch_2"``, etc. so that Home Assistant shows distinct entity names.
+    Returns ``True`` if multi-gang detection triggered, ``False`` otherwise.
     """
     relay_ids = ["1", "2", "3", "4", "5", "6", "7"]
     found_relays = [
@@ -328,45 +337,69 @@ def _augment_multi_gang_switch_family_map(
     ]
 
     if len(found_relays) < 2:
-        return  # Not multi-gang
-
-    # Countdown DPs paired with relay DPs (DP 7-13 map to relay 1-7).
-    countdown_map = {"1": "7", "2": "8", "3": "9", "4": "10",
-                     "5": "11", "6": "12", "7": "13"}
-
-    # Known advanced-settings DPs for multi-gang wall switches.
-    advanced_specs: dict[str, dict[str, Any]] = {
-        "14": {"key": "relay_status", "type": "str"},
-        "17": {"key": "cycle_time", "type": "str"},
-        "18": {"key": "random_time", "type": "str"},
-        "19": {"key": "switch_inching", "type": "str"},
-        "38": {"key": "relay_status", "type": "str"},
-        "40": {"key": "light_mode", "type": "str"},
-        "41": {"key": "child_lock", "type": "bool"},
-        "44": {"key": "switch_inching", "type": "str"},
-        "47": {"key": "switch_type", "type": "str"},
-    }
+        return False  # Not multi-gang
 
     added_or_updated: list[str] = []
 
-    # Rename relay DPs to switch_N.
+    # ── Rename relay DPs to switch_N ──
     for idx, dp_id in enumerate(found_relays, start=1):
         spec = {"key": f"switch_{idx}", "type": "bool"}
         if result.get(dp_id) != spec:
             result[dp_id] = spec
             added_or_updated.append(dp_id)
 
-        # Pair countdown DP if present.
-        cd_dp = countdown_map.get(dp_id)
-        if cd_dp and cd_dp in discovered_dps:
-            cd_type = _classify_value(discovered_dps[cd_dp])
-            if cd_type == "int":
-                cd_spec = {"key": f"countdown_{idx}", "type": "int"}
-                if result.get(cd_dp) != cd_spec:
-                    result[cd_dp] = cd_spec
-                    added_or_updated.append(cd_dp)
+    # ── Auto-detect countdown pattern ──
+    # Two common Tuya layouts:
+    #   Wall switches:      relay 1-N → countdown at offset +6 (DPs 7-13)
+    #   Power strip / smart: relay 1-N → countdown at offset +8 (DPs 9-12+)
+    offset_8_hits = sum(
+        1 for dp in found_relays
+        if _is_int_dp(discovered_dps, str(int(dp) + 8))
+    )
+    offset_6_hits = sum(
+        1 for dp in found_relays
+        if _is_int_dp(discovered_dps, str(int(dp) + 6))
+    )
+    countdown_offset = (
+        8 if offset_8_hits > 0 and offset_8_hits >= offset_6_hits else 6
+    )
 
-    # Enrich with advanced DPs if present.
+    for idx, dp_id in enumerate(found_relays, start=1):
+        cd_dp = str(int(dp_id) + countdown_offset)
+        if cd_dp in discovered_dps and _is_int_dp(discovered_dps, cd_dp):
+            cd_spec = {"key": f"countdown_{idx}", "type": "int"}
+            if result.get(cd_dp) != cd_spec:
+                result[cd_dp] = cd_spec
+                added_or_updated.append(cd_dp)
+
+    # ── Energy-monitoring DPs (common on multi-gang switches with metering) ──
+    energy_specs: dict[str, dict[str, Any]] = {
+        "17": {"key": DP_KEY_ENERGY_TOTAL, "type": "int", "scale": 100},
+        "18": {"key": DP_KEY_CURRENT, "type": "int"},
+        "19": {"key": DP_KEY_POWER_USAGE, "type": "int", "scale": 10},
+        "20": {"key": DP_KEY_VOLTAGE, "type": "int", "scale": 10},
+    }
+    for dp_id, spec in energy_specs.items():
+        if dp_id not in discovered_dps:
+            continue
+        if not _is_int_dp(discovered_dps, dp_id):
+            continue
+        if dp_id not in result:
+            result[dp_id] = dict(spec)
+            added_or_updated.append(dp_id)
+
+    # ── Advanced / control DPs ──
+    advanced_specs: dict[str, dict[str, Any]] = {
+        "14": {"key": "relay_status", "type": "str"},
+        "26": {"key": "fault", "type": "int"},
+        "38": {"key": "relay_status", "type": "str"},
+        "40": {"key": "light_mode", "type": "str"},
+        "41": {"key": "child_lock", "type": "bool"},
+        "42": {"key": "cycle_time", "type": "str"},
+        "43": {"key": "random_time", "type": "str"},
+        "44": {"key": "switch_inching", "type": "str"},
+        "47": {"key": "switch_type", "type": "str"},
+    }
     for dp_id, spec in advanced_specs.items():
         if dp_id not in discovered_dps:
             continue
@@ -384,6 +417,8 @@ def _augment_multi_gang_switch_family_map(
             len(found_relays),
             sorted(added_or_updated),
         )
+
+    return True
 
 
 def _augment_contact_alarm_sensor_family_map(
