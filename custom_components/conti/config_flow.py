@@ -1316,11 +1316,28 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._profile_dp_map,
         )
         self._apply_safe_profile_fallback_if_needed()
-        self._mapping_source = "auto"
+
+        # ── Last-resort raw DP fallback ──
+        # When ALL mapping pipelines produced nothing but we DO have
+        # discovered DPs, build a raw map so the user at least sees them
+        # in the review step and can refine via Learn / Manual Edit.
+        if not self._final_dp_map and discovered_dps:
+            from .dp_mapping import build_raw_dp_map  # noqa: PLC0415
+
+            self._final_dp_map = build_raw_dp_map(discovered_dps)
+            self._mapping_source = "raw_discovery"
+            _LOGGER.warning(
+                "Config flow: all mapping pipelines empty for %s — "
+                "built raw DP map (%d DPs) from discovery",
+                self._flow_data.get(CONF_DEVICE_ID, ""),
+                len(self._final_dp_map),
+            )
+        else:
+            self._mapping_source = "auto"
 
         _LOGGER.info(
             "Config flow detect: device=%s v%s, %d DPs discovered, "
-            "profile=%s (confidence=%.2f), auto-map=%d, profile-map=%d",
+            "profile=%s (confidence=%.2f), auto-map=%d, profile-map=%d, final-map=%d",
             self._flow_data[CONF_DEVICE_ID],
             detected_version,
             len(discovered_dps),
@@ -1328,6 +1345,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             confidence,
             len(self._auto_dp_map),
             len(self._profile_dp_map),
+            len(self._final_dp_map),
         )
 
         # Show detection results with options
@@ -2018,20 +2036,27 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return
 
         category = (self._tuya_category or "").strip()
-        if not category:
-            return
+        device_type = self._flow_data.get(CONF_DEVICE_TYPE)
 
         from .device_profiles import (  # noqa: PLC0415
+            DEVICE_PROFILES,
             dp_map_from_profile,
             match_profile_by_category,
             score_profile_against_dps,
         )
 
-        device_type = self._flow_data.get(CONF_DEVICE_TYPE)
-        candidates = [
-            p for p in match_profile_by_category(category)
-            if p.get("device_type") == device_type
-        ]
+        # Build candidate list: category-matched first, then device_type only
+        candidates: list[dict[str, Any]] = []
+        if category:
+            candidates = [
+                p for p in match_profile_by_category(category)
+                if p.get("device_type") == device_type
+            ]
+        if not candidates and device_type:
+            candidates = [
+                p for p in DEVICE_PROFILES
+                if p.get("device_type") == device_type
+            ]
         if not candidates:
             return
 
@@ -2052,6 +2077,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         elif len(candidates) == 1:
             chosen = candidates[0]
             score = 0.5
+        elif candidates:
+            # Multiple candidates, all score 0 — pick the simplest profile
+            # (smallest dp_template) as a best-effort fallback.
+            sorted_by_size = sorted(
+                candidates, key=lambda p: len(p.get("dp_template", {}))
+            )
+            chosen = sorted_by_size[0]
+            score = 0.3
 
         if not chosen:
             return

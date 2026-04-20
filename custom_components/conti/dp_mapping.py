@@ -478,3 +478,25 @@ def merge_all_dp_maps(
         if m:
             result.update(m)
     return result
+
+
+def build_raw_dp_map(
+    discovered_dps: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Build a minimal dp_map directly from discovered DPs.
+
+    Used as a last-resort fallback when all heuristic, profile, and
+    cloud mapping pipelines produce nothing.  Entity keys are named
+    ``dp_<id>`` so they are at least visible in the review step.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for dp_id, value in discovered_dps.items():
+        dp_str = str(dp_id)
+        if isinstance(value, bool):
+            vtype = "bool"
+        elif isinstance(value, (int, float)):
+            vtype = "int"
+        else:
+            vtype = "str"
+        result[dp_str] = {"key": f"dp_{dp_str}", "type": vtype}
+    return result

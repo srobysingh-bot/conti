@@ -449,6 +449,24 @@ class TinyTuyaDevice:
                     self._device_id,
                     exc,
                 )
+
+            # Secondary fallback: if both detect_available_dps and cached_dps
+            # are empty, try a plain status() call.  Some devices respond to
+            # status but not to the DP detection probe.
+            if not self._cached_dps:
+                try:
+                    raw = self._device.status()  # type: ignore[union-attr]
+                    if isinstance(raw, dict) and raw.get("dps"):
+                        dps = {str(k): v for k, v in raw["dps"].items()}
+                        self._cached_dps.update(dps)
+                        _LOGGER.debug(
+                            "Conti detect_dps() recovered %d DPs via status() fallback for %s",
+                            len(dps),
+                            self._device_id,
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+
             return dict(self._cached_dps)
 
         return await asyncio.to_thread(_detect)
