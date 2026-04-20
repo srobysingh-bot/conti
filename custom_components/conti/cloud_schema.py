@@ -43,6 +43,12 @@ _BASE_URLS: dict[str, str] = {
     "in": "https://openapi.tuyain.com",
 }
 
+# Tuya QR-login gateway (centralised, not regional)
+_QR_LOGIN_BASE = "https://apigw.iotbing.com"
+
+# QR content format scanned by the Smart Life / Tuya Smart app
+_QR_CONTENT_FMT = "tuyaSmart--qrLogin?token={token}"
+
 # Default timeout for cloud API calls (seconds)
 _API_TIMEOUT = 10
 
@@ -767,28 +773,56 @@ class TuyaCloudSchemaHelper:
     ) -> dict[str, Any]:
         """Request a QR code for Smart Life app authorization.
 
-        Calls ``POST /v1.0/iot-01/associated-users/actions/qr-code``
-        to generate a QR code that the user scans with the Smart Life app.
+        Uses the centralised Tuya QR-login gateway (``apigw.iotbing.com``)
+        which does **not** require HMAC signing — only query-string
+        parameters.
 
         Returns a dict with:
-        * ``url`` — the content to encode as a QR code image.
+        * ``url`` — the content to encode as a QR code image
+          (format: ``tuyaSmart--qrLogin?token=…``).
         * ``token`` — the ticket for polling scan status.
 
         Raises :class:`TuyaCloudAPIError` on failure.
         """
-        await self._ensure_token(strict=True)
-        result = await self._api_post(
-            "/v1.0/iot-01/associated-users/actions/qr-code",
-            {"schema": schema},
-            strict=True,
+        url = (
+            f"{_QR_LOGIN_BASE}/v1.0/m/life/home-assistant/qrcode/tokens"
+            f"?clientid={self._access_id}&schema={schema}"
         )
-        if not result or not isinstance(result, dict):
-            raise TuyaCloudAPIError("Failed to generate Smart Life QR code")
-        if "url" not in result or "token" not in result:
+        _LOGGER.debug("QR login request: POST %s", url)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
+                    ssl=True,
+                ) as resp:
+                    data = await resp.json()
+        except Exception as exc:
             raise TuyaCloudAPIError(
-                f"QR code response missing url/token: {result}"
+                f"QR code request failed: {exc}"
+            ) from exc
+
+        _LOGGER.debug("QR login response: %s", data)
+
+        if not isinstance(data, dict) or not data.get("success"):
+            code = data.get("code", "") if isinstance(data, dict) else ""
+            msg = data.get("msg", "unknown") if isinstance(data, dict) else str(data)
+            raise TuyaCloudAPIError(
+                f"QR code generation failed: code={code} msg={msg}"
             )
-        return result
+
+        result = data.get("result", {})
+        qr_token = result.get("qrcode", "")
+        if not qr_token:
+            raise TuyaCloudAPIError(
+                f"QR code response missing qrcode field: {result}"
+            )
+
+        return {
+            "url": _QR_CONTENT_FMT.format(token=qr_token),
+            "token": qr_token,
+        }
 
     async def poll_login_qr_code(
         self,
@@ -796,14 +830,32 @@ class TuyaCloudSchemaHelper:
     ) -> dict[str, Any] | None:
         """Poll the QR code scan status.
 
+        Uses the centralised Tuya QR-login gateway (no HMAC signing).
+
         Returns the result dict when the user has scanned and authorised
         (contains ``uid``), or ``None`` if still pending.
         """
-        result = await self._api_get(
-            f"/v1.0/iot-01/associated-users/actions/qr-code/{token}",
-            strict=False,
+        url = (
+            f"{_QR_LOGIN_BASE}/v1.0/m/life/home-assistant/qrcode/tokens/{token}"
+            f"?clientid={self._access_id}"
         )
-        return result
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
+                    ssl=True,
+                ) as resp:
+                    data = await resp.json()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("QR poll request failed for token=%s", token)
+            return None
+
+        if not isinstance(data, dict) or not data.get("success"):
+            return None
+
+        return data.get("result")
 
     @staticmethod
     def _raise_cloud_error_from_response(

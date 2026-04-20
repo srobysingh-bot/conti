@@ -156,8 +156,9 @@ class TuyaOAuthManager:
     ) -> dict[str, Any]:
         """Generate a QR code for Smart Life app authorization.
 
-        Sets up app credentials on the manager, obtains a management
-        token, then requests a QR code from Tuya.
+        Sets up app credentials on the manager, then requests a QR code
+        from the Tuya QR-login gateway.  Also obtains a management token
+        in the background for subsequent device-listing calls.
 
         Returns a dict with ``url`` (QR content) and ``token`` (poll ticket).
         """
@@ -167,10 +168,18 @@ class TuyaOAuthManager:
         self._helper = None  # Force re-creation
 
         helper = self._get_helper()
+
+        # QR code generation (uses apigw.iotbing.com, no HMAC signing)
         qr_data = await helper.get_login_qr_code(schema="smartlife")
 
-        # Sync management token so subsequent polls are authenticated.
-        self._sync_from_helper(helper)
+        # Obtain a management token for later API calls (device listing etc.)
+        # Non-critical — don't let a failure here block the QR flow.
+        try:
+            await helper._ensure_token(strict=False)
+            self._sync_from_helper(helper)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Management token acquisition deferred to poll phase")
+
         await self.async_save()
         return qr_data
 
