@@ -36,11 +36,11 @@ CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
 CONF_OAUTH_CONFIGURED: Final = "oauth_configured"
 CONF_OAUTH_UID: Final = "oauth_uid"
 
-# Built-in app-level Tuya IoT credentials (Smart Life flow).
-# These are used automatically so users never need to create a Tuya
-# developer project.  Replace with your own project values.
-TUYA_APP_ACCESS_ID: Final = "erymk998tydkhdr9pejf"
-TUYA_APP_ACCESS_SECRET: Final = "14eb08d07c0c4b1da068d56f0ba81af0"
+# Environment variable names for app-level Tuya IoT credentials.
+# The Smart Life flow reads these at runtime — nothing is hardcoded.
+# Set TUYA_APP_ACCESS_ID and TUYA_APP_ACCESS_SECRET in your HA environment.
+TUYA_APP_ACCESS_ID_ENV: Final = "TUYA_APP_ACCESS_ID"
+TUYA_APP_ACCESS_SECRET_ENV: Final = "TUYA_APP_ACCESS_SECRET"
 
 # Runtime channel for full cloud devices (no local_key)
 RUNTIME_CHANNEL_CLOUD: Final = "cloud"

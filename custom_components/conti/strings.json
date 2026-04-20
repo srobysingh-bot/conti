@@ -139,6 +139,7 @@
       "oauth_token_expired": "Smart Life session has expired. Please re-authenticate by removing and re-adding the integration.",
       "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
       "smart_life_login_failed": "Smart Life login failed. Check your email/phone, password, country code, and data centre region.",
+      "app_credentials_missing": "Smart Life login is unavailable. The Home Assistant administrator must set TUYA_APP_ACCESS_ID and TUYA_APP_ACCESS_SECRET environment variables. See integration documentation.",
       "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",

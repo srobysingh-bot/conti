@@ -487,12 +487,44 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Smart Life login — user enters Smart Life email + password.
 
-        No Tuya developer access_id / secret is needed.  Built-in
-        app-level project credentials are used for API signing.  The
-        user authenticates with their Smart Life app credentials.
+        App-level Tuya project credentials are read from environment
+        variables (``TUYA_APP_ACCESS_ID`` / ``TUYA_APP_ACCESS_SECRET``).
+        They are never hardcoded.  The user only provides their own
+        Smart Life account credentials.
         """
-        from .const import TUYA_APP_ACCESS_ID, TUYA_APP_ACCESS_SECRET  # noqa: PLC0415
+        import os  # noqa: PLC0415
+
+        from .const import (  # noqa: PLC0415
+            TUYA_APP_ACCESS_ID_ENV,
+            TUYA_APP_ACCESS_SECRET_ENV,
+        )
         from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        # Read app-level credentials from environment.
+        app_access_id = os.environ.get(TUYA_APP_ACCESS_ID_ENV, "").strip()
+        app_access_secret = os.environ.get(TUYA_APP_ACCESS_SECRET_ENV, "").strip()
+
+        if not app_access_id or not app_access_secret:
+            _LOGGER.error(
+                "Smart Life login unavailable: set %s and %s environment "
+                "variables in your Home Assistant environment",
+                TUYA_APP_ACCESS_ID_ENV,
+                TUYA_APP_ACCESS_SECRET_ENV,
+            )
+            return self.async_show_form(
+                step_id="oauth_login",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required("smart_life_username", default=""): str,
+                        vol.Required("smart_life_password", default=""): str,
+                        vol.Required("country_code", default="1"): str,
+                        vol.Required("tuya_region", default="eu"): vol.In(
+                            {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
+                        ),
+                    }
+                ),
+                errors={"base": "app_credentials_missing"},
+            )
 
         oauth = TuyaOAuthManager(self.hass)
         await oauth.async_load()
@@ -523,8 +555,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 try:
                     await oauth.async_smart_life_login(
-                        access_id=TUYA_APP_ACCESS_ID,
-                        access_secret=TUYA_APP_ACCESS_SECRET,
+                        access_id=app_access_id,
+                        access_secret=app_access_secret,
                         region=region,
                         username=sl_username,
                         password=sl_password,
@@ -536,8 +568,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 if not errors:
                     self._cloud_auth = {
-                        "access_id": TUYA_APP_ACCESS_ID,
-                        "access_secret": TUYA_APP_ACCESS_SECRET,
+                        "access_id": app_access_id,
+                        "access_secret": app_access_secret,
                         "region": region,
                     }
                     return await self.async_step_oauth_pick_device()
