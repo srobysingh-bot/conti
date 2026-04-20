@@ -18,19 +18,17 @@
       },
       "oauth_login": {
         "title": "Login with Smart Life",
-        "description": "Sign in with your Smart Life app credentials. Use the same email/phone and password you use in the Smart Life or Tuya Smart app.\n\nNo Tuya developer account or API keys needed.",
+        "description": "Select your data centre region to begin. On the next screen you will scan a QR code with the Smart Life app to authorise Conti.\n\nNo Tuya developer account, API keys, username, or password needed.",
         "data": {
-          "smart_life_username": "Smart Life Email or Phone",
-          "smart_life_password": "Smart Life Password",
-          "country_code": "Country Code (e.g. 1, 44, 86, 91)",
           "tuya_region": "Data Centre Region"
         },
         "data_description": {
-          "smart_life_username": "The email address or phone number you registered with in the Smart Life app.",
-          "smart_life_password": "Your Smart Life app password.",
-          "country_code": "Your phone country code without the + sign (e.g. 1 for US, 44 for UK, 86 for China, 91 for India).",
           "tuya_region": "Select the Tuya data centre closest to your region."
         }
+      },
+      "oauth_qr_scan": {
+        "title": "Scan QR Code with Smart Life App",
+        "description": "Open the **Smart Life** app on your phone, tap your **profile icon \u2192 top-right scan button**, and scan this QR code:\n\n![Scan with Smart Life app]({qr_code})\n\nAfter scanning, tap **Confirm** in the app, then click **Submit** below."
       },
       "oauth_pick_device": {
         "title": "Select Device",
@@ -138,7 +136,8 @@
       "cloud_device_missing_local_key": "The selected cloud device was found, but Tuya did not return a local key. This can happen with some account/project configurations. Use Manual onboarding as fallback.",
       "oauth_token_expired": "Smart Life session has expired. Please re-authenticate by removing and re-adding the integration.",
       "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
-      "smart_life_login_failed": "Smart Life login failed. Check your email/phone, password, country code, and data centre region.",
+      "smart_life_login_failed": "Smart Life QR code authorization failed. Please try again.",
+      "qr_not_scanned": "QR code has not been scanned yet. Open the Smart Life app, scan the QR code, then click Submit.",
       "app_credentials_missing": "Smart Life login is unavailable. The Home Assistant administrator must set TUYA_APP_ACCESS_ID and TUYA_APP_ACCESS_SECRET environment variables. See integration documentation.",
       "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",

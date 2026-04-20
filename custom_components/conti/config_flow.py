@@ -4,10 +4,10 @@ Three onboarding paths are provided:
 
 Smart Life OAuth path (default — recommended)
     Step 1  (``user``)               — choose onboarding mode.
-    Step 2a (``oauth_login``)        — enter Smart Life email/phone +
-                                       password (no Tuya developer
-                                       credentials needed).
-    Step 2b (``oauth_pick_device``)  — select device from auto-discovered
+    Step 2a (``oauth_login``)        — select data-centre region; QR code
+                                       is generated (no credentials needed).
+    Step 2b (``oauth_qr_scan``)      — scan QR code with Smart Life app.
+    Step 2c (``oauth_pick_device``)  — select device from auto-discovered
                                        cloud list.
     Step 3  (``confirm_host``)       — confirm / enter local IP (if needed).
     Step 4  (``detect``)             — auto-detect protocol + DP discovery.
@@ -485,12 +485,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_oauth_login(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Smart Life login — user enters Smart Life email + password.
+        """Smart Life login — select region, then scan QR code.
 
         App-level Tuya project credentials are read from environment
-        variables (``TUYA_APP_ACCESS_ID`` / ``TUYA_APP_ACCESS_SECRET``).
-        They are never hardcoded.  The user only provides their own
-        Smart Life account credentials.
+        variables.  No username or password is collected.  The user
+        authorises by scanning a QR code with the Smart Life app.
         """
         import os  # noqa: PLC0415
 
@@ -515,9 +514,6 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 step_id="oauth_login",
                 data_schema=vol.Schema(
                     {
-                        vol.Required("smart_life_username", default=""): str,
-                        vol.Required("smart_life_password", default=""): str,
-                        vol.Required("country_code", default="1"): str,
                         vol.Required("tuya_region", default="eu"): vol.In(
                             {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
                         ),
@@ -541,51 +537,79 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "region": oauth.region,
                 }
                 return await self.async_step_oauth_pick_device()
-            # Token expired / refresh failed — re-authenticate.
             _LOGGER.info("Stored OAuth token is no longer valid; re-authenticating")
 
         if user_input is not None:
-            sl_username = user_input.get("smart_life_username", "").strip()
-            sl_password = user_input.get("smart_life_password", "").strip()
-            country_code = user_input.get("country_code", "1").strip()
             region = user_input.get("tuya_region", "eu")
-
-            if not sl_username or not sl_password:
-                errors["base"] = "cloud_credentials_required"
-            else:
-                try:
-                    await oauth.async_smart_life_login(
-                        access_id=app_access_id,
-                        access_secret=app_access_secret,
-                        region=region,
-                        username=sl_username,
-                        password=sl_password,
-                        country_code=country_code,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    _LOGGER.exception("Smart Life login failed")
-                    errors["base"] = self._cloud_error_key(exc)
-
-                if not errors:
-                    self._cloud_auth = {
-                        "access_id": app_access_id,
-                        "access_secret": app_access_secret,
-                        "region": region,
-                    }
-                    return await self.async_step_oauth_pick_device()
+            try:
+                qr_data = await oauth.async_start_qr_login(
+                    app_access_id, app_access_secret, region,
+                )
+                # Store transient state for the QR scan step.
+                self._qr_code_url = qr_data["url"]
+                self._qr_code_token = qr_data["token"]
+                self._app_access_id = app_access_id
+                self._app_access_secret = app_access_secret
+                self._selected_region = region
+                return await self.async_step_oauth_qr_scan()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.exception("Smart Life QR code generation failed")
+                errors["base"] = self._cloud_error_key(exc)
 
         return self.async_show_form(
             step_id="oauth_login",
             data_schema=vol.Schema(
                 {
-                    vol.Required("smart_life_username", default=""): str,
-                    vol.Required("smart_life_password", default=""): str,
-                    vol.Required("country_code", default="1"): str,
                     vol.Required("tuya_region", default="eu"): vol.In(
                         {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
                     ),
                 }
             ),
+            errors=errors,
+        )
+
+    async def async_step_oauth_qr_scan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Show QR code and wait for the user to scan with Smart Life app.
+
+        The QR code is displayed as an inline image in the step
+        description.  After scanning, the user clicks Submit.
+        """
+        import urllib.parse  # noqa: PLC0415
+
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # User clicked Submit — check if the QR was scanned.
+            oauth = TuyaOAuthManager(self.hass)
+            await oauth.async_load()
+
+            uid = await oauth.async_poll_qr_login(self._qr_code_token)
+            if uid:
+                self._cloud_auth = {
+                    "access_id": self._app_access_id,
+                    "access_secret": self._app_access_secret,
+                    "region": self._selected_region,
+                }
+                return await self.async_step_oauth_pick_device()
+
+            # Not yet scanned — show error and let user retry.
+            errors["base"] = "qr_not_scanned"
+
+        # Build QR code image URL using a public QR generator.
+        qr_image_url = (
+            "https://api.qrserver.com/v1/create-qr-code/"
+            f"?data={urllib.parse.quote(self._qr_code_url)}"
+            "&size=250x250&format=png"
+        )
+
+        return self.async_show_form(
+            step_id="oauth_qr_scan",
+            data_schema=vol.Schema({}),
+            description_placeholders={"qr_code": qr_image_url},
             errors=errors,
         )
 

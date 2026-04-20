@@ -761,63 +761,49 @@ class TuyaCloudSchemaHelper:
             _LOGGER.debug("Tuya cloud POST %s error: %s", path, exc)
             return None
 
-    async def smart_life_login(
+    async def get_login_qr_code(
         self,
-        username: str,
-        password: str,
-        country_code: str,
         schema: str = "smartlife",
-        strict: bool = True,
     ) -> dict[str, Any]:
-        """Authenticate a Smart Life user via authorized-login.
+        """Request a QR code for Smart Life app authorization.
 
-        Uses ``POST /v1.0/iot-01/associated-users/actions/authorized-login``
-        with the user's Smart Life email/phone and MD5-hashed password.
+        Calls ``POST /v1.0/iot-01/associated-users/actions/qr-code``
+        to generate a QR code that the user scans with the Smart Life app.
 
-        Returns the result dict containing ``uid``, ``access_token``,
-        ``refresh_token``, and ``expire_time`` on success.
+        Returns a dict with:
+        * ``url`` — the content to encode as a QR code image.
+        * ``token`` — the ticket for polling scan status.
+
+        Raises :class:`TuyaCloudAPIError` on failure.
         """
-        # Ensure we have a management token first.
-        await self._ensure_token(strict=strict)
-
-        password_hash = hashlib.md5(  # noqa: S324
-            password.encode("utf-8")
-        ).hexdigest()
-
+        await self._ensure_token(strict=True)
         result = await self._api_post(
-            "/v1.0/iot-01/associated-users/actions/authorized-login",
-            {
-                "country_code": country_code,
-                "username": username,
-                "password": password_hash,
-                "schema": schema,
-            },
-            strict=strict,
+            "/v1.0/iot-01/associated-users/actions/qr-code",
+            {"schema": schema},
+            strict=True,
         )
-
-        if result and isinstance(result, dict):
-            # Store user-scoped token for subsequent calls.
-            user_token = result.get("access_token")
-            user_refresh = result.get("refresh_token")
-            expire = result.get("expire_time", 7200)
-            uid = result.get("uid")
-
-            if user_token:
-                self._token = user_token
-            if user_refresh:
-                self._refresh_token = user_refresh
-            if expire:
-                self._token_expiry = time.time() + int(expire) - 60
-            if uid:
-                self._uid = str(uid)
-
-            return result
-
-        if strict:
-            raise TuyaCloudAuthError(
-                "Smart Life login failed: no result returned"
+        if not result or not isinstance(result, dict):
+            raise TuyaCloudAPIError("Failed to generate Smart Life QR code")
+        if "url" not in result or "token" not in result:
+            raise TuyaCloudAPIError(
+                f"QR code response missing url/token: {result}"
             )
-        return {}
+        return result
+
+    async def poll_login_qr_code(
+        self,
+        token: str,
+    ) -> dict[str, Any] | None:
+        """Poll the QR code scan status.
+
+        Returns the result dict when the user has scanned and authorised
+        (contains ``uid``), or ``None`` if still pending.
+        """
+        result = await self._api_get(
+            f"/v1.0/iot-01/associated-users/actions/qr-code/{token}",
+            strict=False,
+        )
+        return result
 
     @staticmethod
     def _raise_cloud_error_from_response(

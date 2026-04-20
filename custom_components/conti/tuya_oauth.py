@@ -55,7 +55,6 @@ class TuyaOAuthManager:
         self._refresh_token: str = ""
         self._token_expiry: float = 0.0
         self._uid: str = ""
-        self._username: str = ""
         self._loaded: bool = False
         self._helper: Any = None  # Lazy TuyaCloudSchemaHelper
 
@@ -82,9 +81,6 @@ class TuyaOAuthManager:
     def access_secret(self) -> str:
         return self._access_secret
 
-    @property
-    def username(self) -> str:
-        return self._username
 
     # ── Persistent storage ────────────────────────────────────────────
 
@@ -101,9 +97,7 @@ class TuyaOAuthManager:
             self._refresh_token = str(data.get("refresh_token", ""))
             self._token_expiry = float(data.get("token_expiry", 0.0))
             self._uid = str(data.get("uid", ""))
-            self._username = str(data.get("username", ""))
         self._loaded = True
-
     async def async_save(self) -> None:
         """Persist current credentials and tokens."""
         await self._store.async_save(
@@ -115,7 +109,6 @@ class TuyaOAuthManager:
                 "refresh_token": self._refresh_token,
                 "token_expiry": self._token_expiry,
                 "uid": self._uid,
-                "username": self._username,
             }
         )
 
@@ -155,58 +148,55 @@ class TuyaOAuthManager:
         await self.async_save()
         return True
 
-    async def async_smart_life_login(
+    async def async_start_qr_login(
         self,
         access_id: str,
         access_secret: str,
         region: str,
-        username: str,
-        password: str,
-        country_code: str,
-    ) -> bool:
-        """Authenticate a Smart Life user and persist credentials.
+    ) -> dict[str, Any]:
+        """Generate a QR code for Smart Life app authorization.
 
-        1. Sets up the helper with project-level ``access_id``/``access_secret``.
-        2. Calls Tuya's authorized-login with the user's Smart Life
-           username + password (MD5-hashed).
-        3. Stores the resulting user-scoped token and UID.
+        Sets up app credentials on the manager, obtains a management
+        token, then requests a QR code from Tuya.
 
-        Returns True on success.  Raises on auth errors (strict mode).
+        Returns a dict with ``url`` (QR content) and ``token`` (poll ticket).
         """
         self._access_id = access_id
         self._access_secret = access_secret
         self._region = region
-        self._username = username
         self._helper = None  # Force re-creation
 
         helper = self._get_helper()
+        qr_data = await helper.get_login_qr_code(schema="smartlife")
 
-        # The helper's smart_life_login will:
-        #  1. Obtain a management token (grant_type=1)
-        #  2. POST authorized-login with username + MD5(password)
-        #  3. Store user-scoped token & UID on the helper
-        result = await helper.smart_life_login(
-            username=username,
-            password=password,
-            country_code=country_code,
-            schema="smartlife",
-            strict=True,
-        )
-
-        # Capture tokens from the helper.
-        self._access_token = helper.access_token or ""
-        self._refresh_token = helper.refresh_token or ""
-        self._token_expiry = helper.token_expiry
-        if helper.uid:
-            self._uid = str(helper.uid)
-
+        # Sync management token so subsequent polls are authenticated.
+        self._sync_from_helper(helper)
         await self.async_save()
-        _LOGGER.info(
-            "Smart Life login successful for user=%s uid=%s",
-            username,
-            self._uid,
-        )
-        return True
+        return qr_data
+
+    async def async_poll_qr_login(self, token: str) -> str | None:
+        """Poll QR code scan status.
+
+        Returns the user UID if the QR code has been scanned and
+        authorized, or ``None`` if still pending.
+        """
+        helper = self._get_helper()
+        result = await helper.poll_login_qr_code(token)
+
+        if not result or not isinstance(result, dict):
+            return None
+
+        # Tuya returns {"status": true, "uid": "..."} when scanned.
+        # Some API versions return {"uid": "..."} directly.
+        uid = result.get("uid")
+        if uid:
+            self._uid = str(uid)
+            self._sync_from_helper(helper)
+            await self.async_save()
+            _LOGGER.info("Smart Life QR login successful, uid=%s", self._uid)
+            return self._uid
+
+        return None
 
     # ── Token lifecycle ───────────────────────────────────────────────
 
