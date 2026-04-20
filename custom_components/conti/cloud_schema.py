@@ -688,6 +688,137 @@ class TuyaCloudSchemaHelper:
             _LOGGER.debug("Tuya cloud API %s error: %s", path, exc)
             return None
 
+    async def _api_post(
+        self,
+        path: str,
+        body: dict[str, Any],
+        strict: bool = False,
+    ) -> dict[str, Any] | None:
+        """Make an authenticated POST request to the Tuya Cloud API."""
+        import json as _json  # noqa: PLC0415
+
+        if not self._token:
+            if strict:
+                raise TuyaCloudAuthError("Missing Tuya access token")
+            return None
+
+        body_str = _json.dumps(body)
+        url = f"{self._base_url}{path}"
+        headers = self._sign_request("POST", path, body_str, self._token)
+        headers["Content-Type"] = "application/json"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    data=body_str,
+                    timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
+                    ssl=True,
+                ) as resp:
+                    try:
+                        data = await resp.json()
+                    except Exception as exc:  # noqa: BLE001
+                        if strict:
+                            raise TuyaCloudParseError(
+                                f"Non-JSON response for POST {path}"
+                            ) from exc
+                        _LOGGER.error(
+                            "Tuya cloud POST parse error: path=%s status=%s",
+                            path, resp.status,
+                        )
+                        return None
+
+            if not isinstance(data, dict):
+                if strict:
+                    raise TuyaCloudParseError(
+                        f"Unexpected response type for POST {path}"
+                    )
+                return None
+
+            if data.get("success"):
+                return data.get("result", {})
+
+            code = str(data.get("code", "")).strip()
+            msg = str(data.get("msg", "unknown"))
+            _LOGGER.error(
+                "Tuya cloud POST failed: path=%s code=%s msg=%s",
+                path, code, msg,
+            )
+            if strict:
+                self._raise_cloud_error_from_response(
+                    status=resp.status, path=path, code=code, msg=msg,
+                )
+            return None
+
+        except Exception as exc:
+            if strict and isinstance(exc, TuyaCloudOnboardingError):
+                raise
+            if strict:
+                raise TuyaCloudAPIError(
+                    f"Cloud POST failed for {path}: {exc}"
+                ) from exc
+            _LOGGER.debug("Tuya cloud POST %s error: %s", path, exc)
+            return None
+
+    async def smart_life_login(
+        self,
+        username: str,
+        password: str,
+        country_code: str,
+        schema: str = "smartlife",
+        strict: bool = True,
+    ) -> dict[str, Any]:
+        """Authenticate a Smart Life user via authorized-login.
+
+        Uses ``POST /v1.0/iot-01/associated-users/actions/authorized-login``
+        with the user's Smart Life email/phone and MD5-hashed password.
+
+        Returns the result dict containing ``uid``, ``access_token``,
+        ``refresh_token``, and ``expire_time`` on success.
+        """
+        # Ensure we have a management token first.
+        await self._ensure_token(strict=strict)
+
+        password_hash = hashlib.md5(  # noqa: S324
+            password.encode("utf-8")
+        ).hexdigest()
+
+        result = await self._api_post(
+            "/v1.0/iot-01/associated-users/actions/authorized-login",
+            {
+                "country_code": country_code,
+                "username": username,
+                "password": password_hash,
+                "schema": schema,
+            },
+            strict=strict,
+        )
+
+        if result and isinstance(result, dict):
+            # Store user-scoped token for subsequent calls.
+            user_token = result.get("access_token")
+            user_refresh = result.get("refresh_token")
+            expire = result.get("expire_time", 7200)
+            uid = result.get("uid")
+
+            if user_token:
+                self._token = user_token
+            if user_refresh:
+                self._refresh_token = user_refresh
+            if expire:
+                self._token_expiry = time.time() + int(expire) - 60
+            if uid:
+                self._uid = str(uid)
+
+            return result
+
+        if strict:
+            raise TuyaCloudAuthError(
+                "Smart Life login failed: no result returned"
+            )
+        return {}
+
     @staticmethod
     def _raise_cloud_error_from_response(
         *,

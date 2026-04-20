@@ -18,9 +18,18 @@
       },
       "oauth_login": {
         "title": "Login with Smart Life",
-        "description": "Select your data-centre region and Conti will connect to your Smart Life account automatically. No Tuya developer credentials are needed.\n\nAfter connecting, Conti will auto-discover all devices linked to your account.",
+        "description": "Sign in with your Smart Life app credentials. Use the same email/phone and password you use in the Smart Life or Tuya Smart app.\n\nNo Tuya developer account or API keys needed.",
         "data": {
+          "smart_life_username": "Smart Life Email or Phone",
+          "smart_life_password": "Smart Life Password",
+          "country_code": "Country Code (e.g. 1, 44, 86, 91)",
           "tuya_region": "Data Centre Region"
+        },
+        "data_description": {
+          "smart_life_username": "The email address or phone number you registered with in the Smart Life app.",
+          "smart_life_password": "Your Smart Life app password.",
+          "country_code": "Your phone country code without the + sign (e.g. 1 for US, 44 for UK, 86 for China, 91 for India).",
+          "tuya_region": "Select the Tuya data centre closest to your region."
         }
       },
       "oauth_pick_device": {
@@ -129,6 +138,7 @@
       "cloud_device_missing_local_key": "The selected cloud device was found, but Tuya did not return a local key. This can happen with some account/project configurations. Use Manual onboarding as fallback.",
       "oauth_token_expired": "Smart Life session has expired. Please re-authenticate by removing and re-adding the integration.",
       "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
+      "smart_life_login_failed": "Smart Life login failed. Check your email/phone, password, country code, and data centre region.",
       "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",

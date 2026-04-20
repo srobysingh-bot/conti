@@ -4,9 +4,9 @@ Three onboarding paths are provided:
 
 Smart Life OAuth path (default — recommended)
     Step 1  (``user``)               — choose onboarding mode.
-    Step 2a (``oauth_login``)        — pick data-centre region (built-in
-                                       app credentials are used; no manual
-                                       access_id / secret needed).
+    Step 2a (``oauth_login``)        — enter Smart Life email/phone +
+                                       password (no Tuya developer
+                                       credentials needed).
     Step 2b (``oauth_pick_device``)  — select device from auto-discovered
                                        cloud list.
     Step 3  (``confirm_host``)       — confirm / enter local IP (if needed).
@@ -485,11 +485,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_oauth_login(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Smart Life login — uses built-in app credentials.
+        """Smart Life login — user enters Smart Life email + password.
 
-        No manual access_id / secret is required.  The user only picks
-        their data-centre region.  If a valid token is already stored,
-        this step is skipped entirely.
+        No Tuya developer access_id / secret is needed.  Built-in
+        app-level project credentials are used for API signing.  The
+        user authenticates with their Smart Life app credentials.
         """
         from .const import TUYA_APP_ACCESS_ID, TUYA_APP_ACCESS_SECRET  # noqa: PLC0415
         from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
@@ -500,7 +500,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if oauth.is_configured and user_input is None:
-            # Credentials already stored — validate token is still usable.
+            # Already authenticated — validate token is still usable.
             token_ok = await oauth.async_ensure_token()
             if token_ok:
                 self._cloud_auth = {
@@ -513,28 +513,42 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.info("Stored OAuth token is no longer valid; re-authenticating")
 
         if user_input is not None:
+            sl_username = user_input.get("smart_life_username", "").strip()
+            sl_password = user_input.get("smart_life_password", "").strip()
+            country_code = user_input.get("country_code", "1").strip()
             region = user_input.get("tuya_region", "eu")
 
-            try:
-                await oauth.async_setup(
-                    TUYA_APP_ACCESS_ID, TUYA_APP_ACCESS_SECRET, region
-                )
-            except Exception as exc:  # noqa: BLE001
-                _LOGGER.exception("Smart Life OAuth setup failed")
-                errors["base"] = self._cloud_error_key(exc)
+            if not sl_username or not sl_password:
+                errors["base"] = "cloud_credentials_required"
+            else:
+                try:
+                    await oauth.async_smart_life_login(
+                        access_id=TUYA_APP_ACCESS_ID,
+                        access_secret=TUYA_APP_ACCESS_SECRET,
+                        region=region,
+                        username=sl_username,
+                        password=sl_password,
+                        country_code=country_code,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.exception("Smart Life login failed")
+                    errors["base"] = self._cloud_error_key(exc)
 
-            if not errors:
-                self._cloud_auth = {
-                    "access_id": TUYA_APP_ACCESS_ID,
-                    "access_secret": TUYA_APP_ACCESS_SECRET,
-                    "region": region,
-                }
-                return await self.async_step_oauth_pick_device()
+                if not errors:
+                    self._cloud_auth = {
+                        "access_id": TUYA_APP_ACCESS_ID,
+                        "access_secret": TUYA_APP_ACCESS_SECRET,
+                        "region": region,
+                    }
+                    return await self.async_step_oauth_pick_device()
 
         return self.async_show_form(
             step_id="oauth_login",
             data_schema=vol.Schema(
                 {
+                    vol.Required("smart_life_username", default=""): str,
+                    vol.Required("smart_life_password", default=""): str,
+                    vol.Required("country_code", default="1"): str,
                     vol.Required("tuya_region", default="eu"): vol.In(
                         {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
                     ),
