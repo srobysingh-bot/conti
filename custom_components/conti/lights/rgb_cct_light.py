@@ -15,7 +15,7 @@ from homeassistant.components.light import (
     ColorMode,
 )
 
-from .base_light import BaseContiLight
+from .base_light import BaseContiLight, _rgb_to_tuya_hsv
 
 
 class ContiRgbCctLight(BaseContiLight):
@@ -56,7 +56,7 @@ class ContiRgbCctLight(BaseContiLight):
         # Determine which mode we need based on the requested attributes.
         if ATTR_RGB_COLOR in kwargs and self._dp_rgb:
             r, g, b = kwargs[ATTR_RGB_COLOR]
-            hex_val = f"{r:02x}{g:02x}{b:02x}"
+            hex_val = _rgb_to_tuya_hsv(r, g, b)
             dps[int(self._dp_rgb)] = hex_val
             optimistic[self._dp_rgb] = hex_val
             if self._dp_mode:

@@ -21,6 +21,8 @@ import logging
 import time
 from typing import Any
 
+import colorsys
+
 from homeassistant.components.light import (
     ColorMode,
     LightEntity,
@@ -60,6 +62,53 @@ _LOGGER = logging.getLogger(__name__)
 
 # Well-known DP role key for Tuya light mode (not in const.py).
 DP_KEY_MODE = "mode"
+
+# ---------------------------------------------------------------------------
+# Tuya HSV colour helpers
+# ---------------------------------------------------------------------------
+# Tuya DP 24 encodes colour as a 12-char hex string: ``HHHHSSSSFFFF``
+# where H = hue (0-360), S = saturation (0-1000), V = value (0-1000).
+# Some older firmware variants use a 6-char ``rrggbb`` format instead.
+# The helpers below handle both directions transparently.
+# ---------------------------------------------------------------------------
+
+
+def _parse_tuya_color(raw: Any) -> tuple[int, int, int] | None:
+    """Parse a Tuya colour DP value into an ``(R, G, B)`` tuple.
+
+    Accepts:
+    * 12-char HSV hex (``HHHHSSSSFFFF``) — standard Tuya format.
+    * 14-char HSV + brightness suffix — some v2 devices append extra data.
+    * 6-char plain RGB hex (``rrggbb``) — legacy/rare format.
+    """
+    if not isinstance(raw, str):
+        return None
+    try:
+        if len(raw) >= 12:
+            h = int(raw[0:4], 16)   # 0-360
+            s = int(raw[4:8], 16)   # 0-1000
+            v = int(raw[8:12], 16)  # 0-1000
+            r, g, b = colorsys.hsv_to_rgb(h / 360, s / 1000, v / 1000)
+            return (int(r * 255), int(g * 255), int(b * 255))
+        if len(raw) >= 6:
+            return (
+                int(raw[0:2], 16),
+                int(raw[2:4], 16),
+                int(raw[4:6], 16),
+            )
+    except (ValueError, ZeroDivisionError):
+        pass
+    return None
+
+
+def _rgb_to_tuya_hsv(r: int, g: int, b: int) -> str:
+    """Convert ``(R, G, B)`` (0-255 each) to a 12-char Tuya HSV hex string."""
+    h_f, s_f, v_f = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    h = int(h_f * 360)  # 0-360
+    s = int(s_f * 1000)  # 0-1000
+    v = int(v_f * 1000)  # 0-1000
+    return f"{h:04x}{s:04x}{v:04x}"
+
 
 # ---------------------------------------------------------------------------
 # Stale-protect: ignore contradictory poll data for this many seconds after
@@ -298,22 +347,14 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
                     self._state_color_temp_kelvin = new_ct
                     changed = True
 
-        # --- RGB ---
+        # --- RGB (Tuya HSV format: HHHHSSSSFFFF) ---
         if self._dp_rgb is not None and self._dp_rgb in device_data:
             raw_rgb = device_data[self._dp_rgb]
             if not self._is_stale(self._dp_rgb, raw_rgb):
-                if isinstance(raw_rgb, str) and len(raw_rgb) >= 6:
-                    try:
-                        new_rgb = (
-                            int(raw_rgb[0:2], 16),
-                            int(raw_rgb[2:4], 16),
-                            int(raw_rgb[4:6], 16),
-                        )
-                        if self._state_rgb != new_rgb:
-                            self._state_rgb = new_rgb
-                            changed = True
-                    except ValueError:
-                        pass
+                new_rgb = _parse_tuya_color(raw_rgb)
+                if new_rgb is not None and self._state_rgb != new_rgb:
+                    self._state_rgb = new_rgb
+                    changed = True
 
         # --- Mode → color_mode (RGB-capable lights) ---
         if self._dp_mode is not None and self._dp_mode in device_data:
@@ -353,19 +394,10 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
                 self._state_color_temp_kelvin = int(
                     2000 + frac * (6535 - 2000)
                 )
-            elif (
-                dp_id == self._dp_rgb
-                and isinstance(value, str)
-                and len(value) >= 6
-            ):
-                try:
-                    self._state_rgb = (
-                        int(value[0:2], 16),
-                        int(value[2:4], 16),
-                        int(value[4:6], 16),
-                    )
-                except ValueError:
-                    pass
+            elif dp_id == self._dp_rgb and isinstance(value, str):
+                parsed = _parse_tuya_color(value)
+                if parsed is not None:
+                    self._state_rgb = parsed
         self.async_write_ha_state()
 
     # -- External-ON correction ----------------------------------------------
