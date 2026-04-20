@@ -48,6 +48,7 @@ from .const import (
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     PLATFORMS,
+    RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
     STORAGE_VERSION,
 )
@@ -57,6 +58,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _MANAGER_KEY = "manager"
 _REF_COUNT_KEY = "manager_ref_count"
+_OAUTH_KEY = "oauth_manager"
 
 
 def _parse_dp_map(entry: ConfigEntry) -> dict[str, Any]:
@@ -138,9 +140,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     device_config: dict[str, Any] = {
         "device_id": device_id,
-        "host": entry.data[CONF_HOST],
+        "host": entry.data.get(CONF_HOST, ""),
         "port": entry.data.get(CONF_PORT, DEFAULT_PORT),
-        "local_key": entry.data[CONF_LOCAL_KEY],
+        "local_key": entry.data.get(CONF_LOCAL_KEY, ""),
         "protocol_version": version,
         "dp_map": dp_map,
     }
@@ -151,20 +153,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         and entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_CLOUD_SENSOR
     )
 
+    cloud_only_device = bool(
+        entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_CLOUD
+        and not low_power_sensor
+    )
+
+    local_key_str = str(entry.data.get(CONF_LOCAL_KEY, "")).strip()
+
     _LOGGER.info(
         "Setting up Conti device %s at %s:%d (v%s, key=%s, dp_map keys=%s, "
-        "profile=%s, mapping_source=%s)",
+        "profile=%s, mapping_source=%s, runtime=%s)",
         device_id,
         device_config["host"],
         device_config["port"],
         version,
-        mask_key(entry.data[CONF_LOCAL_KEY]),
+        mask_key(local_key_str) if local_key_str else "none",
         list(dp_map.keys()) if dp_map else "none",
         entry.data.get(CONF_DEVICE_PROFILE, "none"),
         entry.data.get(CONF_MAPPING_SOURCE, "legacy"),
+        entry.data.get(CONF_RUNTIME_CHANNEL, "local"),
     )
 
     low_power_runtime = None
+    cloud_fallback_runtime = None
+
     if low_power_sensor:
         access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
         access_secret = str(entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
@@ -192,7 +204,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             low_power_sensor = False
 
-    if not low_power_sensor:
+    elif cloud_only_device:
+        # Cloud-only device (no local_key) — use global OAuth manager.
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        if _OAUTH_KEY not in hass.data[DOMAIN]:
+            oauth = TuyaOAuthManager(hass)
+            await oauth.async_load()
+            hass.data[DOMAIN][_OAUTH_KEY] = oauth
+
+        oauth_mgr = hass.data[DOMAIN][_OAUTH_KEY]
+
+        if oauth_mgr.is_configured:
+            from .cloud_device_runtime import CloudDeviceRuntime  # noqa: PLC0415
+
+            cloud_fallback_runtime = CloudDeviceRuntime(
+                device_id=device_id,
+                oauth_manager=oauth_mgr,
+                dp_map=dp_map,
+            )
+            _LOGGER.info(
+                "Setting up cloud-only runtime for device %s via OAuth",
+                device_id,
+            )
+        else:
+            # Try per-entry credentials as fallback.
+            access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
+            access_secret = str(entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
+            region = str(entry.data.get(CONF_CLOUD_REGION, "eu")).strip() or "eu"
+            if access_id and access_secret:
+                from .low_power_runtime import LowPowerSensorCloudRuntime  # noqa: PLC0415
+
+                cloud_fallback_runtime = LowPowerSensorCloudRuntime(
+                    device_id=device_id,
+                    access_id=access_id,
+                    access_secret=access_secret,
+                    region=region,
+                    dp_map=dp_map,
+                )
+                _LOGGER.info(
+                    "Setting up cloud-only runtime for device %s via per-entry credentials",
+                    device_id,
+                )
+            else:
+                _LOGGER.warning(
+                    "Cloud-only device %s has no OAuth or per-entry credentials; "
+                    "device will not be functional until credentials are configured",
+                    device_id,
+                )
+
+    if not low_power_sensor and not cloud_only_device:
         await manager.add_device(device_config)
 
     # ---- Persist auto-detected version back to entry data -----------------
@@ -224,6 +285,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         manager,
         device_id,
         low_power_cloud=low_power_runtime,
+        cloud_fallback=cloud_fallback_runtime,
     )
 
     hass.data[DOMAIN][entry.entry_id] = {
@@ -235,7 +297,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     # ---- Save discovered DPS to persistent cache --------------------------
-    current_dps = manager.get_cached_dps(device_id) if not low_power_sensor else {}
+    current_dps = (
+        manager.get_cached_dps(device_id)
+        if not low_power_sensor and not cloud_only_device
+        else {}
+    )
     if current_dps:
         await _save_dps_cache(hass, device_id, current_dps)
 
@@ -254,7 +320,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_id = entry_data.get("device_id") or entry.data.get(CONF_DEVICE_ID)
 
         manager = hass.data[DOMAIN].get(_MANAGER_KEY)
-        if manager and device_id:
+        runtime_channel = entry.data.get(CONF_RUNTIME_CHANNEL, "local")
+        is_local_device = runtime_channel not in (
+            RUNTIME_CHANNEL_CLOUD, RUNTIME_CHANNEL_CLOUD_SENSOR
+        )
+
+        if manager and device_id and is_local_device:
             # Persist final DPS snapshot before cleanup
             final_dps = manager.get_cached_dps(device_id)
             if final_dps:

@@ -99,7 +99,9 @@ class TuyaCloudSchemaHelper:
         self._access_secret = access_secret
         self._base_url = _BASE_URLS.get(region.lower(), _BASE_URLS["eu"])
         self._token: str | None = None
+        self._refresh_token: str | None = None
         self._token_expiry: float = 0.0
+        self._uid: str | None = None
 
     # ── Token management ──────────────────────────────────────────────
 
@@ -107,6 +109,12 @@ class TuyaCloudSchemaHelper:
         """Obtain or refresh an access token from Tuya Cloud."""
         if self._token and time.time() < self._token_expiry:
             return True
+
+        # Try refresh token first if available
+        if self._refresh_token:
+            refreshed = await self._try_refresh_token(strict=False)
+            if refreshed:
+                return True
 
         url = f"{self._base_url}/v1.0/token?grant_type=1"
         headers = self._sign_request("GET", "/v1.0/token?grant_type=1", "")
@@ -136,6 +144,7 @@ class TuyaCloudSchemaHelper:
             if data.get("success"):
                 result = data["result"]
                 self._token = result["access_token"]
+                self._refresh_token = result.get("refresh_token") or self._refresh_token
                 # Expire 60s early to avoid edge cases
                 self._token_expiry = time.time() + result.get("expire_time", 7200) - 60
                 _LOGGER.debug("Tuya cloud token obtained (expires in %ds)", result.get("expire_time", 0))
@@ -168,6 +177,121 @@ class TuyaCloudSchemaHelper:
                 raise TuyaCloudAPIError(f"Token request failed: {exc}") from exc
             _LOGGER.warning("Tuya cloud token request error: %s", exc)
             return False
+
+    async def _try_refresh_token(self, strict: bool = False) -> bool:
+        """Attempt to refresh the access token using the stored refresh_token."""
+        if not self._refresh_token:
+            return False
+
+        path = f"/v1.0/token/{self._refresh_token}"
+        url = f"{self._base_url}{path}"
+        headers = self._sign_request("GET", path, "")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=_API_TIMEOUT),
+                    ssl=True,
+                ) as resp:
+                    try:
+                        data = await resp.json()
+                    except Exception:  # noqa: BLE001
+                        return False
+
+            if isinstance(data, dict) and data.get("success"):
+                result = data["result"]
+                self._token = result["access_token"]
+                self._refresh_token = result.get("refresh_token") or self._refresh_token
+                self._token_expiry = time.time() + result.get("expire_time", 7200) - 60
+                _LOGGER.debug("Tuya cloud token refreshed (expires in %ds)", result.get("expire_time", 0))
+                return True
+
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Tuya token refresh failed: %s", exc)
+
+        return False
+
+    async def discover_uid(self) -> str | None:
+        """Discover the primary user UID from associated users.
+
+        Returns the first UID found, or None.
+        """
+        if not await self._ensure_token(strict=False):
+            return None
+
+        payload = await self._api_get("/v1.0/iot-01/associated-users", strict=False)
+        if isinstance(payload, dict):
+            users = payload.get("list") or payload.get("users") or []
+            if isinstance(users, list):
+                for user in users:
+                    if isinstance(user, dict):
+                        uid = user.get("uid") or user.get("user_id")
+                        if uid:
+                            self._uid = str(uid)
+                            return self._uid
+
+        # Fallback: extract uid from device list
+        devices = await self.list_devices(max_items=1, strict=False)
+        for dev in devices:
+            uid = dev.get("uid")
+            if uid:
+                self._uid = str(uid)
+                return self._uid
+
+        return None
+
+    async def list_user_devices(self, uid: str) -> list[dict[str, Any]]:
+        """List devices for a specific user via /v1.0/users/{uid}/devices."""
+        if not await self._ensure_token(strict=False):
+            return []
+
+        payload = await self._api_get(f"/v1.0/users/{uid}/devices", strict=False)
+        if payload is None:
+            return []
+
+        if isinstance(payload, dict):
+            normalized = payload
+        elif isinstance(payload, list):
+            normalized = {"list": payload}
+        else:
+            normalized = {}
+        return self._extract_device_list(normalized)
+
+    @property
+    def access_token(self) -> str | None:
+        """Return the current access token."""
+        return self._token
+
+    @property
+    def refresh_token(self) -> str | None:
+        """Return the current refresh token."""
+        return self._refresh_token
+
+    @property
+    def token_expiry(self) -> float:
+        """Return the token expiry timestamp."""
+        return self._token_expiry
+
+    @property
+    def uid(self) -> str | None:
+        """Return the discovered user UID."""
+        return self._uid
+
+    def restore_tokens(
+        self,
+        access_token: str,
+        refresh_token: str,
+        token_expiry: float,
+        uid: str | None = None,
+    ) -> None:
+        """Restore previously saved tokens (from persistent storage)."""
+        self._token = access_token
+        self._refresh_token = refresh_token
+        self._token_expiry = token_expiry
+        if uid:
+            self._uid = uid
 
     def _sign_request(
         self,

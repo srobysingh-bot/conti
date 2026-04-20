@@ -1,8 +1,20 @@
 """Config flow for the Conti integration.
 
-Two onboarding paths are provided:
+Three onboarding paths are provided:
 
-Cloud-assisted path (recommended)
+Smart Life OAuth path (default — recommended)
+    Step 1  (``user``)               — choose onboarding mode.
+    Step 2a (``oauth_login``)        — one-time Tuya cloud credentials
+                                       (stored globally, reused later).
+    Step 2b (``oauth_pick_device``)  — select device from auto-discovered
+                                       cloud list.
+    Step 3  (``confirm_host``)       — confirm / enter local IP (if needed).
+    Step 4  (``detect``)             — auto-detect protocol + DP discovery.
+    Step 5  (``cloud_assist``)       — (optional) refine DP mapping via cloud.
+    Step 6  (``review``)             — review mapping, accept/edit/learn.
+    Step 7  (``learn``)              — (optional) guided interactive learning.
+
+Cloud-assisted path (legacy)
     Step 1  (``user``)               — device name, IP, type, choose mode.
     Step 2a (``cloud_credentials``)  — Tuya API credentials; Conti fetches
                                        all linked devices and auto-fills
@@ -86,6 +98,7 @@ from .const import (
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
+    RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
     RUNTIME_CHANNEL_LOCAL,
     SUPPORTED_DEVICE_TYPES,
@@ -216,10 +229,11 @@ def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ): vol.In(SUPPORTED_DEVICE_TYPES),
             vol.Required(
                 "onboarding_mode",
-                default=d.get("onboarding_mode", "cloud_assisted"),
+                default=d.get("onboarding_mode", "smart_life"),
             ): vol.In(
                 {
-                    "cloud_assisted": "Cloud-assisted (recommended)",
+                    "smart_life": "Login with Smart Life (recommended)",
+                    "cloud_assisted": "Cloud-assisted (legacy)",
                     "manual": "Manual / Advanced",
                 }
             ),
@@ -445,8 +459,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
                 CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
             }
-            mode = user_input.get("onboarding_mode", "manual")
+            mode = user_input.get("onboarding_mode", "smart_life")
             self._onboarding_mode = mode
+            if mode == "smart_life":
+                return await self.async_step_oauth_login()
             if mode == "cloud_assisted":
                 return await self.async_step_cloud_credentials()
             # Manual mode: host is required to be able to connect
@@ -458,6 +474,203 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=_user_schema(),
+            errors=errors,
+        )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Smart Life OAuth path — global credential storage + device picker
+    # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_oauth_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Smart Life login — one-time credential entry, then reuse.
+
+        If credentials are already stored globally, skip straight to
+        the device picker. Otherwise, show the login form once.
+        """
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        oauth = TuyaOAuthManager(self.hass)
+        await oauth.async_load()
+
+        errors: dict[str, str] = {}
+
+        if oauth.is_configured and user_input is None:
+            # Credentials already stored — validate token is still usable.
+            token_ok = await oauth.async_ensure_token()
+            if token_ok:
+                self._cloud_auth = {
+                    "access_id": oauth.access_id,
+                    "access_secret": oauth.access_secret,
+                    "region": oauth.region,
+                }
+                return await self.async_step_oauth_pick_device()
+            # Token expired / refresh failed — re-authenticate.
+            _LOGGER.info("Stored OAuth token is no longer valid; re-authenticating")
+
+        if user_input is not None:
+            access_id = user_input.get("tuya_access_id", "").strip()
+            access_secret = user_input.get("tuya_access_secret", "").strip()
+            region = user_input.get("tuya_region", "eu")
+
+            if not access_id or not access_secret:
+                errors["base"] = "cloud_credentials_required"
+            else:
+                try:
+                    await oauth.async_setup(access_id, access_secret, region)
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.exception("Smart Life OAuth setup failed")
+                    errors["base"] = self._cloud_error_key(exc)
+
+                if not errors:
+                    self._cloud_auth = {
+                        "access_id": access_id,
+                        "access_secret": access_secret,
+                        "region": region,
+                    }
+                    return await self.async_step_oauth_pick_device()
+
+        return self.async_show_form(
+            step_id="oauth_login",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("tuya_access_id", default=""): str,
+                    vol.Required("tuya_access_secret", default=""): str,
+                    vol.Required("tuya_region", default="eu"): vol.In(
+                        {"us": "Americas", "eu": "Europe", "cn": "China", "in": "India"}
+                    ),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_oauth_pick_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Smart Life device picker — auto-discovered from cloud account."""
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_id = user_input.get("cloud_device_id", "")
+            if not selected_id:
+                errors["base"] = "cloud_no_device_match"
+            else:
+                # Fetch full device info (with local_key).
+                oauth = TuyaOAuthManager(self.hass)
+                await oauth.async_load()
+                info = await oauth.async_get_device_info(selected_id)
+
+                if info is None:
+                    errors["base"] = "cloud_fetch_failed"
+                else:
+                    local_key = str(info.get("local_key", "")).strip()
+                    cloud_ip = str(info.get("ip", "")).strip()
+                    category = str(info.get("category", "")).strip()
+                    name = str(info.get("name", "")).strip()
+
+                    self._flow_data[CONF_DEVICE_ID] = selected_id
+                    self._flow_data[CONF_LOCAL_KEY] = local_key
+                    if not self._flow_data.get(CONF_NAME):
+                        self._flow_data[CONF_NAME] = name or selected_id
+                    if category:
+                        self._tuya_category = category
+
+                    # Try to resolve host.
+                    await self._apply_cloud_candidate(
+                        {
+                            "device_id": selected_id,
+                            "local_key": local_key,
+                            "ip": cloud_ip,
+                            "category": category,
+                            "name": name,
+                        }
+                    )
+
+                    await self.async_set_unique_id(selected_id)
+                    self._abort_if_unique_id_configured()
+
+                    # Route based on whether we have local_key.
+                    if local_key:
+                        if not self._flow_data.get(CONF_HOST, "").strip():
+                            return await self.async_step_confirm_host()
+                        return await self.async_step_detect()
+                    else:
+                        # No local_key — cloud-only device.
+                        _LOGGER.info(
+                            "Device %s has no local_key; setting up as cloud-only",
+                            selected_id,
+                        )
+                        # Fetch schema for DP mapping via cloud.
+                        schema = await oauth.async_get_device_schema(
+                            selected_id
+                        )
+                        if schema:
+                            helper = oauth.get_schema_helper()
+                            cloud_map, cat, _hint = helper.schema_to_dp_map(
+                                schema
+                            )
+                            if cloud_map:
+                                self._cloud_dp_map = cloud_map
+                                self._final_dp_map = cloud_map
+                                self._mapping_source = "cloud"
+                            if cat:
+                                self._tuya_category = cat
+                        return await self.async_step_review()
+
+        # Fetch device list from stored OAuth.
+        oauth = TuyaOAuthManager(self.hass)
+        await oauth.async_load()
+        if not oauth.is_configured:
+            return await self.async_step_oauth_login()
+
+        try:
+            cloud_devices = await oauth.async_list_devices()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.exception("OAuth device list fetch failed")
+            errors["base"] = self._cloud_error_key(exc)
+            cloud_devices = []
+
+        if not cloud_devices and "base" not in errors:
+            errors["base"] = "cloud_no_device_match"
+
+        if errors:
+            return self.async_show_form(
+                step_id="oauth_pick_device",
+                data_schema=vol.Schema(
+                    {vol.Required("cloud_device_id"): str}
+                ),
+                errors=errors,
+            )
+
+        # Build choice map.
+        choices: dict[str, str] = {}
+        for dev in cloud_devices:
+            dev_id = str(
+                dev.get("id", "") or dev.get("device_id", "")
+            ).strip()
+            if not dev_id:
+                continue
+            label_parts = [
+                dev.get("name") or dev.get("product_name") or "Unnamed",
+                f"ID: {dev_id}",
+            ]
+            if dev.get("ip"):
+                label_parts.append(f"IP: {dev['ip']}")
+            if dev.get("category"):
+                label_parts.append(f"Cat: {dev['category']}")
+            choices[dev_id] = " | ".join(label_parts)
+
+        if not choices:
+            return self.async_abort(reason="cloud_no_device_match")
+
+        return self.async_show_form(
+            step_id="oauth_pick_device",
+            data_schema=vol.Schema(
+                {vol.Required("cloud_device_id"): vol.In(choices)}
+            ),
             errors=errors,
         )
 
@@ -1851,11 +2064,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _create_config_entry(self) -> config_entries.ConfigFlowResult:
         """Build and persist the config entry from accumulated flow data."""
+        local_key = self._flow_data.get(CONF_LOCAL_KEY, "")
+        host = self._flow_data.get(CONF_HOST, "")
+
         entry_data: dict[str, Any] = {
             CONF_DEVICE_ID: self._flow_data[CONF_DEVICE_ID],
-            CONF_HOST: self._flow_data[CONF_HOST],
+            CONF_HOST: host,
             CONF_PORT: self._flow_data.get(CONF_PORT, DEFAULT_PORT),
-            CONF_LOCAL_KEY: self._flow_data[CONF_LOCAL_KEY],
+            CONF_LOCAL_KEY: local_key,
             CONF_PROTOCOL_VERSION: "auto",
             CONF_DEVICE_TYPE: self._flow_data[CONF_DEVICE_TYPE],
             CONF_DP_MAP: json.dumps(self._final_dp_map),
@@ -1886,8 +2102,17 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
                 entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth["access_secret"]
                 entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get("region", "eu")
-        else:
+        elif local_key and host:
+            # Full local runtime — standard path.
             entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_LOCAL
+        else:
+            # No local_key or no host — cloud-only runtime via global OAuth.
+            entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_CLOUD
+            # Store cloud auth if available for per-entry fallback.
+            if self._cloud_auth.get("access_id") and self._cloud_auth.get("access_secret"):
+                entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
+                entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth["access_secret"]
+                entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get("region", "eu")
 
         return self.async_create_entry(
             title=self._flow_data[CONF_NAME],

@@ -1,0 +1,89 @@
+# ==========================================================================
+# RF Light — User-defined state helpers
+# ==========================================================================
+# These input_number helpers let the user define the desired brightness
+# (and optionally colour temperature) for each time-of-day period.
+#
+# Values are editable from the HA UI via the Settings → Helpers page or
+# any dashboard card.
+#
+# NOTE: color_temp helpers are included but commented-out.  Uncomment them
+# once the final DP map confirms the device supports color_temp control.
+# ==========================================================================
+
+# --- Morning (e.g. 06:00–11:59) ------------------------------------------
+input_number:
+  rf_light_brightness_morning:
+    name: "RF Light — Morning Brightness"
+    min: 1
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-5
+    initial: 30
+
+  # rf_light_color_temp_morning:
+  #   name: "RF Light — Morning Color Temp"
+  #   min: 2000
+  #   max: 6500
+  #   step: 50
+  #   unit_of_measurement: "K"
+  #   icon: mdi:thermometer
+  #   initial: 3000
+
+  # --- Afternoon (e.g. 12:00–17:59) ----------------------------------------
+  rf_light_brightness_afternoon:
+    name: "RF Light — Afternoon Brightness"
+    min: 1
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-6
+    initial: 70
+
+  # rf_light_color_temp_afternoon:
+  #   name: "RF Light — Afternoon Color Temp"
+  #   min: 2000
+  #   max: 6500
+  #   step: 50
+  #   unit_of_measurement: "K"
+  #   icon: mdi:thermometer
+  #   initial: 4000
+
+  # --- Evening (e.g. 18:00–21:59) ------------------------------------------
+  rf_light_brightness_evening:
+    name: "RF Light — Evening Brightness"
+    min: 1
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-4
+    initial: 50
+
+  # rf_light_color_temp_evening:
+  #   name: "RF Light — Evening Color Temp"
+  #   min: 2000
+  #   max: 6500
+  #   step: 50
+  #   unit_of_measurement: "K"
+  #   icon: mdi:thermometer
+  #   initial: 3500
+
+  # --- Night (e.g. 22:00–05:59) --------------------------------------------
+  rf_light_brightness_night:
+    name: "RF Light — Night Brightness"
+    min: 1
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:brightness-3
+    initial: 15
+
+  # rf_light_color_temp_night:
+  #   name: "RF Light — Night Color Temp"
+  #   min: 2000
+  #   max: 6500
+  #   step: 50
+  #   unit_of_measurement: "K"
+  #   icon: mdi:thermometer
+  #   initial: 2200

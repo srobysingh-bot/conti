@@ -32,6 +32,13 @@ CONF_CLOUD_ACCESS_SECRET: Final = "cloud_access_secret"
 CONF_CLOUD_REGION: Final = "cloud_region"
 CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
 
+# OAuth / Smart Life global cloud account
+CONF_OAUTH_CONFIGURED: Final = "oauth_configured"
+CONF_OAUTH_UID: Final = "oauth_uid"
+
+# Runtime channel for full cloud devices (no local_key)
+RUNTIME_CHANNEL_CLOUD: Final = "cloud"
+
 # External-ON correction — individual UI fields
 CONF_EXTERNAL_ON_ENABLED: Final = "external_on_enabled"
 CONF_EXTERNAL_ON_APPLY: Final = "external_on_apply"

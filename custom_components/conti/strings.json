@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add Tuya Device",
-        "description": "Enter basic device info and choose how you want to set up the device. Cloud-assisted is recommended — Conti will connect to your Tuya account, fetch your linked devices, and auto-fill Device ID and Local Key for you.",
+        "description": "Enter basic device info and choose how you want to set up the device. Smart Life login is the easiest — Conti stores your credentials once and auto-discovers devices from your account.",
         "data": {
           "name": "Device Name",
           "host": "Device IP Address",
@@ -12,8 +12,24 @@
           "onboarding_mode": "Onboarding Method"
         },
         "data_description": {
-          "host": "Local IP address of the device on your home network. Leave blank in cloud-assisted mode — Conti will try to detect it automatically.",
-          "onboarding_mode": "Cloud-assisted: Conti fetches your linked devices and auto-fills Device ID and Local Key. Manual: enter credentials yourself (advanced)."
+          "host": "Local IP address of the device on your home network. Leave blank in Smart Life / cloud-assisted mode — Conti will try to detect it automatically.",
+          "onboarding_mode": "Smart Life: log in once, devices auto-discovered. Cloud-assisted (legacy): enter project credentials per session. Manual: enter credentials yourself (advanced)."
+        }
+      },
+      "oauth_login": {
+        "title": "Login with Smart Life",
+        "description": "Enter your Tuya IoT Platform API credentials to connect your Smart Life account. This is a one-time setup — Conti will store your credentials securely and reuse them for all future device additions.\n\nAfter connecting, Conti will auto-discover all devices linked to your account.",
+        "data": {
+          "tuya_access_id": "Access ID / Client ID",
+          "tuya_access_secret": "Access Secret / Client Secret",
+          "tuya_region": "Data Centre Region"
+        }
+      },
+      "oauth_pick_device": {
+        "title": "Select Device",
+        "description": "Choose a device from your Smart Life account to add. Conti will auto-fill credentials and attempt local control.",
+        "data": {
+          "cloud_device_id": "Device"
         }
       },
       "cloud_credentials": {
@@ -113,6 +129,8 @@
       "cloud_credentials_required": "Tuya cloud credentials are required when cloud auto-fill is enabled.",
       "cloud_no_device_match": "No linked cloud devices were returned for this Tuya project/region. Check credentials, region, and project linkage.",
       "cloud_device_missing_local_key": "The selected cloud device was found, but Tuya did not return a local key. This can happen with some account/project configurations. Use Manual onboarding as fallback.",
+      "oauth_token_expired": "Smart Life session has expired. Please re-authenticate by removing and re-adding the integration.",
+      "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
       "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",

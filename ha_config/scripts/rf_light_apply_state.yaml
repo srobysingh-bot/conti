@@ -1,0 +1,75 @@
+# ==========================================================================
+# RF Light — Apply user-defined state script
+# ==========================================================================
+# Called by the automation when the light turns on via RF.
+# Looks up the current time-of-day period and applies the matching
+# brightness (and optionally color_temp) from the helpers.
+#
+# PLACEHOLDER: Replace light.YOUR_RF_LIGHT_ENTITY_ID with the actual
+# Conti light entity ID once the final DP map is configured.
+#
+# NOTE: color_temp service data is commented-out.  Uncomment once the
+# final DP map confirms color_temp support.
+# ==========================================================================
+
+script:
+  rf_light_apply_user_state:
+    alias: "RF Light — Apply User-Defined State"
+    description: >-
+      Applies the user-defined brightness (and optionally color temp)
+      for the current time-of-day period to the RF-controlled light.
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - variables:
+          # Current hour (0–23)
+          hour: "{{ now().hour }}"
+
+          # Select the correct helper entity based on time-of-day
+          brightness_helper: >-
+            {% if 6 <= hour < 12 %}
+              input_number.rf_light_brightness_morning
+            {% elif 12 <= hour < 18 %}
+              input_number.rf_light_brightness_afternoon
+            {% elif 18 <= hour < 22 %}
+              input_number.rf_light_brightness_evening
+            {% else %}
+              input_number.rf_light_brightness_night
+            {% endif %}
+
+          # Uncomment below once color_temp is confirmed supported:
+          # color_temp_helper: >-
+          #   {% if 6 <= hour < 12 %}
+          #     input_number.rf_light_color_temp_morning
+          #   {% elif 12 <= hour < 18 %}
+          #     input_number.rf_light_color_temp_afternoon
+          #   {% elif 18 <= hour < 22 %}
+          #     input_number.rf_light_color_temp_evening
+          #   {% else %}
+          #     input_number.rf_light_color_temp_night
+          #   {% endif %}
+
+          # Read the actual values
+          target_brightness_pct: "{{ states(brightness_helper) | float(50) }}"
+          # target_color_temp: "{{ states(color_temp_helper) | float(4000) }}"
+
+      # Small delay to let the device finish its RF power-on sequence
+      # before we send corrective DPs.  Tune this if needed (100–500 ms).
+      - delay:
+          milliseconds: 300
+
+      # --- Brightness-only version (default) ---
+      - action: light.turn_on
+        target:
+          # >>> PLACEHOLDER — replace with your actual entity <<<
+          entity_id: light.YOUR_RF_LIGHT_ENTITY_ID
+        data:
+          brightness_pct: "{{ target_brightness_pct | int }}"
+
+      # --- Brightness + Color Temp version (uncomment when confirmed) ---
+      # - action: light.turn_on
+      #   target:
+      #     entity_id: light.YOUR_RF_LIGHT_ENTITY_ID
+      #   data:
+      #     brightness_pct: "{{ target_brightness_pct | int }}"
+      #     color_temp_kelvin: "{{ target_color_temp | int }}"

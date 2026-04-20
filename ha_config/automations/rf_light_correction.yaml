@@ -1,0 +1,53 @@
+# ==========================================================================
+# RF Light — Post-on correction automation
+# ==========================================================================
+# Detects when the RF-controlled light transitions from OFF → ON
+# (via RF remote / physical button — NOT commanded by HA) and
+# immediately calls the script to apply the user-defined state.
+#
+# PLACEHOLDER: Replace light.YOUR_RF_LIGHT_ENTITY_ID with the actual
+# Conti light entity ID once the final DP map is configured.
+#
+# How it works:
+# 1. RF remote sends power-on directly to the Tuya light.
+# 2. The light turns on with its firmware-default / last-remembered state.
+# 3. Conti's push listener (~0.5 s) detects the power DP change.
+# 4. HA fires a state_changed event (off → on).
+# 5. This automation triggers and calls the correction script.
+# 6. The script sends the user-defined brightness (+ optional color_temp).
+#
+# Typical total latency: ~0.5–1.5 s from RF press to corrected state.
+# There WILL be a brief visible flash at the old state before correction.
+# This is a hardware limitation of direct-RF pairing, not a bug.
+# ==========================================================================
+
+automation:
+  - id: rf_light_post_on_correction
+    alias: "RF Light — Post-On Correction"
+    description: >-
+      When the RF light turns on externally, apply the user-defined
+      brightness and color settings for the current time of day.
+    mode: single
+    max_exceeded: silent
+
+    trigger:
+      - platform: state
+        # >>> PLACEHOLDER — replace with your actual entity <<<
+        entity_id: light.YOUR_RF_LIGHT_ENTITY_ID
+        from: "off"
+        to: "on"
+
+    condition:
+      # Only fire for EXTERNAL turn-on (RF / physical button).
+      # Skip if HA itself just turned the light on (e.g. via dashboard
+      # or another automation), to avoid overriding intentional commands.
+      #
+      # The context.parent_id check distinguishes HA-initiated changes
+      # from device-pushed state changes.  When Conti's push listener
+      # reports a state change, the context has no parent — meaning
+      # it was not initiated by an HA service call.
+      - condition: template
+        value_template: "{{ trigger.to_state.context.parent_id is none }}"
+
+    action:
+      - action: script.rf_light_apply_user_state
