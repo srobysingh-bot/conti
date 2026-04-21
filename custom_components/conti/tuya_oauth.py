@@ -89,6 +89,8 @@ class TuyaOAuthManager:
         self._helper: Any = None  # Lazy TuyaCloudSchemaHelper
         # Cache of device info dicts from the tuya_sharing SDK (QR mode only).
         self._sharing_device_cache: dict[str, dict[str, Any]] = {}
+        # Cache of synthesized schema dicts (functions + status) from the SDK.
+        self._sharing_schema_cache: dict[str, dict[str, Any]] = {}
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -484,6 +486,13 @@ class TuyaOAuthManager:
             if info["id"]:
                 devices.append(info)
                 self._sharing_device_cache[info["id"]] = info
+                # Build a synthesised schema dict from the SDK's function /
+                # status_range attributes so that schema_to_dp_map() can use
+                # them for automatic DP detection without any additional API
+                # call.
+                schema = self._build_sharing_schema(dev)
+                if schema:
+                    self._sharing_schema_cache[info["id"]] = schema
 
         _LOGGER.debug(
             "Tuya sharing SDK returned %d device(s) for uid=%s",
@@ -562,7 +571,20 @@ class TuyaOAuthManager:
     async def async_get_device_schema(
         self, device_id: str
     ) -> dict[str, Any] | None:
-        """Fetch the DP schema for a device from Tuya Cloud."""
+        """Fetch the DP schema for a device from Tuya Cloud.
+
+        In QR / Smart Life mode the sharing SDK already downloaded the device
+        specification during ``update_device_cache()``.  Return the synthesised
+        schema dict from that cache so no additional API call is needed.
+        """
+        if self.is_qr_mode:
+            cached = self._sharing_schema_cache.get(device_id)
+            if cached:
+                return cached
+            # Cache miss — try to populate it first, then retry.
+            await self.async_list_devices_sharing()
+            return self._sharing_schema_cache.get(device_id)
+
         if not await self.async_ensure_token():
             return None
 
@@ -588,6 +610,48 @@ class TuyaOAuthManager:
         return self._get_helper()
 
     # ── Internal ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _build_sharing_schema(dev: Any) -> dict[str, Any] | None:
+        """Synthesise a schema dict from a tuya_sharing CustomerDevice object.
+
+        The sharing SDK populates ``device.function`` and
+        ``device.status_range`` (both keyed by DP code) and
+        ``device.local_strategy`` which maps dp_id (int) → code string.
+        We reassemble those into the same ``{"functions": [...], "status": [...]}``
+        shape that :py:meth:`TuyaCloudSchemaHelper.schema_to_dp_map` expects.
+        """
+        func_attr = getattr(dev, "function", None) or {}
+        sr_attr = getattr(dev, "status_range", None) or {}
+        if not func_attr and not sr_attr:
+            return None
+
+        # Build a reverse map: code → dp_id from local_strategy if available.
+        code_to_dp: dict[str, int] = {}
+        local_strategy = getattr(dev, "local_strategy", None) or {}
+        for dp_id, entry in local_strategy.items():
+            try:
+                code = entry if isinstance(entry, str) else entry.get("status_code", "")
+                if code:
+                    code_to_dp[code] = int(dp_id)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _serialize_entry(code: str, obj: Any) -> dict[str, Any]:
+            dp_id = code_to_dp.get(code, 0)
+            type_ = getattr(obj, "type", "") or ""
+            values = getattr(obj, "values", "") or ""
+            if not isinstance(values, str):
+                import json as _json  # noqa: PLC0415
+                try:
+                    values = _json.dumps(values)
+                except Exception:  # noqa: BLE001
+                    values = "{}"
+            return {"code": code, "dp_id": dp_id, "type": type_, "values": values}
+
+        functions = [_serialize_entry(c, f) for c, f in func_attr.items()]
+        status = [_serialize_entry(c, s) for c, s in sr_attr.items()]
+        return {"functions": functions, "status": status}
 
     def _get_helper(self) -> Any:
         """Lazy-create and return the TuyaCloudSchemaHelper."""

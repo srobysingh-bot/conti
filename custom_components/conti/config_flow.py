@@ -1289,6 +1289,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._detected_version = detected_version
         self._discovered_dps = discovered_dps
 
+        # ── Silent cloud schema fetch (if OAuth session available) ──
+        # When the user arrived via Smart Life QR or cloud-assisted path an
+        # OAuth manager may already hold the device's Tuya cloud schema.
+        # Fetch it silently here (no extra step for the user) so that the
+        # cloud DP codes can improve the mapping quality before heuristics run.
+        await self._async_try_silent_cloud_schema_fetch()
+
         # ── Heuristic auto-mapping ──
         from .dp_mapping import auto_map_dps  # noqa: PLC0415
 
@@ -1382,6 +1389,57 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders=description_placeholders,
             errors=errors,
         )
+
+    # ───────────────────────────────────────────────────────────────────
+    # Helper: silent OAuth cloud schema fetch
+    # ───────────────────────────────────────────────────────────────────
+
+    async def _async_try_silent_cloud_schema_fetch(self) -> None:
+        """Silently fetch the Tuya cloud schema for the current device.
+
+        Uses whatever OAuth / QR session is already stored.  Failures are
+        logged at DEBUG level and never surfaced to the user — the regular
+        heuristic / profile mapping still runs afterwards and acts as the
+        fallback.
+        """
+        device_id = self._flow_data.get(CONF_DEVICE_ID)
+        if not device_id or self._cloud_dp_map:
+            return  # nothing to do
+
+        try:
+            from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+            from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+            oauth = TuyaOAuthManager(self.hass)
+            await oauth.async_load()
+            if not oauth.is_configured:
+                return
+
+            schema = await oauth.async_get_device_schema(device_id)
+            if not schema:
+                _LOGGER.debug(
+                    "Silent cloud schema: no schema returned for %s", device_id
+                )
+                return
+
+            cloud_map, category, _hint = TuyaCloudSchemaHelper.schema_to_dp_map(schema)
+            if cloud_map:
+                self._cloud_dp_map = cloud_map
+                self._mapping_source = "cloud"
+                _LOGGER.info(
+                    "Silent cloud schema: %d DPs mapped for %s (category=%s)",
+                    len(cloud_map),
+                    device_id,
+                    category,
+                )
+            if category and not getattr(self, "_tuya_category", None):
+                self._tuya_category = category
+
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Silent cloud schema fetch skipped for %s (no OAuth session or cloud unreachable)",
+                self._flow_data.get(CONF_DEVICE_ID),
+            )
 
     # ═══════════════════════════════════════════════════════════════════
     # Step 3: Cloud-assisted schema mapping (optional)
