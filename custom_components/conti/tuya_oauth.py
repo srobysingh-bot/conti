@@ -573,24 +573,79 @@ class TuyaOAuthManager:
     ) -> dict[str, Any] | None:
         """Fetch the DP schema for a device from Tuya Cloud.
 
-        In QR / Smart Life mode the sharing SDK already downloaded the device
-        specification during ``update_device_cache()``.  Return the synthesised
-        schema dict from that cache so no additional API call is needed.
+        Source selection:
+        1. QR / Smart Life mode — use sharing SDK schema cache (populated
+           during ``update_device_cache()``).  If the cache miss or the
+           sharing schema has no mapped DPs (incomplete), fall back to
+           OpenAPI (``GET /v1.0/devices/{id}/specifications``) if project
+           credentials are available.
+        2. Credential mode — OpenAPI directly.
+
+        Logs the schema source at INFO level so the caller can include it
+        in the mapping summary.
         """
         if self.is_qr_mode:
+            # Try sharing SDK cache first
             cached = self._sharing_schema_cache.get(device_id)
-            if cached:
-                return cached
-            # Cache miss — try to populate it first, then retry.
-            await self.async_list_devices_sharing()
-            return self._sharing_schema_cache.get(device_id)
+            if not cached:
+                await self.async_list_devices_sharing()
+                cached = self._sharing_schema_cache.get(device_id)
 
+            if cached:
+                # Validate completeness: at least one entry with a non-zero dp_id
+                funcs = cached.get("functions", [])
+                status = cached.get("status", [])
+                has_dp_ids = any(
+                    e.get("dp_id", 0) != 0 for e in funcs + status
+                )
+                total_entries = len(funcs) + len(status)
+                if total_entries > 0 and has_dp_ids:
+                    _LOGGER.info(
+                        "Schema source: sharing_sdk (%d function + %d status entries) "
+                        "for device %s",
+                        len(funcs), len(status), device_id,
+                    )
+                    return cached
+                _LOGGER.debug(
+                    "Sharing SDK schema incomplete for %s "
+                    "(entries=%d, has_dp_ids=%s) — trying OpenAPI fallback",
+                    device_id, total_entries, has_dp_ids,
+                )
+            else:
+                _LOGGER.debug(
+                    "No sharing SDK schema cached for %s — trying OpenAPI fallback",
+                    device_id,
+                )
+
+            # Fallback: OpenAPI (only if we have project credentials)
+            if self._access_id and self._access_secret:
+                if await self.async_ensure_token():
+                    helper = self._get_helper()
+                    result = await helper.get_device_schema(device_id)
+                    self._sync_from_helper(helper)
+                    if result:
+                        _LOGGER.info(
+                            "Schema source: openapi_fallback for device %s",
+                            device_id,
+                        )
+                        return result
+            _LOGGER.debug(
+                "No OpenAPI credentials available for schema fallback of %s",
+                device_id,
+            )
+            return None
+
+        # Credential (non-QR) mode — use OpenAPI directly
         if not await self.async_ensure_token():
             return None
 
         helper = self._get_helper()
         result = await helper.get_device_schema(device_id)
         self._sync_from_helper(helper)
+        if result:
+            _LOGGER.info(
+                "Schema source: openapi for device %s", device_id
+            )
         return result
 
     async def async_get_device_status(

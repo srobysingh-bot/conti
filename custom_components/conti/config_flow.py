@@ -1322,19 +1322,31 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 profile, discovered_dps, confidence
             )
 
-        # ── Build merged map: heuristic < profile ──
-        from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+        # ── Build merged map: cloud > profile > heuristic ──
+        # Use strict cloud-priority merge when cloud schema is available so
+        # that authoritative Tuya DP assignments are never overridden by
+        # heuristic guesses.  Fall back to simple profile < heuristic merge
+        # when no cloud data is present.
+        if self._cloud_dp_map:
+            from .dp_mapping import merge_cloud_priority_dp_maps  # noqa: PLC0415
 
-        self._final_dp_map = merge_all_dp_maps(
-            self._auto_dp_map,
-            self._profile_dp_map,
-        )
-        self._apply_safe_profile_fallback_if_needed()
+            self._final_dp_map = merge_cloud_priority_dp_maps(
+                self._auto_dp_map,
+                self._profile_dp_map,
+                self._cloud_dp_map,
+            )
+            self._mapping_source = "cloud"
+        else:
+            from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
+
+            self._final_dp_map = merge_all_dp_maps(
+                self._auto_dp_map,
+                self._profile_dp_map,
+            )
+            self._apply_safe_profile_fallback_if_needed()
+            self._mapping_source = "auto" if self._final_dp_map else "raw_discovery"
 
         # ── Last-resort raw DP fallback ──
-        # When ALL mapping pipelines produced nothing but we DO have
-        # discovered DPs, build a raw map so the user at least sees them
-        # in the review step and can refine via Learn / Manual Edit.
         if not self._final_dp_map and discovered_dps:
             from .dp_mapping import build_raw_dp_map  # noqa: PLC0415
 
@@ -1346,20 +1358,21 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._flow_data.get(CONF_DEVICE_ID, ""),
                 len(self._final_dp_map),
             )
-        else:
-            self._mapping_source = "auto"
 
         _LOGGER.info(
-            "Config flow detect: device=%s v%s, %d DPs discovered, "
-            "profile=%s (confidence=%.2f), auto-map=%d, profile-map=%d, final-map=%d",
+            "Config flow detect: device=%s v%s, %d DPs discovered — "
+            "auto=%d profile=%d cloud=%d final=%d source=%s "
+            "profile_match=%s (confidence=%.2f)",
             self._flow_data[CONF_DEVICE_ID],
             detected_version,
             len(discovered_dps),
-            profile["id"] if profile else "none",
-            confidence,
             len(self._auto_dp_map),
             len(self._profile_dp_map),
+            len(self._cloud_dp_map),
             len(self._final_dp_map),
+            self._mapping_source,
+            profile["id"] if profile else "none",
+            confidence,
         )
 
         # Show detection results with options
@@ -1427,10 +1440,18 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._cloud_dp_map = cloud_map
                 self._mapping_source = "cloud"
                 _LOGGER.info(
-                    "Silent cloud schema: %d DPs mapped for %s (category=%s)",
+                    "Silent cloud schema: %d DPs mapped for %s "
+                    "(category=%s device_type_hint=%s)",
                     len(cloud_map),
                     device_id,
                     category,
+                    _hint,
+                )
+            else:
+                _LOGGER.debug(
+                    "Silent cloud schema: schema returned for %s but no DPs "
+                    "were mapped (category=%s) — heuristics will be used",
+                    device_id, category,
                 )
             if category and not getattr(self, "_tuya_category", None):
                 self._tuya_category = category

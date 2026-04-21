@@ -515,6 +515,57 @@ def merge_all_dp_maps(
     return result
 
 
+def merge_cloud_priority_dp_maps(
+    heuristic_map: dict[str, Any],
+    profile_map: dict[str, Any],
+    cloud_map: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge dp_maps with strict cloud-first priority.
+
+    Priority: cloud_schema > profile_map > heuristic_map
+
+    When a cloud schema is present:
+    - Cloud entries are authoritative and are never overridden.
+    - Profile entries fill DPs not covered by cloud.
+    - Heuristic entries only fill DPs not covered by cloud or profile.
+
+    This prevents heuristic guesses from corrupting authoritative
+    cloud DP assignments (e.g. guessing ``power`` for a DP that the
+    cloud has correctly identified as ``brightness``).
+    """
+    result: dict[str, Any] = {}
+
+    # Lowest priority first — each layer overwrites previous gaps only
+    # (we build in reverse then flip, but since cloud is last it wins).
+    # Actually: start with lowest and let higher-priority overwrite.
+    if heuristic_map:
+        result.update(heuristic_map)
+    if profile_map:
+        result.update(profile_map)
+
+    if cloud_map:
+        # Cloud overrides everything
+        result.update(cloud_map)
+
+        # Additionally, remove any heuristic/profile assignments for DPs
+        # whose dp_id is already handled by cloud, to avoid stale role
+        # collisions from the lower-priority layers.
+        cloud_keys: set[str] = {v["key"] for v in cloud_map.values() if "key" in v}
+        to_remove = [
+            dp_id for dp_id, entry in result.items()
+            if dp_id not in cloud_map and entry.get("key") in cloud_keys
+        ]
+        for dp_id in to_remove:
+            del result[dp_id]
+            _LOGGER.debug(
+                "Cloud-priority merge: removed heuristic assignment "
+                "dp_id=%s (role conflict with cloud map)",
+                dp_id,
+            )
+
+    return result
+
+
 def build_raw_dp_map(
     discovered_dps: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
