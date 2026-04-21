@@ -505,17 +505,15 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         errors: dict[str, str] = {}
 
-        # ── If already fully configured, skip straight to device picker ──
-        if oauth.is_configured and user_input is None:
-            token_ok = await oauth.async_ensure_token()
-            if token_ok:
-                self._cloud_auth = {
-                    "access_id": oauth.access_id,
-                    "access_secret": oauth.access_secret,
-                    "region": oauth.region,
-                }
-                return await self.async_step_oauth_pick_device()
-            _LOGGER.info("Stored OAuth token is no longer valid; re-authenticating")
+        # NOTE: We intentionally do NOT auto-skip to the device picker when a
+        # stored session exists.  The user explicitly chose "Login with Smart
+        # Life", so they must always complete the QR scan to authenticate —
+        # no session reuse, no cross-account leakage.
+        _LOGGER.debug(
+            "oauth_login: is_configured=%s is_qr_mode=%s (session will NOT be reused)",
+            oauth.is_configured,
+            oauth.is_qr_mode,
+        )
 
         if user_input is not None:
             region = user_input.get("tuya_region", "eu")
