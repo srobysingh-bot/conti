@@ -323,12 +323,14 @@ class TuyaOAuthManager:
         """
         try:
             from tuya_sharing import Manager  # noqa: PLC0415
-        except ImportError as exc:
+        except ImportError:
             _LOGGER.error(
-                "tuya-device-sharing-sdk is not installed; QR device listing "
-                "will fail.  Add tuya-device-sharing-sdk>=2.0.0 to requirements."
+                "tuya-device-sharing-sdk is not installed.  Smart Life QR "
+                "device listing is unavailable.  Install it with:\n"
+                "  pip install tuya-device-sharing-sdk\n"
+                "or re-add Conti via the manual / cloud-assisted path."
             )
-            raise type(exc)("tuya-device-sharing-sdk missing") from exc
+            return []
 
         from .cloud_schema import TUYA_HA_CLIENT_ID  # noqa: PLC0415
 
