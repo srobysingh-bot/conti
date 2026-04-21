@@ -20,6 +20,14 @@ import logging
 import time
 from typing import Any
 
+# Maps Tuya regional endpoint URLs → short region codes.
+_ENDPOINT_TO_REGION: dict[str, str] = {
+    "https://openapi.tuyaeu.com": "eu",
+    "https://openapi.tuyaus.com": "us",
+    "https://openapi.tuyacn.com": "cn",
+    "https://openapi.tuyain.com": "in",
+}
+
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
@@ -56,8 +64,12 @@ class TuyaOAuthManager:
         self._refresh_token: str = ""
         self._token_expiry: float = 0.0
         self._uid: str = ""
+        self._terminal_id: str = ""      # from QR poll response
+        self._endpoint_url: str = ""     # full URL from QR poll, e.g. https://openapi.tuyaeu.com
         self._loaded: bool = False
         self._helper: Any = None  # Lazy TuyaCloudSchemaHelper
+        # Cache of device info dicts from the tuya_sharing SDK (QR mode only).
+        self._sharing_device_cache: dict[str, dict[str, Any]] = {}
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -90,6 +102,16 @@ class TuyaOAuthManager:
     def user_code(self) -> str:
         return self._user_code
 
+    @property
+    def is_qr_mode(self) -> bool:
+        """True when this account was configured via QR login (no project credentials).
+
+        In QR mode the account has a user UID and OAuth tokens from the Tuya
+        device-sharing gateway, but no Tuya IoT project access_id / access_secret.
+        Device listing must use the ``tuya_sharing`` SDK instead of the regular
+        Tuya OpenAPI (which requires HMAC signing with project credentials).
+        """
+        return bool(self._uid and self._access_token and not self._access_id)
 
     # ── Persistent storage ────────────────────────────────────────────
 
@@ -107,6 +129,8 @@ class TuyaOAuthManager:
             self._refresh_token = str(data.get("refresh_token", ""))
             self._token_expiry = float(data.get("token_expiry", 0.0))
             self._uid = str(data.get("uid", ""))
+            self._terminal_id = str(data.get("terminal_id", ""))
+            self._endpoint_url = str(data.get("endpoint_url", ""))
         self._loaded = True
     async def async_save(self) -> None:
         """Persist current credentials and tokens."""
@@ -118,6 +142,8 @@ class TuyaOAuthManager:
                 "user_code": self._user_code,
                 "access_token": self._access_token,
                 "refresh_token": self._refresh_token,
+                "terminal_id": self._terminal_id,
+                "endpoint_url": self._endpoint_url,
                 "token_expiry": self._token_expiry,
                 "uid": self._uid,
             }
@@ -220,10 +246,26 @@ class TuyaOAuthManager:
             self._refresh_token = str(refresh_token)
             self._token_expiry = time.time() + int(expire_time) - 60
 
-        # If the gateway returned an endpoint URL, use it as the
-        # regional base for subsequent OpenAPI calls.
+        # Store terminal_id (required by the tuya_sharing Manager).
+        terminal_id = result.get("terminal_id", "")
+        if terminal_id:
+            self._terminal_id = str(terminal_id)
+
+        # Store the endpoint URL separately; map back to a short region code
+        # so that helper lookups in _BASE_URLS still work correctly.
         if endpoint:
-            self._region = str(endpoint)
+            self._endpoint_url = str(endpoint)
+            mapped_region = _ENDPOINT_TO_REGION.get(
+                str(endpoint).rstrip("/"), ""
+            )
+            if mapped_region:
+                self._region = mapped_region
+            _LOGGER.debug(
+                "QR poll endpoint=%s → region=%s terminal_id=%s",
+                endpoint,
+                self._region,
+                (self._terminal_id[:8] + "…") if self._terminal_id else "<none>",
+            )
 
         # Propagate tokens into the helper so device-listing works.
         self._helper = None  # Re-create with updated creds
@@ -244,7 +286,22 @@ class TuyaOAuthManager:
     # ── Token lifecycle ───────────────────────────────────────────────
 
     async def async_ensure_token(self) -> bool:
-        """Ensure a valid token exists, refreshing if needed."""
+        """Ensure a valid token exists, refreshing if needed.
+
+        In QR mode (no project credentials) the token was obtained from the
+        Tuya device-sharing gateway and cannot be refreshed via the OpenAPI
+        HMAC flow.  We just check whether it is still valid.
+        """
+        if self.is_qr_mode:
+            if self._access_token and time.time() < self._token_expiry:
+                return True
+            _LOGGER.warning(
+                "QR-login access token has expired (uid=%s). "
+                "User must re-authenticate via Smart Life QR scan.",
+                self._uid,
+            )
+            return False
+
         helper = self._get_helper()
         ok = await helper._ensure_token(strict=False)
         if ok:
@@ -253,13 +310,98 @@ class TuyaOAuthManager:
 
     # ── Device listing ────────────────────────────────────────────────
 
+    async def async_list_devices_sharing(self) -> list[dict[str, Any]]:
+        """List devices using the Tuya Device Sharing SDK (QR-login mode).
+
+        Called when no Tuya IoT project credentials are available.  The
+        ``tuya_sharing`` Manager uses AES-GCM encrypted requests signed with
+        a key derived from the ``refresh_token`` — no project
+        ``access_secret`` is needed.
+
+        Populates ``_sharing_device_cache`` so that
+        :meth:`async_get_device_info` can answer without a second SDK call.
+        """
+        try:
+            from tuya_sharing import Manager  # noqa: PLC0415
+        except ImportError as exc:
+            _LOGGER.error(
+                "tuya-device-sharing-sdk is not installed; QR device listing "
+                "will fail.  Add tuya-device-sharing-sdk>=2.0.0 to requirements."
+            )
+            raise type(exc)("tuya-device-sharing-sdk missing") from exc
+
+        from .cloud_schema import TUYA_HA_CLIENT_ID  # noqa: PLC0415
+
+        endpoint = self._endpoint_url or "https://openapi.tuyaeu.com"
+        token_response = {
+            "uid": self._uid,
+            "access_token": self._access_token,
+            "refresh_token": self._refresh_token,
+            "expire_time": max(0, int(self._token_expiry - time.time())),
+            "t": int(time.time() * 1000),
+        }
+
+        _LOGGER.debug(
+            "QR device listing via tuya_sharing SDK: "
+            "client_id=%s endpoint=%s terminal_id=%s uid=%s",
+            TUYA_HA_CLIENT_ID,
+            endpoint,
+            (self._terminal_id[:8] + "…") if self._terminal_id else "<none>",
+            self._uid,
+        )
+
+        manager = Manager(
+            client_id=TUYA_HA_CLIENT_ID,
+            user_code=self._user_code,
+            terminal_id=self._terminal_id,
+            end_point=endpoint,
+            token_response=token_response,
+        )
+
+        try:
+            await self._hass.async_add_executor_job(manager.update_device_cache)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error(
+                "Tuya sharing SDK device listing failed: %s", exc
+            )
+            return []
+
+        devices: list[dict[str, Any]] = []
+        for dev in manager.device_map.values():
+            info: dict[str, Any] = {
+                "id": getattr(dev, "id", ""),
+                "name": getattr(dev, "name", ""),
+                "local_key": getattr(dev, "local_key", "") or "",
+                "ip": getattr(dev, "ip", "") or "",
+                "category": getattr(dev, "category", "") or "",
+                "product_name": getattr(dev, "product_name", "") or "",
+                "uid": self._uid,
+            }
+            if info["id"]:
+                devices.append(info)
+                self._sharing_device_cache[info["id"]] = info
+
+        _LOGGER.debug(
+            "Tuya sharing SDK returned %d device(s) for uid=%s",
+            len(devices),
+            self._uid,
+        )
+        return devices
+
     async def async_list_devices(self) -> list[dict[str, Any]]:
         """List all devices accessible to this account.
 
-        Prefers ``/v1.0/users/{uid}/devices`` when UID is known,
-        then falls back to the associated-users / project endpoints
-        already implemented in :class:`TuyaCloudSchemaHelper`.
+        In QR mode (no project credentials) delegates to
+        :meth:`async_list_devices_sharing` which uses the tuya_sharing SDK.
+        Otherwise uses the Tuya OpenAPI via :class:`TuyaCloudSchemaHelper`.
         """
+        if self.is_qr_mode:
+            _LOGGER.debug(
+                "async_list_devices: QR mode (uid=%s) — using tuya_sharing SDK",
+                self._uid,
+            )
+            return await self.async_list_devices_sharing()
+
         if not await self.async_ensure_token():
             return []
 
@@ -290,7 +432,21 @@ class TuyaOAuthManager:
     async def async_get_device_info(
         self, device_id: str
     ) -> dict[str, Any] | None:
-        """Fetch device details including local_key."""
+        """Fetch device details including local_key.
+
+        In QR mode, returns data from :attr:`_sharing_device_cache` populated
+        by :meth:`async_list_devices_sharing`.  If the cache is empty (e.g.
+        user navigated here without going through the device picker) it
+        triggers a fresh sharing SDK listing first.
+        """
+        if self.is_qr_mode:
+            cached = self._sharing_device_cache.get(device_id)
+            if cached:
+                return cached
+            # Populate cache then retry.
+            await self.async_list_devices_sharing()
+            return self._sharing_device_cache.get(device_id)
+
         if not await self.async_ensure_token():
             return None
 

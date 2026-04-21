@@ -123,6 +123,23 @@ class TuyaCloudSchemaHelper:
         if self._token and time.time() < self._token_expiry:
             return True
 
+        # Credentials are required for HMAC-signed token acquisition.
+        # In QR-login mode (no access_id/secret) this path must not be taken —
+        # use the tuya_sharing SDK instead.
+        if not self._access_id or not self._access_secret:
+            _LOGGER.error(
+                "Tuya OpenAPI token fetch requires credentials but "
+                "access_id=%r is empty.  HMAC signing will fail with "
+                "code=1004.  QR-login accounts must use the "
+                "tuya-device-sharing-sdk path.",
+                (self._access_id[:4] + "…") if self._access_id else "<empty>",
+            )
+            if strict:
+                raise TuyaCloudAuthError(
+                    "Tuya OpenAPI access_id/access_secret not configured."
+                )
+            return False
+
         # Try refresh token first if available
         if self._refresh_token:
             refreshed = await self._try_refresh_token(strict=False)
@@ -314,6 +331,14 @@ class TuyaCloudSchemaHelper:
         token: str | None = None,
     ) -> dict[str, str]:
         """Generate Tuya Cloud API HMAC-SHA256 signature headers."""
+        _LOGGER.debug(
+            "Signing %s %s — access_id=%s base_url=%s has_token=%s",
+            method,
+            path,
+            (self._access_id[:4] + "…") if self._access_id else "<empty>",
+            self._base_url,
+            bool(token),
+        )
         t = str(int(time.time() * 1000))
 
         # String to sign: method + SHA256(body) + headers + path
@@ -618,6 +643,18 @@ class TuyaCloudSchemaHelper:
         strict: bool = False,
     ) -> dict[str, Any] | None:
         """Make an authenticated GET request to the Tuya Cloud API."""
+        if not self._access_id or not self._access_secret:
+            _LOGGER.error(
+                "Tuya OpenAPI GET %s skipped: access_id/access_secret are "
+                "empty.  Requests would fail with code=1004 (sign invalid).  "
+                "Use the tuya-device-sharing-sdk path for QR-login accounts.",
+                path,
+            )
+            if strict:
+                raise TuyaCloudAuthError(
+                    "Tuya OpenAPI credentials not configured (QR-login mode)."
+                )
+            return None
         if not self._token:
             if strict:
                 raise TuyaCloudAuthError("Missing Tuya access token")
@@ -709,6 +746,18 @@ class TuyaCloudSchemaHelper:
     ) -> dict[str, Any] | None:
         """Make an authenticated POST request to the Tuya Cloud API."""
         import json as _json  # noqa: PLC0415
+
+        if not self._access_id or not self._access_secret:
+            _LOGGER.error(
+                "Tuya OpenAPI POST %s skipped: access_id/access_secret are "
+                "empty.  Requests would fail with code=1004 (sign invalid).",
+                path,
+            )
+            if strict:
+                raise TuyaCloudAuthError(
+                    "Tuya OpenAPI credentials not configured (QR-login mode)."
+                )
+            return None
 
         if not self._token:
             if strict:
@@ -928,7 +977,7 @@ class TuyaCloudSchemaHelper:
                 f"status={status} path={path} code={code} msg={msg}"
             )
 
-        if status in (401, 403) or code in {"1010", "1011", "1106", "2406"}:
+        if status in (401, 403) or code in {"1004", "1010", "1011", "1106", "2406"}:
             raise TuyaCloudAuthError(f"status={status} path={path} code={code} msg={msg}")
 
         if status == 404:
