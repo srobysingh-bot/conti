@@ -420,6 +420,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._confidence: float = 0.0
         self._mapping_source: str = "auto"
         self._tuya_category: str | None = None
+        # Cached OAuth manager — created once and reused across steps so
+        # the sharing SDK's update_device_cache() is not called redundantly.
+        self._oauth_manager: Any = None
         self._learn_session: Any = None
         self._learn_steps: list[dict[str, Any]] = []
         self._learn_step_idx: int = 0
@@ -1423,8 +1426,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
             from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
 
-            oauth = TuyaOAuthManager(self.hass)
-            await oauth.async_load()
+            if self._oauth_manager is None:
+                self._oauth_manager = TuyaOAuthManager(self.hass)
+                await self._oauth_manager.async_load()
+            oauth = self._oauth_manager
             if not oauth.is_configured:
                 return
 
@@ -1546,12 +1551,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._apply_safe_profile_fallback_if_needed()
 
                     # Re-merge with cloud as highest-priority source.
-                    from .dp_mapping import merge_all_dp_maps  # noqa: PLC0415
-                    self._final_dp_map = merge_all_dp_maps(
+                    from .dp_mapping import merge_cloud_priority_dp_maps  # noqa: PLC0415
+                    self._final_dp_map = merge_cloud_priority_dp_maps(
                         self._auto_dp_map,
                         self._profile_dp_map,
                         self._cloud_dp_map,
                     )
+                    self._mapping_source = "cloud" if self._cloud_dp_map else "auto"
                 else:
                     errors["base"] = "cloud_fetch_failed"
 

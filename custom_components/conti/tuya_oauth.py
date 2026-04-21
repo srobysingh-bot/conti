@@ -592,24 +592,35 @@ class TuyaOAuthManager:
                 cached = self._sharing_schema_cache.get(device_id)
 
             if cached:
-                # Validate completeness: at least one entry with a non-zero dp_id
+                # Validate completeness: require that at least 50% of entries
+                # have a non-zero dp_id (meaning local_strategy mapped them).
+                # A schema where every code has dp_id=0 is useless for local
+                # control and triggers the OpenAPI fallback.
+                # For schemas with only 1-2 entries even 1 valid dp_id is OK.
                 funcs = cached.get("functions", [])
                 status = cached.get("status", [])
-                has_dp_ids = any(
-                    e.get("dp_id", 0) != 0 for e in funcs + status
+                all_entries = funcs + status
+                total_entries = len(all_entries)
+                valid_dp_count = sum(
+                    1 for e in all_entries if e.get("dp_id", 0) != 0
                 )
-                total_entries = len(funcs) + len(status)
-                if total_entries > 0 and has_dp_ids:
+                # Threshold: ≥50% valid, but always accept if total ≤ 2
+                sufficient = (
+                    total_entries > 0
+                    and (total_entries <= 2 or valid_dp_count >= total_entries / 2)
+                    and valid_dp_count > 0
+                )
+                if sufficient:
                     _LOGGER.info(
-                        "Schema source: sharing_sdk (%d function + %d status entries) "
+                        "Schema source: sharing_sdk (%d/%d entries have dp_ids) "
                         "for device %s",
-                        len(funcs), len(status), device_id,
+                        valid_dp_count, total_entries, device_id,
                     )
                     return cached
                 _LOGGER.debug(
                     "Sharing SDK schema incomplete for %s "
-                    "(entries=%d, has_dp_ids=%s) — trying OpenAPI fallback",
-                    device_id, total_entries, has_dp_ids,
+                    "(total=%d valid_dp_ids=%d) — trying OpenAPI fallback",
+                    device_id, total_entries, valid_dp_count,
                 )
             else:
                 _LOGGER.debug(
