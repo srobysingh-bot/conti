@@ -205,15 +205,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             low_power_sensor = False
 
     elif cloud_only_device:
-        # Cloud-only device (no local_key) — use global OAuth manager.
+        # Cloud-only device (no local_key) — use per-entry OAuth manager.
+        # Each entry gets its own isolated storage key to prevent cross-account
+        # token leakage when multiple Smart Life accounts are used.
         from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
 
-        if _OAUTH_KEY not in hass.data[DOMAIN]:
-            oauth = TuyaOAuthManager(hass)
+        entry_oauth_key = f"{_OAUTH_KEY}_{entry.entry_id}"
+        if entry_oauth_key not in hass.data[DOMAIN]:
+            oauth = TuyaOAuthManager(hass, entry_id=entry.entry_id)
             await oauth.async_load()
-            hass.data[DOMAIN][_OAUTH_KEY] = oauth
+            # Fall back to the global onboarding store if the per-entry store
+            # is empty (first load after upgrading from a version without
+            # per-entry keys, or entry created before isolation was added).
+            if not oauth.is_configured:
+                oauth_global = TuyaOAuthManager(hass)
+                await oauth_global.async_load()
+                if oauth_global.is_configured:
+                    _LOGGER.debug(
+                        "Migrating global OAuth store to per-entry key for %s",
+                        entry.entry_id,
+                    )
+                    oauth = oauth_global
+                    # Re-create manager bound to this entry_id so future saves
+                    # go to the per-entry store key.
+                    oauth_bound = TuyaOAuthManager(hass, entry_id=entry.entry_id)
+                    oauth_bound._access_id = oauth._access_id  # noqa: SLF001
+                    oauth_bound._access_secret = oauth._access_secret  # noqa: SLF001
+                    oauth_bound._region = oauth._region  # noqa: SLF001
+                    oauth_bound._user_code = oauth._user_code  # noqa: SLF001
+                    oauth_bound._access_token = oauth._access_token  # noqa: SLF001
+                    oauth_bound._refresh_token = oauth._refresh_token  # noqa: SLF001
+                    oauth_bound._token_expiry = oauth._token_expiry  # noqa: SLF001
+                    oauth_bound._uid = oauth._uid  # noqa: SLF001
+                    oauth_bound._terminal_id = oauth._terminal_id  # noqa: SLF001
+                    oauth_bound._endpoint_url = oauth._endpoint_url  # noqa: SLF001
+                    oauth_bound._loaded = True
+                    await oauth_bound.async_save()
+                    oauth = oauth_bound
+            hass.data[DOMAIN][entry_oauth_key] = oauth
 
-        oauth_mgr = hass.data[DOMAIN][_OAUTH_KEY]
+        oauth_mgr = hass.data[DOMAIN][entry_oauth_key]
 
         if oauth_mgr.is_configured:
             from .cloud_device_runtime import CloudDeviceRuntime  # noqa: PLC0415

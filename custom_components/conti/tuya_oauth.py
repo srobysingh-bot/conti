@@ -40,21 +40,40 @@ STORAGE_VERSION = 1
 _REFRESH_MARGIN = 120  # seconds
 
 
+def _storage_key(entry_id: str | None) -> str:
+    """Return the storage key for a given config entry (or global fallback).
+
+    Each config entry gets its own storage key so that multiple accounts
+    (multi-user) do not share or overwrite each other's tokens.
+
+    During onboarding the entry does not yet exist; in that case the
+    temporary global key is used until the entry is created, after which
+    the coordinator-side manager is initialised with the real entry_id.
+    """
+    if entry_id:
+        return f"{STORAGE_KEY}_{entry_id}"
+    return STORAGE_KEY
+
+
 class TuyaOAuthManager:
     """Global Tuya cloud account manager with persistent token storage.
 
     Wraps :class:`TuyaCloudSchemaHelper` for API calls and adds:
 
     * Persistent credential and token storage via HA's ``.storage``.
+    * Per-entry isolation: each config entry uses its own storage key so
+      multiple Smart Life accounts can coexist without session leakage.
     * Automatic token refresh before expiry.
     * User UID discovery for ``/v1.0/users/{uid}/devices``.
     * Device listing combining user-scoped and project-scoped endpoints.
     """
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, entry_id: str | None = None) -> None:
         self._hass = hass
+        self._entry_id = entry_id
+        key = _storage_key(entry_id)
         self._store: Store[dict[str, Any]] = Store(
-            hass, STORAGE_VERSION, STORAGE_KEY
+            hass, STORAGE_VERSION, key
         )
         self._access_id: str = ""
         self._access_secret: str = ""
@@ -289,16 +308,24 @@ class TuyaOAuthManager:
         """Ensure a valid token exists, refreshing if needed.
 
         In QR mode (no project credentials) the token was obtained from the
-        Tuya device-sharing gateway and cannot be refreshed via the OpenAPI
-        HMAC flow.  We just check whether it is still valid.
+        Tuya device-sharing gateway.  We attempt to refresh it using the
+        stored refresh_token before falling back to requiring re-login.
         """
         if self.is_qr_mode:
-            if self._access_token and time.time() < self._token_expiry:
+            # Still valid?
+            if self._access_token and time.time() < self._token_expiry - _REFRESH_MARGIN:
                 return True
+            # Try to refresh via the tuya_sharing gateway.
+            if self._refresh_token:
+                refreshed = await self._async_refresh_qr_token()
+                if refreshed:
+                    return True
             _LOGGER.warning(
-                "QR-login access token has expired (uid=%s). "
-                "User must re-authenticate via Smart Life QR scan.",
+                "QR-login access token has expired and could not be refreshed "
+                "(uid=%s entry_id=%s). User must re-authenticate via Smart Life "
+                "QR scan.",
                 self._uid,
+                self._entry_id or "<global>",
             )
             return False
 
@@ -307,6 +334,81 @@ class TuyaOAuthManager:
         if ok:
             self._sync_from_helper(helper)
         return ok
+
+    async def _async_refresh_qr_token(self) -> bool:
+        """Refresh a QR-login access token using the stored refresh_token.
+
+        Mirrors the tuya_sharing SDK's ``refresh_access_token_if_need`` but
+        runs in asyncio via ``aiohttp``.  The endpoint is the tuya_sharing
+        gateway (``apigw.iotbing.com``) — NOT the Tuya OpenAPI.
+        """
+        import json as _json  # noqa: PLC0415
+
+        import aiohttp  # noqa: PLC0415
+
+        from .cloud_schema import TUYA_HA_CLIENT_ID, _QR_LOGIN_BASE  # noqa: PLC0415
+
+        url = f"{_QR_LOGIN_BASE}/v1.0/m/token/{self._refresh_token}"
+        headers = {
+            "client_id": TUYA_HA_CLIENT_ID,
+            "Content-Type": "application/json",
+        }
+
+        _LOGGER.debug(
+            "Refreshing QR access token for uid=%s entry_id=%s",
+            self._uid,
+            self._entry_id or "<global>",
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    ssl=True,
+                ) as resp:
+                    raw = await resp.text()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("QR token refresh request failed: %s", exc)
+            return False
+
+        try:
+            data = _json.loads(raw)
+        except (ValueError, TypeError):
+            _LOGGER.debug("QR token refresh: non-JSON response: %s", raw[:200])
+            return False
+
+        if not isinstance(data, dict) or not data.get("success"):
+            _LOGGER.debug(
+                "QR token refresh failed: code=%s msg=%s",
+                data.get("code", "?") if isinstance(data, dict) else "?",
+                data.get("msg", "?") if isinstance(data, dict) else raw[:100],
+            )
+            return False
+
+        result = data.get("result", {})
+        if not isinstance(result, dict):
+            return False
+
+        new_token = result.get("accessToken") or result.get("access_token", "")
+        new_refresh = result.get("refreshToken") or result.get("refresh_token", "")
+        expire_time = result.get("expireTime") or result.get("expire_time", 7200)
+
+        if not new_token:
+            return False
+
+        self._access_token = str(new_token)
+        if new_refresh:
+            self._refresh_token = str(new_refresh)
+        self._token_expiry = time.time() + int(expire_time) - 60
+
+        await self.async_save()
+        _LOGGER.debug(
+            "QR token refreshed successfully for uid=%s (expires in %ds)",
+            self._uid,
+            int(expire_time),
+        )
+        return True
 
     # ── Device listing ────────────────────────────────────────────────
 
