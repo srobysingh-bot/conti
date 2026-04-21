@@ -433,6 +433,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._onboarding_mode: str = "manual"
         self._host_resolution_note: str = ""
         self._low_power_sensor: bool = False
+        # Smart Life QR login state
+        self._qr_code_url: str = ""
+        self._qr_code_token: str = ""
+        self._selected_region: str = "eu"
 
     # -- Options flow entry point -------------------------------------------
 
@@ -533,8 +537,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._selected_region = region
                     return await self.async_step_oauth_qr_scan()
                 except Exception as exc:  # noqa: BLE001
-                    _LOGGER.exception("Smart Life QR code generation failed")
-                    errors["base"] = self._cloud_error_key(exc)
+                    _LOGGER.exception("Smart Life QR code generation failed: %s", exc)
+                    errors["base"] = "qr_generation_failed"
 
         schema = vol.Schema(
             {
@@ -556,22 +560,42 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Show QR code and wait for the user to scan with Smart Life app.
 
-        The QR code is displayed as an inline image in the step
-        description.  After scanning, the user clicks Submit.
+        Uses HA's built-in QrCodeSelector to render the QR code inline in
+        the form — no external image services or CSP issues.
+
+        The user scans with the Smart Life app then clicks Submit.  If the
+        scan is not yet confirmed the token is refreshed so it does not
+        expire between retries.
         """
-        import urllib.parse  # noqa: PLC0415
+        from homeassistant.helpers.selector import (  # noqa: PLC0415
+            QrCodeSelector,
+            QrCodeSelectorConfig,
+            QrErrorCorrectionLevel,
+        )
 
         from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        # Guard: if no QR token the user arrived here out of sequence.
+        if not self._qr_code_token:
+            _LOGGER.warning(
+                "oauth_qr_scan reached without a QR token; redirecting to login"
+            )
+            return await self.async_step_oauth_login()
 
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # User clicked Submit — check if the QR was scanned.
+            # User clicked Submit — poll for scan confirmation.
             oauth = TuyaOAuthManager(self.hass)
             await oauth.async_load()
 
+            _LOGGER.debug(
+                "Polling QR login for token prefix=%s…", self._qr_code_token[:8]
+            )
             uid = await oauth.async_poll_qr_login(self._qr_code_token)
+
             if uid:
+                _LOGGER.debug("QR login successful, uid=%s", uid)
                 self._cloud_auth = {
                     "access_id": oauth.access_id,
                     "access_secret": oauth.access_secret,
@@ -579,20 +603,38 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
                 return await self.async_step_oauth_pick_device()
 
-            # Not yet scanned — show error and let user retry.
+            # Not yet scanned — refresh QR token so it doesn't expire.
             errors["base"] = "qr_not_scanned"
+            _LOGGER.debug("QR not yet scanned; refreshing token")
+            try:
+                qr_data = await oauth.async_start_qr_login(
+                    user_code=oauth.user_code,
+                    region=self._selected_region,
+                )
+                self._qr_code_url = qr_data["url"]
+                self._qr_code_token = qr_data["token"]
+                _LOGGER.debug(
+                    "QR token refreshed, new prefix=%s…", self._qr_code_token[:8]
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("QR token refresh failed; keeping existing token")
 
-        # Build QR code image URL using a public QR generator.
-        qr_image_url = (
-            "https://api.qrserver.com/v1/create-qr-code/"
-            f"?data={urllib.parse.quote(self._qr_code_url)}"
-            "&size=250x250&format=png"
+        _LOGGER.debug(
+            "Showing QR scan form, content prefix=%s", self._qr_code_url[:50]
         )
-
         return self.async_show_form(
             step_id="oauth_qr_scan",
-            data_schema=vol.Schema({}),
-            description_placeholders={"qr_code": qr_image_url},
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("qr_image"): QrCodeSelector(
+                        config=QrCodeSelectorConfig(
+                            data=self._qr_code_url,
+                            scale=5,
+                            error_correction_level=QrErrorCorrectionLevel.QUARTILE,
+                        )
+                    ),
+                }
+            ),
             errors=errors,
         )
 

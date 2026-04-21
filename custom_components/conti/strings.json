@@ -30,7 +30,10 @@
       },
       "oauth_qr_scan": {
         "title": "Scan QR Code with Smart Life App",
-        "description": "Open the **Smart Life** app on your phone, tap your **profile icon \u2192 top-right scan button**, and scan this QR code:\n\n![Scan with Smart Life app]({qr_code})\n\nAfter scanning, tap **Confirm** in the app, then click **Submit** below."
+        "description": "Open the **Smart Life** app on your phone, tap the **scan icon** (top-right of the Profile tab), and scan the QR code shown below.\n\nAfter scanning and tapping **Confirm** in the app, click **Submit**.",
+        "data": {
+          "qr_image": "QR Code"
+        }
       },
       "oauth_pick_device": {
         "title": "Select Device",
@@ -139,6 +142,7 @@
       "oauth_token_expired": "Smart Life session has expired. Please re-authenticate by removing and re-adding the integration.",
       "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
       "smart_life_login_failed": "Smart Life QR code authorization failed. Please try again.",
+      "qr_generation_failed": "Failed to generate QR code. Check your User Code and region, then try again. See integration logs for details.",
       "qr_not_scanned": "QR code has not been scanned yet. Open the Smart Life app, scan the QR code, then click Submit.",
       "user_code_required": "User Code is required for Smart Life QR login. Find it in the Tuya IoT Platform under Cloud → Link Tuya App Account.",
       "app_credentials_missing": "Smart Life login is unavailable. The Home Assistant administrator must set TUYA_APP_ACCESS_ID and TUYA_APP_ACCESS_SECRET environment variables. See integration documentation.",
