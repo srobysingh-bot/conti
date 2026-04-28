@@ -294,7 +294,8 @@ conti/
 4. Verify entities reflect any DP map changes after a reload.
 
 ### Test 5 — Error Cases
-1. Try adding a device with a **wrong IP** → confirm `cannot_connect` error.
+1. Try adding a device with a **wrong IP** → confirm a specific LAN error such as
+   `device_not_responding` or `device_unreachable_network` (instead of a generic message).
 2. Try adding with a **wrong Local Key** and protocol `3.4` →
    confirm `invalid_auth` error.
 3. Try adding with protocol `auto` to a non-Tuya device →

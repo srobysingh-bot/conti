@@ -51,6 +51,7 @@ An options flow is provided for:
 from __future__ import annotations
 
 import asyncio
+import errno
 import ipaddress
 import json
 import logging
@@ -119,6 +120,105 @@ _CONFIDENCE_THRESHOLD = 0.6
 
 # LAN discovery timeout during onboarding (seconds)
 _LAN_DISCOVERY_TIMEOUT = 8.0
+
+# TCP probe timeout during config-flow validation (seconds)
+_CONFIG_FLOW_TCP_PROBE_TIMEOUT = 5.0
+
+# User-facing config-flow keys for LAN TCP failures (replacing generic cannot_connect)
+ERR_DEVICE_NOT_RESPONDING = "device_not_responding"
+ERR_DEVICE_UNREACHABLE_NETWORK = "device_unreachable_network"
+ERR_PORT_BLOCKED_LOCAL = "port_blocked_local_unsupported"
+
+_LAN_TCP_REACHABILITY_ERRORS = frozenset(
+    {
+        ERR_DEVICE_NOT_RESPONDING,
+        ERR_DEVICE_UNREACHABLE_NETWORK,
+        ERR_PORT_BLOCKED_LOCAL,
+    }
+)
+
+
+def _classify_tcp_connect_error(exc: BaseException) -> tuple[str, str]:
+    """Map ``open_connection`` / connect failures to a user-facing error key.
+
+    Returns ``(config_flow_error_key, resolved_type)`` where *resolved_type* is
+    one of: ``timeout``, ``host_unreachable``, ``connection_refused``,
+    ``os_error``, or a short diagnostic tag for logs.
+    """
+    if isinstance(exc, asyncio.TimeoutError):
+        return ERR_DEVICE_NOT_RESPONDING, "timeout"
+    if isinstance(exc, OSError):
+        err = exc.errno
+        winerr = getattr(exc, "winerror", None)
+        # Refused / no listener
+        if err == errno.ECONNREFUSED or winerr == 10061:
+            return ERR_PORT_BLOCKED_LOCAL, "connection_refused"
+        # No route / network down / unreachable
+        _unreach_errno = {
+            errno.EHOSTUNREACH,
+            errno.ENETUNREACH,
+            errno.ENETDOWN,
+        }
+        # Windows: 10065 WSAEHOSTUNREACH, 10051 WSAENETUNREACH, 10050 WSAENETDOWN
+        if err in _unreach_errno or winerr in {10065, 10051, 10050}:
+            return ERR_DEVICE_UNREACHABLE_NETWORK, "host_unreachable"
+        # Platform connect timeout
+        if err == errno.ETIMEDOUT or winerr == 10060:
+            return ERR_DEVICE_NOT_RESPONDING, "timeout"
+        return ERR_DEVICE_NOT_RESPONDING, f"os_error errno={err} winerror={winerr}"
+    return ERR_DEVICE_NOT_RESPONDING, f"other ({type(exc).__name__})"
+
+
+def _is_lan_tcp_reachability_error(error_key: str) -> bool:
+    """Return True if *error_key* is a LAN TCP reachability class failure."""
+    return error_key in _LAN_TCP_REACHABILITY_ERRORS
+
+
+async def _async_probe_tcp(
+    host: str,
+    port: int,
+    timeout: float | None = None,
+) -> tuple[bool, str | None, str]:
+    """Try opening a TCP connection to *host*:*port* (config-flow diagnostic).
+
+    Returns ``(success, error_key_if_failed, resolved_type)``.
+    """
+    t = timeout if timeout is not None else _CONFIG_FLOW_TCP_PROBE_TIMEOUT
+    _LOGGER.debug(
+        "Config flow: TCP probe starting host=%s port=%s timeout=%.1fs",
+        host,
+        port,
+        t,
+    )
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=t,
+        )
+    except (OSError, asyncio.TimeoutError) as exc:
+        err_key, kind = _classify_tcp_connect_error(exc)
+        _LOGGER.warning(
+            "Config flow: TCP probe FAILED host=%s port=%s connection_result=fail "
+            "resolved_error_type=%s exc=%s",
+            host,
+            port,
+            kind,
+            exc,
+        )
+        return False, err_key, kind
+
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except OSError as exc:
+        _LOGGER.debug("Config flow: TCP probe peer close note: %s", exc)
+
+    _LOGGER.debug(
+        "Config flow: TCP probe OK host=%s port=%s connection_result=success",
+        host,
+        port,
+    )
+    return True, None, "connected"
 
 _LOW_POWER_SENSOR_CATEGORIES = {
     "mcs",     # contact/door
@@ -297,7 +397,8 @@ async def _test_device(
     Returns ``(success, detected_version, discovered_dps, error_key)``.
 
     Error keys:
-      * ``"cannot_connect"`` — network-level failure (timeout / refused).
+      * ``device_not_responding`` / ``device_unreachable_network`` /
+        ``port_blocked_local_unsupported`` — TCP reachability (classified).
       * ``"invalid_auth"``   — handshake or decrypt failure (bad local key).
       * ``"wrong_protocol"`` — protocol mismatch (all versions rejected).
       * ``""``               — no error.
@@ -309,22 +410,24 @@ async def _test_device(
     # ------------------------------------------------------------------
     # Step 1: Verify raw TCP connectivity (fast, version-agnostic).
     # ------------------------------------------------------------------
-    try:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(ip, port), timeout=5.0
-        )
-        writer.close()
-        await writer.wait_closed()
-    except (OSError, asyncio.TimeoutError) as exc:
+    ok_tcp, tcp_err, tcp_kind = await _async_probe_tcp(ip, port)
+    if not ok_tcp:
         _LOGGER.warning(
-            "Config flow: TCP connect to %s:%d failed: %s (key=%s)",
-            ip, port, exc, masked,
+            "Config flow: TCP pre-check failed device=%s host=%s port=%s "
+            "resolved_error_type=%s key=%s",
+            device_id,
+            ip,
+            port,
+            tcp_kind,
+            masked,
         )
-        return False, None, {}, "cannot_connect"
+        return False, None, {}, tcp_err or ERR_DEVICE_NOT_RESPONDING
 
     _LOGGER.debug(
         "Config flow: TCP reachable at %s:%d — testing protocol (key=%s)",
-        ip, port, masked,
+        ip,
+        port,
+        masked,
     )
 
     # ------------------------------------------------------------------
@@ -340,13 +443,41 @@ async def _test_device(
 
     try:
         ok = await client.connect()
-    except Exception:  # noqa: BLE001
-        _LOGGER.exception(
-            "Config flow: unexpected error during connect for %s (key=%s)",
-            device_id, masked,
+    except OSError as exc:
+        err_key, kind = _classify_tcp_connect_error(exc)
+        _LOGGER.warning(
+            "Config flow: connect() failed device=%s host=%s port=%s "
+            "connection_result=fail resolved_error_type=%s key=%s exc=%s",
+            device_id,
+            ip,
+            port,
+            kind,
+            masked,
+            exc,
         )
         await client.close()
-        return False, None, {}, "cannot_connect"
+        return False, None, {}, err_key
+    except asyncio.TimeoutError as exc:
+        _LOGGER.warning(
+            "Config flow: connect() timed out device=%s host=%s port=%s key=%s %s",
+            device_id,
+            ip,
+            port,
+            masked,
+            exc,
+        )
+        await client.close()
+        return False, None, {}, ERR_DEVICE_NOT_RESPONDING
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception(
+            "Config flow: unexpected error during connect for %s host=%s port=%s (key=%s)",
+            device_id,
+            ip,
+            port,
+            masked,
+        )
+        await client.close()
+        return False, None, {}, ERR_DEVICE_NOT_RESPONDING
 
     if not ok:
         await client.close()
@@ -1042,9 +1173,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         manual_host = self._flow_data.get(CONF_HOST, "").strip()
         host_set = False
         if manual_host:
+            self._flow_data[CONF_HOST] = manual_host
             if cloud_ip and manual_host != cloud_ip:
                 _LOGGER.info(
-                    "Cloud onboarding: keeping manual host %s (ignoring cloud IP %s) for device %s",
+                    "Cloud onboarding: keeping manual host %s (ignoring cloud IP %s) "
+                    "for device %s",
                     manual_host,
                     cloud_ip,
                     self._flow_data.get(CONF_DEVICE_ID, ""),
@@ -1136,7 +1269,19 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "host_required_manual"
             else:
                 self._flow_data[CONF_HOST] = host
-                return await self.async_step_detect()
+                port = int(self._flow_data.get(CONF_PORT, DEFAULT_PORT))
+                ok_tcp, tcp_err, tcp_kind = await _async_probe_tcp(host, port)
+                if not ok_tcp:
+                    _LOGGER.warning(
+                        "Config flow: confirm_host reachability check failed "
+                        "host=%s port=%s resolved_error_type=%s",
+                        host,
+                        port,
+                        tcp_kind,
+                    )
+                    errors["base"] = tcp_err or ERR_DEVICE_NOT_RESPONDING
+                else:
+                    return await self.async_step_detect()
 
         # Build a helpful hint listing any LAN scan candidates.
         candidates = self._lan_candidates
@@ -1220,7 +1365,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         if not ok:
-            errors["base"] = err or "cannot_connect"
+            errors["base"] = err or ERR_DEVICE_NOT_RESPONDING
 
             # Low-power battery sensors may be intentionally sleepy and not
             # continuously reachable on local TCP. Keep normal local behavior
@@ -1249,7 +1394,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Cloud-assisted flow: keep user in host-confirmation context for
             # host/network failures, which are common in inter-VLAN setups.
-            if errors["base"] == "cannot_connect" and self._onboarding_mode == "cloud_assisted":
+            if (
+                _is_lan_tcp_reachability_error(errors["base"])
+                and self._onboarding_mode == "cloud_assisted"
+            ):
                 if not self._host_resolution_note:
                     self._host_resolution_note = (
                         "Cloud credentials were fetched successfully, but local TCP connection failed. "
@@ -2234,7 +2382,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _is_strong_low_power_sensor_candidate(self, error_key: str) -> bool:
         """Return True when evidence strongly suggests a sleepy battery sensor."""
-        if error_key != "cannot_connect":
+        if not _is_lan_tcp_reachability_error(error_key):
             return False
 
         if self._flow_data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_SENSOR:

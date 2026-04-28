@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,7 +19,7 @@ from custom_components.conti.config_flow import ContiConfigFlow, _test_device
 
 class TestDeviceTCPFail:
     @pytest.mark.asyncio
-    async def test_tcp_timeout_returns_cannot_connect(self) -> None:
+    async def test_tcp_timeout_returns_device_not_responding(self) -> None:
         with patch(
             "custom_components.conti.config_flow.asyncio.open_connection",
             side_effect=asyncio.TimeoutError,
@@ -27,19 +28,37 @@ class TestDeviceTCPFail:
                 "dev1", "10.0.0.1", "0123456789abcdef", "3.3", 6668
             )
         assert ok is False
-        assert err == "cannot_connect"
+        from custom_components.conti.config_flow import ERR_DEVICE_NOT_RESPONDING
+
+        assert err == ERR_DEVICE_NOT_RESPONDING
 
     @pytest.mark.asyncio
-    async def test_tcp_refused_returns_cannot_connect(self) -> None:
+    async def test_tcp_refused_returns_port_blocked(self) -> None:
         with patch(
             "custom_components.conti.config_flow.asyncio.open_connection",
-            side_effect=OSError("Connection refused"),
+            side_effect=OSError(errno.ECONNREFUSED, "Connection refused"),
         ):
             ok, ver, dps, err = await _test_device(
                 "dev1", "10.0.0.1", "0123456789abcdef", "3.4", 6668
             )
         assert ok is False
-        assert err == "cannot_connect"
+        from custom_components.conti.config_flow import ERR_PORT_BLOCKED_LOCAL
+
+        assert err == ERR_PORT_BLOCKED_LOCAL
+
+    @pytest.mark.asyncio
+    async def test_tcp_host_unreachable_classified(self) -> None:
+        with patch(
+            "custom_components.conti.config_flow.asyncio.open_connection",
+            side_effect=OSError(errno.EHOSTUNREACH, "No route to host"),
+        ):
+            ok, ver, dps, err = await _test_device(
+                "dev1", "10.0.0.1", "0123456789abcdef", "3.4", 6668
+            )
+        assert ok is False
+        from custom_components.conti.config_flow import ERR_DEVICE_UNREACHABLE_NETWORK
+
+        assert err == ERR_DEVICE_UNREACHABLE_NETWORK
 
 
 # ---------------------------------------------------------------------------

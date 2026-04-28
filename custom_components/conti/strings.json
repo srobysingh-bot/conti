@@ -125,7 +125,10 @@
     },
     "error": {
       "cannot_connect": "Unable to connect to the device over local TCP. Check host/IP, port, and routing/firewall rules between Home Assistant and the device.",
-      "invalid_auth": "Authentication failed. The local key is likely incorrect.  Verify the 16-character key from the Tuya IoT Platform.",
+      "device_not_responding": "Device not responding (offline or wrong IP).",
+      "device_unreachable_network": "Device unreachable (check WiFi/network).",
+      "port_blocked_local_unsupported": "Port blocked or device does not support local control.",
+      "invalid_auth": "Invalid local key or device not compatible.",
       "wrong_protocol": "Protocol mismatch. The device rejected all attempted protocol versions (3.3, 3.4, 3.5, 3.1). Check the device firmware version.",
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
       "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",

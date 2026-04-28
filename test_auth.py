@@ -571,7 +571,9 @@ except Exception as e:
 try:
     errors = strings["config"]["error"]
     required_errors = [
-        "cannot_connect", "invalid_auth", "wrong_protocol",
+        "cannot_connect", "device_not_responding", "device_unreachable_network",
+        "port_blocked_local_unsupported",
+        "invalid_auth", "wrong_protocol",
         "invalid_dp_map", "cloud_fetch_failed", "cloud_auth_failed",
         "cloud_permission_expired", "cloud_region_mismatch",
         "cloud_credentials_required", "cloud_no_device_match",
