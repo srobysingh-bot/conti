@@ -44,9 +44,10 @@
       },
       "ir_select_device": {
         "title": "Select IR Device",
-        "description": "Choose an IR hub from your Smart Life account.",
+        "description": "Choose an IR hub from your Smart Life account. If your IR hub is missing from the list, enter its Tuya Device ID manually.",
         "data": {
-          "ir_device_id": "IR Device"
+          "ir_device_id": "IR Device",
+          "manual_ir_device_id": "Manual IR Device ID"
         }
       },
       "cloud_credentials": {

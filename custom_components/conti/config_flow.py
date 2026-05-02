@@ -247,7 +247,11 @@ IR_CATEGORIES = {
     "ir",
     "infrared_remote",
     "universal_remote",
+    "wf_ir",
+    "rf_ir",
 }
+
+IR_DEVICE_KEYWORDS = ("infrared", "remote")
 
 
 def _mask_key(key: str) -> str:
@@ -839,26 +843,31 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._flow_data[CONF_LOCAL_KEY] = local_key
                     if not self._flow_data.get(CONF_NAME):
                         self._flow_data[CONF_NAME] = name or selected_id
+                    selected_device = {
+                        "device_id": selected_id,
+                        "local_key": local_key,
+                        "ip": cloud_ip,
+                        "category": category,
+                        "name": name,
+                        "product_name": info.get("product_name", ""),
+                    }
                     if category:
                         self._tuya_category = category
-                    if self._is_ir_category(category):
+                    if self._is_ir_device(selected_device):
                         _LOGGER.info(
-                            "IR device detected device=%s category=%s",
+                            "IR device detected device=%s category=%s name=%s product=%s",
                             selected_id,
                             category,
+                            name,
+                            info.get("product_name", ""),
                         )
+                        await self._apply_ir_candidate(selected_device)
+                        await self.async_set_unique_id(selected_id)
+                        self._abort_if_unique_id_configured()
                         return await self.async_step_ir_category()
 
                     # Try to resolve host.
-                    await self._apply_cloud_candidate(
-                        {
-                            "device_id": selected_id,
-                            "local_key": local_key,
-                            "ip": cloud_ip,
-                            "category": category,
-                            "name": name,
-                        }
-                    )
+                    await self._apply_cloud_candidate(selected_device)
 
                     await self.async_set_unique_id(selected_id)
                     self._abort_if_unique_id_configured()
@@ -979,7 +988,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors["base"] = "cloud_no_device_match"
                 elif len(candidates) == 1:
                     selected = dict(candidates[0])
-                    if self._is_ir_category(str(selected.get("category", ""))):
+                    if self._is_ir_device(selected):
                         await self._apply_ir_candidate(selected)
                         await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
                         self._abort_if_unique_id_configured()
@@ -1069,7 +1078,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not selected:
                 errors["base"] = "cloud_no_device_match"
             else:
-                if self._is_ir_category(str(selected.get("category", ""))):
+                if self._is_ir_device(selected):
                     await self._apply_ir_candidate(selected)
                     await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
                     self._abort_if_unique_id_configured()
@@ -1314,15 +1323,43 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Return True for Tuya cloud IR hub category names."""
         return category.strip().lower() in IR_CATEGORIES
 
+    @staticmethod
+    def _is_ir_device(device: dict[str, Any]) -> bool:
+        """Return True when cloud metadata looks like a Tuya IR hub."""
+        category = str(device.get("category") or "").strip().lower()
+        name = str(device.get("name") or "").strip().lower()
+        product = str(device.get("product_name") or "").strip().lower()
+
+        if category in IR_CATEGORIES:
+            return True
+        if ContiConfigFlow._has_ir_hint(name):
+            return True
+        if ContiConfigFlow._has_ir_hint(product):
+            return True
+        return False
+
+    @staticmethod
+    def _has_ir_hint(value: str) -> bool:
+        """Return True for IR wording without matching unrelated words like air."""
+        if any(keyword in value for keyword in IR_DEVICE_KEYWORDS):
+            return True
+
+        normalized = "".join(
+            char if char.isalnum() else " "
+            for char in value
+        )
+        return " ir " in f" {normalized} "
+
     async def _apply_ir_candidate(self, candidate: dict[str, Any]) -> None:
         """Apply selected cloud candidate into flow data for IR runtime."""
         device_id = str(
             candidate.get("device_id") or candidate.get("id") or ""
         ).strip()
         self._flow_data[CONF_DEVICE_ID] = device_id
-        self._flow_data[CONF_LOCAL_KEY] = str(candidate.get("local_key", "")).strip()
-        self._flow_data[CONF_HOST] = str(candidate.get("ip", "")).strip()
+        self._flow_data[CONF_LOCAL_KEY] = ""
+        self._flow_data[CONF_HOST] = ""
         self._flow_data[CONF_DEVICE_TYPE] = DEVICE_TYPE_IR
+        self._flow_data["ir_mode"] = True
         category = str(candidate.get("category", "")).strip()
         if category:
             self._tuya_category = category
@@ -1361,7 +1398,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            selected_id = str(user_input.get("ir_device_id", "")).strip()
+            selected_id = str(
+                user_input.get("manual_ir_device_id")
+                or user_input.get("ir_device_id")
+                or ""
+            ).strip()
             selected = next(
                 (
                     device
@@ -1371,6 +1412,19 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 None,
             )
             if selected is None:
+                if selected_id:
+                    manual = {
+                        "device_id": selected_id,
+                        "name": self._flow_data.get(CONF_NAME, "") or selected_id,
+                        "category": "infrared",
+                        "local_key": "",
+                        "ip": "",
+                    }
+                    await self._apply_ir_candidate(manual)
+                    _LOGGER.info("Selected manual IR device: %s", selected_id)
+                    await self.async_set_unique_id(selected_id)
+                    self._abort_if_unique_id_configured()
+                    return await self.async_step_ir_category()
                 errors["base"] = "ir_no_device_found"
             else:
                 await self._apply_ir_candidate(selected)
@@ -1392,10 +1446,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = self._cloud_error_key(exc)
                 devices = []
 
+            _LOGGER.warning("ALL CLOUD DEVICES: %s", devices)
             ir_devices: list[dict[str, Any]] = []
             for device in devices:
                 category = str(device.get("category", "")).strip().lower()
-                if category not in IR_CATEGORIES:
+                if not self._is_ir_device(device):
                     continue
                 device_id = str(
                     device.get("device_id") or device.get("id") or ""
@@ -1424,7 +1479,16 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
             self._cloud_candidates = ir_devices
+            _LOGGER.warning("FILTERED IR DEVICES: %s", ir_devices)
             _LOGGER.info("IR devices found: %d", len(ir_devices))
+            if len(ir_devices) == 1 and "base" not in errors:
+                selected = ir_devices[0]
+                selected_id = str(selected.get("device_id", "")).strip()
+                await self._apply_ir_candidate(selected)
+                _LOGGER.info("Selected IR device: %s", selected_id)
+                await self.async_set_unique_id(selected_id)
+                self._abort_if_unique_id_configured()
+                return await self.async_step_ir_category()
             if not ir_devices and "base" not in errors:
                 errors["base"] = "ir_no_device_found"
 
@@ -1447,15 +1511,16 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 detail_parts.append(f"Category: {category}")
             choices[device_id] = f"{label} ({', '.join(detail_parts)})"
 
+        schema_fields: dict[Any, Any] = {}
+        if choices:
+            schema_fields[vol.Required("ir_device_id")] = vol.In(choices)
+            schema_fields[vol.Optional("manual_ir_device_id")] = str
+        else:
+            schema_fields[vol.Required("manual_ir_device_id")] = str
+
         return self.async_show_form(
             step_id="ir_select_device",
-            data_schema=vol.Schema(
-                {
-                    vol.Required("ir_device_id"): (
-                        vol.In(choices) if choices else str
-                    )
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
         )
 
@@ -1637,6 +1702,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Cloud path — ask for host when LAN auto-detection did not produce
         a confident single match.  Already-set host is never reached here."""
+        if self._flow_data.get("ir_mode"):
+            return await self.async_step_ir_category()
+
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -1707,6 +1775,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         First call (user_input=None): run detection, show form.
         Second call (user_input set): process form, route forward.
         """
+        if self._flow_data.get("ir_mode"):
+            return await self.async_step_ir_category()
+
         errors: dict[str, str] = {}
 
         if user_input is not None:
