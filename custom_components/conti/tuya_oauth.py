@@ -679,6 +679,13 @@ class TuyaOAuthManager:
         ]
         return await self._sharing_api_get_first(device_id, paths)
 
+    async def async_get_ir_device_remotes(self, device_id: str) -> Any:
+        """Fetch remotes already known to an IR hub through the QR session."""
+        return await self._sharing_api_get(
+            device_id,
+            f"/v2.0/infrareds/{device_id}/remotes",
+        )
+
     async def async_get_ir_brands(
         self,
         category_id: str,

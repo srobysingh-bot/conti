@@ -37,6 +37,11 @@ class TuyaIRCloud:
             if isinstance(item, dict)
         ]
 
+    async def list_device_remotes(self, device_id: str) -> list[dict[str, Any]]:
+        """List remotes already available on an IR hub."""
+        result = await self._oauth.async_get_ir_device_remotes(device_id)
+        return _normalize_remote_items(_coerce_list(result))
+
     async def list_brands(
         self, device_id: str, category: str
     ) -> list[dict[str, Any]]:
@@ -66,37 +71,11 @@ class TuyaIRCloud:
             device_id=device_id,
         )
         items = _coerce_list(result)
-        models = [
-            {
-                "id": str(
-                    item.get("remote_index")
-                    or item.get("remote_index_id")
-                    or item.get("remote_id")
-                    or item.get("id")
-                    or ""
-                ).strip(),
-                "name": str(
-                    item.get("remote_name")
-                    or item.get("model")
-                    or item.get("name")
-                    or item.get("remote_index")
-                    or item.get("remote_id")
-                    or ""
-                ).strip(),
-                "category_id": category,
-                "brand_id": brand,
-                "remote_index": str(
-                    item.get("remote_index")
-                    or item.get("remote_index_id")
-                    or item.get("remote_id")
-                    or item.get("id")
-                    or ""
-                ).strip(),
-                "raw": item,
-            }
-            for item in items
-            if isinstance(item, dict)
-        ]
+        models = _normalize_remote_items(
+            items,
+            default_category=category,
+            default_brand=brand,
+        )
         return [item for item in models if item.get("id")]
 
     async def fetch_commands(
@@ -107,7 +86,10 @@ class TuyaIRCloud:
         category_id = str(model_data.get("category_id", "")).strip()
         brand_id = str(model_data.get("brand_id", "")).strip()
         remote_index = str(
-            model_data.get("remote_index") or model_data.get("id") or ""
+            model_data.get("remote_index")
+            or model_data.get("remote_id")
+            or model_data.get("id")
+            or ""
         ).strip()
         if not category_id or not brand_id or not remote_index:
             raise ValueError("IR model must include category_id, brand_id and remote_index")
@@ -186,6 +168,66 @@ def _parse_model(model: dict[str, Any] | str) -> dict[str, Any]:
             "remote_index": parts[2],
         }
     return {"remote_index": str(model)}
+
+
+def _normalize_remote_items(
+    items: list[Any],
+    *,
+    default_category: str = "",
+    default_brand: str = "",
+) -> list[dict[str, Any]]:
+    """Normalize Tuya remote records to Conti's model shape."""
+    remotes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        remote_id = str(
+            item.get("remote_id")
+            or item.get("id")
+            or ""
+        ).strip()
+        remote_index = str(
+            item.get("remote_index")
+            or item.get("remote_index_id")
+            or remote_id
+            or ""
+        ).strip()
+        model_id = remote_index or remote_id
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        category_id = str(
+            item.get("category_id")
+            or item.get("category")
+            or default_category
+            or ""
+        ).strip()
+        brand_id = str(
+            item.get("brand_id")
+            or item.get("brand")
+            or default_brand
+            or ""
+        ).strip()
+        name = str(
+            item.get("remote_name")
+            or item.get("model")
+            or item.get("name")
+            or item.get("brand_name")
+            or model_id
+        ).strip()
+        remotes.append(
+            {
+                "id": model_id,
+                "name": name,
+                "category_id": category_id,
+                "brand_id": brand_id,
+                "remote_id": remote_id,
+                "remote_index": remote_index,
+                "raw": item,
+            }
+        )
+    return remotes
 
 
 def _normalize_commands(

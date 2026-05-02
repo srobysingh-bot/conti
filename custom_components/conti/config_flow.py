@@ -1559,7 +1559,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ir_category(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """IR setup step 1: select appliance category."""
+        """IR setup step 1: select appliance category or use remotes fallback."""
         errors: dict[str, str] = {}
         device_id = self._flow_data.get(CONF_DEVICE_ID, "")
 
@@ -1575,11 +1575,31 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._ir_category = selected
                 return await self.async_step_ir_brand()
 
-        if not self._ir_categories:
+        if not self._ir_categories and not self._ir_models:
             oauth = self._oauth_manager
             if not oauth or not oauth.is_configured:
                 errors["base"] = "ir_requires_login"
             else:
+                cloud = await self._get_ir_cloud()
+                remotes: list[dict[str, Any]] = []
+                try:
+                    remotes = await cloud.list_device_remotes(device_id)
+                    _LOGGER.info(
+                        "[IR] Remotes fetch result for device %s: count=%d",
+                        device_id,
+                        len(remotes),
+                    )
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("IR remotes fetch failed via OAuth")
+
+                if remotes:
+                    self._ir_models = remotes
+                    _LOGGER.info(
+                        "[IR] Using remotes-first fallback for device %s",
+                        device_id,
+                    )
+                    return await self.async_step_ir_model()
+
                 try:
                     _LOGGER.info(
                         "[IR] Fetching categories via OAuth for device %s",
@@ -1587,11 +1607,23 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                     categories = await oauth.async_get_ir_categories(device_id)
                     self._ir_categories = _normalize_ir_categories(categories)
+                    _LOGGER.info(
+                        "[IR] Category fetch result for device %s: count=%d",
+                        device_id,
+                        len(self._ir_categories),
+                    )
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("IR category fetch failed via OAuth")
-                    errors["base"] = "ir_library_fetch_failed"
-            if not self._ir_categories and "base" not in errors:
-                errors["base"] = "ir_library_fetch_failed"
+            if (
+                not self._ir_categories
+                and not self._ir_models
+                and "base" not in errors
+            ):
+                _LOGGER.info(
+                    "[IR] No cloud remotes or categories for device %s; falling back to learning mode",
+                    device_id,
+                )
+                return await self._async_create_ir_learning_fallback_entry()
 
         choices = {
             item["id"]: item.get("name") or item["id"]
@@ -1599,7 +1631,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if item.get("id")
         }
         if not choices and "base" not in errors:
-            errors["base"] = "ir_library_fetch_failed"
+            return await self._async_create_ir_learning_fallback_entry()
 
         return self.async_show_form(
             step_id="ir_category",
@@ -1633,7 +1665,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._ir_brands = await cloud.list_brands(device_id, category_id)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("IR brand fetch failed for %s", device_id)
-                errors["base"] = "ir_library_fetch_failed"
+                return await self._async_create_ir_learning_fallback_entry()
 
         choices = {
             item["id"]: item.get("name") or item["id"]
@@ -1641,7 +1673,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if item.get("id")
         }
         if not choices and "base" not in errors:
-            errors["base"] = "ir_library_fetch_failed"
+            _LOGGER.info(
+                "[IR] No brands for device %s category=%s; falling back to learning mode",
+                device_id,
+                category_id,
+            )
+            return await self._async_create_ir_learning_fallback_entry()
 
         return self.async_show_form(
             step_id="ir_brand",
@@ -1668,6 +1705,24 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "ir_command_not_found"
             else:
                 self._ir_model = selected
+                if not self._ir_category and selected.get("category_id"):
+                    category_id = str(selected.get("category_id", "")).strip()
+                    self._ir_category = {
+                        "id": category_id,
+                        "name": normalize_category(category_id),
+                        "raw": selected.get("raw", selected),
+                    }
+                if not self._ir_brand and selected.get("brand_id"):
+                    brand_id = str(selected.get("brand_id", "")).strip()
+                    self._ir_brand = {
+                        "id": brand_id,
+                        "name": str(
+                            selected.get("brand_name")
+                            or selected.get("brand")
+                            or brand_id
+                        ).strip(),
+                        "raw": selected.get("raw", selected),
+                    }
                 return await self.async_step_ir_fetch()
 
         if not self._ir_models:
@@ -1678,7 +1733,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("IR model fetch failed for %s", device_id)
-                errors["base"] = "ir_library_fetch_failed"
+                return await self._async_create_ir_learning_fallback_entry()
 
         choices = {
             item["id"]: item.get("name") or item["id"]
@@ -1686,7 +1741,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if item.get("id")
         }
         if not choices and "base" not in errors:
-            errors["base"] = "ir_library_fetch_failed"
+            _LOGGER.info(
+                "[IR] No remote models for device %s; falling back to learning mode",
+                device_id,
+            )
+            return await self._async_create_ir_learning_fallback_entry()
 
         warning = ""
         category_name = str(self._ir_category.get("name", "")).lower()
@@ -1710,6 +1769,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             cloud = await self._get_ir_cloud()
             commands = await cloud.fetch_commands(device_id, self._ir_model)
+            if not commands:
+                _LOGGER.info(
+                    "[IR] Remote command library empty for device %s; falling back to learning mode",
+                    device_id,
+                )
+                return await self._async_create_ir_learning_fallback_entry()
             from .ir_storage import IRStorage  # noqa: PLC0415
 
             storage = IRStorage(self.hass, device_id)
@@ -1727,7 +1792,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self._create_ir_config_entry()
         except Exception:  # noqa: BLE001
             _LOGGER.exception("IR library fetch/store failed for %s", device_id)
-            errors["base"] = "ir_library_fetch_failed"
+            return await self._async_create_ir_learning_fallback_entry()
 
         return self.async_show_form(
             step_id="ir_fetch",
@@ -2964,6 +3029,32 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title=self._flow_data[CONF_NAME],
             data=entry_data,
         )
+
+    async def _async_create_ir_learning_fallback_entry(
+        self,
+    ) -> config_entries.ConfigFlowResult:
+        """Create an IR entry with an empty library so learning can be used."""
+        from .ir_storage import IRStorage  # noqa: PLC0415
+
+        device_id = self._flow_data[CONF_DEVICE_ID]
+        if not self._ir_category:
+            self._ir_category = {"id": "learned", "name": "learned", "raw": {}}
+        if not self._ir_brand:
+            self._ir_brand = {"id": "", "name": "", "raw": {}}
+        if not self._ir_model:
+            self._ir_model = {"id": "learned", "name": "learned", "raw": {}}
+
+        storage = IRStorage(self.hass, device_id)
+        await storage.async_save_library(
+            category=str(
+                self._ir_category.get("name") or self._ir_category.get("id") or ""
+            ),
+            brand=str(self._ir_brand.get("name") or self._ir_brand.get("id") or ""),
+            model=str(self._ir_model.get("name") or self._ir_model.get("id") or ""),
+            commands={},
+        )
+        _LOGGER.info("[IR] Created learning-only IR entry for device %s", device_id)
+        return self._create_ir_config_entry()
 
     def _create_ir_config_entry(self) -> config_entries.ConfigFlowResult:
         """Build and persist an isolated IR config entry."""
