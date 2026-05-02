@@ -19,7 +19,12 @@ class TuyaIRCloud:
 
     async def list_categories(self, device_id: str) -> list[dict[str, Any]]:
         """List IR appliance categories supported by an IR hub."""
-        result = await self._api_get(f"/v1.0/infrareds/{device_id}/categories")
+        result = await self._api_get(
+            f"/v2.0/infrareds/{device_id}/categories",
+            strict=False,
+        )
+        if not result:
+            result = await self._api_get(f"/v1.0/infrareds/{device_id}/categories")
         items = _coerce_list(result)
         return [
             {
@@ -36,8 +41,18 @@ class TuyaIRCloud:
     ) -> list[dict[str, Any]]:
         """List brands for an IR category."""
         result = await self._api_get(
-            f"/v1.0/infrareds/{device_id}/categories/{category}/brands"
+            f"/v2.0/infrareds/{device_id}/categories/{category}/brands",
+            strict=False,
         )
+        if not result:
+            result = await self._api_get(
+                f"/v2.0/infrareds/{device_id}/brands?category_id={category}",
+                strict=False,
+            )
+        if not result:
+            result = await self._api_get(
+                f"/v1.0/infrareds/{device_id}/categories/{category}/brands"
+            )
         items = _coerce_list(result)
         return [
             {
@@ -54,6 +69,7 @@ class TuyaIRCloud:
     ) -> list[dict[str, Any]]:
         """List model/remote indexes for an IR brand."""
         paths = [
+            f"/v2.0/infrareds/{device_id}/remotes?category_id={category}&brand_id={brand}",
             f"/v2.0/infrareds/{device_id}/categories/{category}/brands/{brand}/remote-indexs",
             f"/v1.0/infrareds/{device_id}/categories/{category}/brands/{brand}",
         ]

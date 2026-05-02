@@ -240,6 +240,15 @@ _LOW_POWER_SENSOR_PROFILE_IDS = {
     "sensor_temp_humidity",
 }
 
+IR_CATEGORIES = {
+    "infrared",
+    "ir_remote",
+    "remote",
+    "ir",
+    "infrared_remote",
+    "universal_remote",
+}
+
 
 def _mask_key(key: str) -> str:
     """Redact a local key for safe logging — first 2 + last 2 chars."""
@@ -339,7 +348,9 @@ def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ): vol.In(
                 {
                     "smart_life": "Login with Smart Life (recommended)",
+                    "ir_device": "IR Device (Smart Life)",
                     "cloud_assisted": "Cloud-assisted (legacy)",
+                    "local_device": "Local device / Manual",
                     "manual": "Manual / Advanced",
                 }
             ),
@@ -611,11 +622,18 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             mode = user_input.get("onboarding_mode", "smart_life")
             self._onboarding_mode = mode
+            if mode == "ir_device":
+                _LOGGER.info("IR onboarding started")
+                self._flow_data[CONF_DEVICE_TYPE] = DEVICE_TYPE_IR
+                self._flow_data[CONF_HOST] = ""
+                self._flow_data[CONF_LOCAL_KEY] = ""
+                self._cloud_candidates = []
+                return await self.async_step_ir_login()
             if mode == "smart_life":
                 return await self.async_step_oauth_login()
             if mode == "cloud_assisted":
                 return await self.async_step_cloud_credentials()
-            # Manual mode: host is required to be able to connect
+            # Manual/local mode: host is required to be able to connect
             if not self._flow_data[CONF_HOST]:
                 errors["base"] = "host_required_manual"
             else:
@@ -630,6 +648,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     # ═══════════════════════════════════════════════════════════════════
     # Smart Life OAuth path — global credential storage + device picker
     # ═══════════════════════════════════════════════════════════════════
+
+    async def async_step_ir_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR path entry point: reuse Smart Life QR login."""
+        self._onboarding_mode = "ir_device"
+        return await self.async_step_oauth_login(user_input)
 
     async def async_step_oauth_login(
         self, user_input: dict[str, Any] | None = None
@@ -744,6 +769,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "access_secret": oauth.access_secret,
                     "region": oauth.region or self._selected_region,
                 }
+                if self._onboarding_mode == "ir_device":
+                    self._flow_data["uid"] = uid
+                    return await self.async_step_ir_select_device()
                 return await self.async_step_oauth_pick_device()
 
             # Not yet scanned — refresh QR token so it doesn't expire.
@@ -1284,7 +1312,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     def _is_ir_category(category: str) -> bool:
         """Return True for Tuya cloud IR hub category names."""
-        return category.strip().lower() == "infrared"
+        return category.strip().lower() in IR_CATEGORIES
 
     async def _apply_ir_candidate(self, candidate: dict[str, Any]) -> None:
         """Apply selected cloud candidate into flow data for IR runtime."""
@@ -1308,7 +1336,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Return an IR cloud wrapper from current OAuth or project credentials."""
         from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
 
-        if self._onboarding_mode == "smart_life":
+        if self._onboarding_mode in {"smart_life", "ir_device"}:
             from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
 
             if self._oauth_manager is None:
@@ -1323,6 +1351,113 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             auth["access_id"], auth["access_secret"], auth["region"]
         )
         return TuyaIRCloud(helper)
+
+    async def async_step_ir_select_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup: select an IR hub from the Smart Life account."""
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_id = str(user_input.get("ir_device_id", "")).strip()
+            selected = next(
+                (
+                    device
+                    for device in self._cloud_candidates
+                    if str(device.get("device_id", "")) == selected_id
+                ),
+                None,
+            )
+            if selected is None:
+                errors["base"] = "ir_no_device_found"
+            else:
+                await self._apply_ir_candidate(selected)
+                _LOGGER.info("Selected IR device: %s", selected_id)
+                await self.async_set_unique_id(selected_id)
+                self._abort_if_unique_id_configured()
+                return await self.async_step_ir_category()
+
+        if not self._cloud_candidates:
+            oauth = TuyaOAuthManager(self.hass)
+            await oauth.async_load()
+            if not oauth.is_configured:
+                return await self.async_step_ir_login()
+
+            try:
+                devices = await oauth.async_list_devices()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.exception("IR device list fetch failed")
+                errors["base"] = self._cloud_error_key(exc)
+                devices = []
+
+            ir_devices: list[dict[str, Any]] = []
+            for device in devices:
+                category = str(device.get("category", "")).strip().lower()
+                if category not in IR_CATEGORIES:
+                    continue
+                device_id = str(
+                    device.get("device_id") or device.get("id") or ""
+                ).strip()
+                if not device_id:
+                    continue
+                ir_devices.append(
+                    {
+                        "device_id": device_id,
+                        "name": device.get("name") or device.get("product_name") or "",
+                        "category": category,
+                        "ip": (
+                            device.get("ip")
+                            or device.get("local_ip")
+                            or device.get("lan_ip")
+                            or ""
+                        ),
+                        "room": (
+                            device.get("room_name")
+                            or device.get("room")
+                            or device.get("location")
+                            or ""
+                        ),
+                        "local_key": "",
+                    }
+                )
+
+            self._cloud_candidates = ir_devices
+            _LOGGER.info("IR devices found: %d", len(ir_devices))
+            if not ir_devices and "base" not in errors:
+                errors["base"] = "ir_no_device_found"
+
+        choices: dict[str, str] = {}
+        for device in self._cloud_candidates:
+            device_id = str(device.get("device_id", "")).strip()
+            if not device_id:
+                continue
+            label = str(device.get("name") or "IR hub").strip()
+            ip = str(device.get("ip", "")).strip()
+            room = str(device.get("room", "")).strip()
+            category = str(device.get("category", "")).strip()
+            detail_parts = []
+            if room:
+                detail_parts.append(room)
+            if ip:
+                detail_parts.append(ip)
+            detail_parts.append(f"ID: {device_id}")
+            if category:
+                detail_parts.append(f"Category: {category}")
+            choices[device_id] = f"{label} ({', '.join(detail_parts)})"
+
+        return self.async_show_form(
+            step_id="ir_select_device",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ir_device_id"): (
+                        vol.In(choices) if choices else str
+                    )
+                }
+            ),
+            errors=errors,
+        )
 
     async def async_step_ir_category(
         self, user_input: dict[str, Any] | None = None

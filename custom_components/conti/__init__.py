@@ -125,13 +125,18 @@ def _register_ir_services(hass: HomeAssistant) -> None:
         )
 
         device_id = str(call.data["device_id"]).strip()
-        action = str(call.data["action"]).strip()
+        action = str(call.data.get("command") or call.data.get("action") or "").strip()
+        if not action:
+            raise ValueError("command required")
         for entry_data in hass.data.get(DOMAIN, {}).values():
             if (
                 isinstance(entry_data, dict)
                 and entry_data.get("device_id") == device_id
                 and entry_data.get(_IR_MANAGER_KEY) is not None
             ):
+                storage = entry_data.get("ir_storage")
+                if storage is not None and await storage.async_get_command(action) is None:
+                    raise HomeAssistantError("ir_command_not_found")
                 try:
                     await entry_data[_IR_MANAGER_KEY].send_ir_command(
                         device_id, action
@@ -155,7 +160,8 @@ def _register_ir_services(hass: HomeAssistant) -> None:
         schema=vol.Schema(
             {
                 vol.Required("device_id"): str,
-                vol.Required("action"): str,
+                vol.Optional("command"): str,
+                vol.Optional("action"): str,
             }
         ),
     )

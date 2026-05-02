@@ -8,8 +8,8 @@ send_ir_command:
       required: true
       selector:
         text:
-    action:
-      name: Action
+    command:
+      name: Command
       description: Stored IR command action, such as power or swing_vertical_on.
       required: true
       selector:

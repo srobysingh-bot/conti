@@ -13,7 +13,7 @@
         },
         "data_description": {
           "host": "Local IP address of the device on your home network. Leave blank in Smart Life / cloud-assisted mode — Conti will try to detect it automatically.",
-          "onboarding_mode": "Smart Life: log in once, devices auto-discovered. Cloud-assisted (legacy): enter project credentials per session. Manual: enter credentials yourself (advanced)."
+          "onboarding_mode": "Smart Life: log in once, devices auto-discovered. IR Device: add a Tuya IR hub and store its command library locally. Cloud-assisted (legacy): enter project credentials per session. Manual: enter credentials yourself (advanced)."
         }
       },
       "oauth_login": {
@@ -40,6 +40,13 @@
         "description": "Choose a device from your Smart Life account to add. Conti will auto-fill credentials and attempt local control.",
         "data": {
           "cloud_device_id": "Device"
+        }
+      },
+      "ir_select_device": {
+        "title": "Select IR Device",
+        "description": "Choose an IR hub from your Smart Life account.",
+        "data": {
+          "ir_device_id": "IR Device"
         }
       },
       "cloud_credentials": {
@@ -180,6 +187,7 @@
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
       "incomplete_cct_map": "This light looks like a warm/cool (CCT) device, but the mapping is missing brightness and/or colour temperature. Use Guided Learn or Manual Edit before finishing.",
       "ir_library_fetch_failed": "Could not fetch or store the Tuya IR command library. Check cloud access and try again.",
+      "ir_no_device_found": "No IR devices found.\n\nMake sure:\n- The device is added in Smart Life\n- The device category is IR remote\n- You are using the same Smart Life account",
       "ir_command_not_found": "The selected IR command, category, brand, or model was not found.",
       "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
       "ir_learning_failed": "IR learning failed. Make sure the remote was captured and try again.",
