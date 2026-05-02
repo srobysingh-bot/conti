@@ -254,6 +254,51 @@ IR_CATEGORIES = {
 IR_DEVICE_KEYWORDS = ("infrared", "remote")
 
 
+def normalize_category(cat: str) -> str:
+    """Normalize IR category labels for stable UI choices."""
+    return cat.strip().lower()
+
+
+def _coerce_ir_category_list(payload: Any) -> list[Any]:
+    """Coerce Tuya IR category payloads into a list."""
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("list", "items", "result", "records", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _normalize_ir_categories(payload: Any) -> list[dict[str, Any]]:
+    """Normalize and deduplicate Tuya IR category records."""
+    categories: dict[str, dict[str, Any]] = {}
+    for item in _coerce_ir_category_list(payload):
+        if isinstance(item, dict):
+            raw_id = str(item.get("category_id") or item.get("id") or "").strip()
+            raw_name = str(item.get("category_name") or item.get("name") or raw_id).strip()
+            normalized = normalize_category(raw_name or raw_id)
+            category_id = raw_id or normalized
+            raw = item
+        else:
+            normalized = normalize_category(str(item))
+            category_id = normalized
+            raw = item
+
+        if not normalized:
+            continue
+        categories.setdefault(
+            normalized,
+            {
+                "id": category_id,
+                "name": normalized,
+                "raw": raw,
+            },
+        )
+    return list(categories.values())
+
+
 def _mask_key(key: str) -> str:
     """Redact a local key for safe logging — first 2 + last 2 chars."""
     if len(key) <= 4:
@@ -1531,11 +1576,21 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_ir_brand()
 
         if not self._ir_categories:
-            try:
-                cloud = await self._get_ir_cloud()
-                self._ir_categories = await cloud.list_categories(device_id)
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("IR category fetch failed for %s", device_id)
+            oauth = self._oauth_manager
+            if not oauth or not oauth.is_configured:
+                errors["base"] = "ir_requires_login"
+            else:
+                try:
+                    _LOGGER.info(
+                        "[IR] Fetching categories via OAuth for device %s",
+                        device_id,
+                    )
+                    categories = await oauth.async_get_ir_categories(device_id)
+                    self._ir_categories = _normalize_ir_categories(categories)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("IR category fetch failed via OAuth")
+                    errors["base"] = "ir_library_fetch_failed"
+            if not self._ir_categories and "base" not in errors:
                 errors["base"] = "ir_library_fetch_failed"
 
         choices = {
