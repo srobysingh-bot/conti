@@ -80,6 +80,9 @@ from .const import (
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
     CONF_LOCAL_KEY,
+    CONF_IR_BRAND,
+    CONF_IR_CATEGORY,
+    CONF_IR_MODEL,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
     CONF_LOW_POWER_DEVICE,
@@ -98,10 +101,12 @@ from .const import (
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
     DEVICE_TYPE_LIGHT,
+    DEVICE_TYPE_IR,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
+    RUNTIME_CHANNEL_IR,
     RUNTIME_CHANNEL_LOCAL,
     SUPPORTED_DEVICE_TYPES,
     SUPPORTED_VERSIONS,
@@ -567,6 +572,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._onboarding_mode: str = "manual"
         self._host_resolution_note: str = ""
         self._low_power_sensor: bool = False
+        self._ir_categories: list[dict[str, Any]] = []
+        self._ir_brands: list[dict[str, Any]] = []
+        self._ir_models: list[dict[str, Any]] = []
+        self._ir_category: dict[str, Any] = {}
+        self._ir_brand: dict[str, Any] = {}
+        self._ir_model: dict[str, Any] = {}
         # Smart Life QR login state
         self._qr_code_url: str = ""
         self._qr_code_token: str = ""
@@ -802,6 +813,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._flow_data[CONF_NAME] = name or selected_id
                     if category:
                         self._tuya_category = category
+                    if self._is_ir_category(category):
+                        _LOGGER.info(
+                            "IR device detected device=%s category=%s",
+                            selected_id,
+                            category,
+                        )
+                        return await self.async_step_ir_category()
 
                     # Try to resolve host.
                     await self._apply_cloud_candidate(
@@ -933,6 +951,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors["base"] = "cloud_no_device_match"
                 elif len(candidates) == 1:
                     selected = dict(candidates[0])
+                    if self._is_ir_category(str(selected.get("category", ""))):
+                        await self._apply_ir_candidate(selected)
+                        await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
+                        self._abort_if_unique_id_configured()
+                        return await self.async_step_ir_category()
                     try:
                         refreshed = await self._cloud_get_credentials(
                             selected.get("device_id", "")
@@ -1018,6 +1041,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not selected:
                 errors["base"] = "cloud_no_device_match"
             else:
+                if self._is_ir_category(str(selected.get("category", ""))):
+                    await self._apply_ir_candidate(selected)
+                    await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
+                    self._abort_if_unique_id_configured()
+                    return await self.async_step_ir_category()
+
                 if not str(selected.get("local_key", "")).strip():
                     try:
                         refreshed = await self._cloud_get_credentials(selected_id)
@@ -1251,6 +1280,218 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         category = str(candidate.get("category", "")).strip()
         if category:
             self._tuya_category = category
+
+    @staticmethod
+    def _is_ir_category(category: str) -> bool:
+        """Return True for Tuya cloud IR hub category names."""
+        return category.strip().lower() == "infrared"
+
+    async def _apply_ir_candidate(self, candidate: dict[str, Any]) -> None:
+        """Apply selected cloud candidate into flow data for IR runtime."""
+        device_id = str(
+            candidate.get("device_id") or candidate.get("id") or ""
+        ).strip()
+        self._flow_data[CONF_DEVICE_ID] = device_id
+        self._flow_data[CONF_LOCAL_KEY] = str(candidate.get("local_key", "")).strip()
+        self._flow_data[CONF_HOST] = str(candidate.get("ip", "")).strip()
+        self._flow_data[CONF_DEVICE_TYPE] = DEVICE_TYPE_IR
+        category = str(candidate.get("category", "")).strip()
+        if category:
+            self._tuya_category = category
+        if not self._flow_data.get(CONF_NAME):
+            self._flow_data[CONF_NAME] = (
+                str(candidate.get("name", "")).strip() or device_id
+            )
+        _LOGGER.info("IR device detected device=%s category=%s", device_id, category)
+
+    async def _get_ir_cloud(self) -> Any:
+        """Return an IR cloud wrapper from current OAuth or project credentials."""
+        from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
+
+        if self._onboarding_mode == "smart_life":
+            from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+            if self._oauth_manager is None:
+                self._oauth_manager = TuyaOAuthManager(self.hass)
+                await self._oauth_manager.async_load()
+            return TuyaIRCloud(self._oauth_manager.get_schema_helper())
+
+        auth = self._cloud_auth
+        from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+        helper = TuyaCloudSchemaHelper(
+            auth["access_id"], auth["access_secret"], auth["region"]
+        )
+        return TuyaIRCloud(helper)
+
+    async def async_step_ir_category(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup step 1: select appliance category."""
+        errors: dict[str, str] = {}
+        device_id = self._flow_data.get(CONF_DEVICE_ID, "")
+
+        if user_input is not None:
+            category_id = str(user_input.get("ir_category", "")).strip()
+            selected = next(
+                (item for item in self._ir_categories if item.get("id") == category_id),
+                None,
+            )
+            if selected is None:
+                errors["base"] = "ir_command_not_found"
+            else:
+                self._ir_category = selected
+                return await self.async_step_ir_brand()
+
+        if not self._ir_categories:
+            try:
+                cloud = await self._get_ir_cloud()
+                self._ir_categories = await cloud.list_categories(device_id)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("IR category fetch failed for %s", device_id)
+                errors["base"] = "ir_library_fetch_failed"
+
+        choices = {
+            item["id"]: item.get("name") or item["id"]
+            for item in self._ir_categories
+            if item.get("id")
+        }
+        if not choices and "base" not in errors:
+            errors["base"] = "ir_library_fetch_failed"
+
+        return self.async_show_form(
+            step_id="ir_category",
+            data_schema=vol.Schema({vol.Required("ir_category"): vol.In(choices) if choices else str}),
+            errors=errors,
+        )
+
+    async def async_step_ir_brand(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup step 2: select appliance brand."""
+        errors: dict[str, str] = {}
+        device_id = self._flow_data.get(CONF_DEVICE_ID, "")
+        category_id = str(self._ir_category.get("id", "")).strip()
+
+        if user_input is not None:
+            brand_id = str(user_input.get("ir_brand", "")).strip()
+            selected = next(
+                (item for item in self._ir_brands if item.get("id") == brand_id),
+                None,
+            )
+            if selected is None:
+                errors["base"] = "ir_command_not_found"
+            else:
+                self._ir_brand = selected
+                return await self.async_step_ir_model()
+
+        if not self._ir_brands:
+            try:
+                cloud = await self._get_ir_cloud()
+                self._ir_brands = await cloud.list_brands(device_id, category_id)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("IR brand fetch failed for %s", device_id)
+                errors["base"] = "ir_library_fetch_failed"
+
+        choices = {
+            item["id"]: item.get("name") or item["id"]
+            for item in self._ir_brands
+            if item.get("id")
+        }
+        if not choices and "base" not in errors:
+            errors["base"] = "ir_library_fetch_failed"
+
+        return self.async_show_form(
+            step_id="ir_brand",
+            data_schema=vol.Schema({vol.Required("ir_brand"): vol.In(choices) if choices else str}),
+            errors=errors,
+        )
+
+    async def async_step_ir_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup step 3: select appliance model/remote index."""
+        errors: dict[str, str] = {}
+        device_id = self._flow_data.get(CONF_DEVICE_ID, "")
+        category_id = str(self._ir_category.get("id", "")).strip()
+        brand_id = str(self._ir_brand.get("id", "")).strip()
+
+        if user_input is not None:
+            model_id = str(user_input.get("ir_model", "")).strip()
+            selected = next(
+                (item for item in self._ir_models if item.get("id") == model_id),
+                None,
+            )
+            if selected is None:
+                errors["base"] = "ir_command_not_found"
+            else:
+                self._ir_model = selected
+                return await self.async_step_ir_fetch()
+
+        if not self._ir_models:
+            try:
+                cloud = await self._get_ir_cloud()
+                self._ir_models = await cloud.list_models(
+                    device_id, category_id, brand_id
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("IR model fetch failed for %s", device_id)
+                errors["base"] = "ir_library_fetch_failed"
+
+        choices = {
+            item["id"]: item.get("name") or item["id"]
+            for item in self._ir_models
+            if item.get("id")
+        }
+        if not choices and "base" not in errors:
+            errors["base"] = "ir_library_fetch_failed"
+
+        warning = ""
+        category_name = str(self._ir_category.get("name", "")).lower()
+        if category_name in {"ac", "air conditioner"} or category_id in {"5"}:
+            warning = "Learned commands may override full device state (temp/mode/fan)"
+
+        return self.async_show_form(
+            step_id="ir_model",
+            data_schema=vol.Schema({vol.Required("ir_model"): vol.In(choices) if choices else str}),
+            description_placeholders={"ac_warning": warning},
+            errors=errors,
+        )
+
+    async def async_step_ir_fetch(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup step 4: fetch and store the selected library."""
+        errors: dict[str, str] = {}
+        device_id = self._flow_data.get(CONF_DEVICE_ID, "")
+
+        try:
+            cloud = await self._get_ir_cloud()
+            commands = await cloud.fetch_commands(device_id, self._ir_model)
+            from .ir_storage import IRStorage  # noqa: PLC0415
+
+            storage = IRStorage(self.hass, device_id)
+            await storage.async_save_library(
+                category=str(self._ir_category.get("name") or self._ir_category.get("id") or ""),
+                brand=str(self._ir_brand.get("name") or self._ir_brand.get("id") or ""),
+                model=str(self._ir_model.get("name") or self._ir_model.get("id") or ""),
+                commands=commands,
+            )
+            _LOGGER.info(
+                "IR library fetch result device=%s commands=%d",
+                device_id,
+                len(commands),
+            )
+            return self._create_ir_config_entry()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("IR library fetch/store failed for %s", device_id)
+            errors["base"] = "ir_library_fetch_failed"
+
+        return self.async_show_form(
+            step_id="ir_fetch",
+            data_schema=vol.Schema({}),
+            errors=errors,
+        )
 
     # ═══════════════════════════════════════════════════════════════════
     # Step (cloud only): Confirm host when auto-detection could not fill it
@@ -2476,6 +2717,41 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=entry_data,
         )
 
+    def _create_ir_config_entry(self) -> config_entries.ConfigFlowResult:
+        """Build and persist an isolated IR config entry."""
+        entry_data: dict[str, Any] = {
+            CONF_DEVICE_ID: self._flow_data[CONF_DEVICE_ID],
+            CONF_HOST: self._flow_data.get(CONF_HOST, ""),
+            CONF_PORT: self._flow_data.get(CONF_PORT, DEFAULT_PORT),
+            CONF_LOCAL_KEY: self._flow_data.get(CONF_LOCAL_KEY, ""),
+            CONF_PROTOCOL_VERSION: "auto",
+            CONF_DEVICE_TYPE: DEVICE_TYPE_IR,
+            CONF_DP_MAP: "{}",
+            CONF_MAPPING_SOURCE: "ir_library",
+            CONF_MAPPING_CONFIDENCE: 1.0,
+            CONF_RUNTIME_CHANNEL: RUNTIME_CHANNEL_IR,
+            CONF_TUYA_CATEGORY: self._tuya_category or "infrared",
+            CONF_IR_CATEGORY: str(
+                self._ir_category.get("name") or self._ir_category.get("id") or ""
+            ),
+            CONF_IR_BRAND: str(
+                self._ir_brand.get("name") or self._ir_brand.get("id") or ""
+            ),
+            CONF_IR_MODEL: str(
+                self._ir_model.get("name") or self._ir_model.get("id") or ""
+            ),
+        }
+
+        if self._cloud_auth.get("access_id") and self._cloud_auth.get("access_secret"):
+            entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
+            entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth["access_secret"]
+            entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get("region", "eu")
+
+        return self.async_create_entry(
+            title=self._flow_data[CONF_NAME],
+            data=entry_data,
+        )
+
 
 # =========================================================================
 # Options flow — verbose logging, DP map editing, re-discovery
@@ -2488,6 +2764,9 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         self._entry = config_entry
         self._pending_options: dict[str, Any] | None = None
+        self._ir_learn_action: str = ""
+        self._ir_learning_time: str = ""
+        self._ir_overwrite_allowed: bool = False
 
     # -- Init step: device settings + navigate to external-ON ---------------
 
@@ -2495,6 +2774,9 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Device settings form with option to configure external-ON."""
+        if self._entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
+            return await self.async_step_ir_options(user_input)
+
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -2699,6 +2981,139 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
             step_id="external_on",
             data_schema=vol.Schema(schema_fields),
         )
+
+    async def async_step_ir_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR options menu."""
+        if user_input is not None:
+            if user_input.get("ir_action") == "add_missing_command":
+                return await self.async_step_ir_learn()
+            return self.async_create_entry(title="", data=dict(self._entry.options))
+
+        return self.async_show_form(
+            step_id="ir_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ir_action", default="add_missing_command"): vol.In(
+                        {
+                            "add_missing_command": "Add missing command",
+                            "finish": "Finish",
+                        }
+                    )
+                }
+            ),
+        )
+
+    async def async_step_ir_learn(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Start learning mode for a missing IR command."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            action = str(user_input.get("ir_command_action", "")).strip()
+            overwrite = bool(user_input.get("overwrite", False))
+            if not action:
+                errors["base"] = "ir_learning_failed"
+            else:
+                try:
+                    device_id = self._entry.data[CONF_DEVICE_ID]
+                    from .ir_actions import normalize_ir_action  # noqa: PLC0415
+                    from .ir_storage import IRStorage  # noqa: PLC0415
+
+                    storage = IRStorage(self.hass, device_id)
+                    canonical_action = normalize_ir_action(action)
+                    if await storage.async_get_command(canonical_action) and not overwrite:
+                        errors["base"] = "ir_command_exists"
+                    else:
+                        session = await self._create_ir_learning_session(device_id)
+                        self._ir_learn_action = canonical_action
+                        self._ir_overwrite_allowed = overwrite
+                        self._ir_learning_time = await session.start_learning(device_id)
+                        return await self.async_step_ir_learn_capture()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("IR learning start failed")
+                    errors["base"] = "ir_learning_failed"
+
+        warning = ""
+        category = str(self._entry.data.get(CONF_IR_CATEGORY, "")).lower()
+        if category in {"ac", "air conditioner"}:
+            warning = "Learned commands may override full device state (temp/mode/fan)"
+
+        return self.async_show_form(
+            step_id="ir_learn",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ir_command_action", default="swing_vertical_on"): str,
+                    vol.Optional("overwrite", default=False): bool,
+                }
+            ),
+            description_placeholders={"ac_warning": warning},
+            errors=errors,
+        )
+
+    async def async_step_ir_learn_capture(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Capture and store the learned IR code."""
+        errors: dict[str, str] = {}
+        device_id = self._entry.data[CONF_DEVICE_ID]
+
+        if user_input is not None:
+            try:
+                session = await self._create_ir_learning_session(device_id)
+                payload = await session.capture_learned_payload(
+                    device_id,
+                    self._ir_learning_time,
+                )
+                await session.learn_command(
+                    device_id,
+                    self._ir_learn_action,
+                    payload,
+                    overwrite=self._ir_overwrite_allowed,
+                )
+                return self.async_create_entry(
+                    title="",
+                    data=dict(self._entry.options),
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("IR learning capture failed")
+                errors["base"] = "ir_learning_failed"
+
+        return self.async_show_form(
+            step_id="ir_learn_capture",
+            data_schema=vol.Schema({}),
+            description_placeholders={"action": self._ir_learn_action},
+            errors=errors,
+        )
+
+    async def _create_ir_learning_session(self, device_id: str) -> Any:
+        """Create an IR learning session using stored cloud credentials."""
+        from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
+        from .ir_learning import IRLearningSession  # noqa: PLC0415
+        from .ir_storage import IRStorage  # noqa: PLC0415
+
+        storage = IRStorage(self.hass, device_id)
+
+        access_id = str(self._entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
+        access_secret = str(self._entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
+        region = str(self._entry.data.get(CONF_CLOUD_REGION, "eu")).strip() or "eu"
+        if access_id and access_secret:
+            from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+            cloud = TuyaIRCloud(TuyaCloudSchemaHelper(access_id, access_secret, region))
+            return IRLearningSession(storage, cloud=cloud)
+
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        oauth = TuyaOAuthManager(self.hass, entry_id=self._entry.entry_id)
+        await oauth.async_load()
+        if not oauth.is_configured:
+            oauth = TuyaOAuthManager(self.hass)
+            await oauth.async_load()
+        cloud = TuyaIRCloud(oauth.get_schema_helper()) if oauth.is_configured else None
+        return IRLearningSession(storage, cloud=cloud)
 
     # -- Helpers ------------------------------------------------------------
 

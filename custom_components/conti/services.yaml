@@ -1,0 +1,16 @@
+send_ir_command:
+  name: Send IR command
+  description: Send a stored IR command for a Conti IR device.
+  fields:
+    device_id:
+      name: Device ID
+      description: Tuya IR hub device ID.
+      required: true
+      selector:
+        text:
+    action:
+      name: Action
+      description: Stored IR command action, such as power or swing_vertical_on.
+      required: true
+      selector:
+        text:

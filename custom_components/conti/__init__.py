@@ -21,9 +21,12 @@ import json
 import logging
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
 from .const import (
@@ -50,6 +53,7 @@ from .const import (
     PLATFORMS,
     RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
+    RUNTIME_CHANNEL_IR,
     STORAGE_VERSION,
 )
 from .dp_mapping import mask_key
@@ -59,6 +63,8 @@ _LOGGER = logging.getLogger(__name__)
 _MANAGER_KEY = "manager"
 _REF_COUNT_KEY = "manager_ref_count"
 _OAUTH_KEY = "oauth_manager"
+_IR_MANAGER_KEY = "ir_manager"
+_IR_SERVICES_REGISTERED = "ir_services_registered"
 
 
 def _parse_dp_map(entry: ConfigEntry) -> dict[str, Any]:
@@ -107,13 +113,104 @@ async def _save_dps_cache(
     await store.async_save({"dps": dps})
 
 
+def _register_ir_services(hass: HomeAssistant) -> None:
+    """Register isolated IR services once."""
+    if hass.data[DOMAIN].get(_IR_SERVICES_REGISTERED):
+        return
+
+    async def _handle_send_ir(call: Any) -> None:
+        from .ir_manager import (  # noqa: PLC0415
+            IRCommandNotConfigured,
+            IRSendError,
+        )
+
+        device_id = str(call.data["device_id"]).strip()
+        action = str(call.data["action"]).strip()
+        for entry_data in hass.data.get(DOMAIN, {}).values():
+            if (
+                isinstance(entry_data, dict)
+                and entry_data.get("device_id") == device_id
+                and entry_data.get(_IR_MANAGER_KEY) is not None
+            ):
+                try:
+                    await entry_data[_IR_MANAGER_KEY].send_ir_command(
+                        device_id, action
+                    )
+                    return
+                except IRCommandNotConfigured as exc:
+                    raise HomeAssistantError("ir_command_not_found") from exc
+                except IRSendError as exc:
+                    raise HomeAssistantError("ir_send_failed") from exc
+        _LOGGER.warning(
+            "IR command requested for unknown/unloaded IR device %s action=%s",
+            device_id,
+            action,
+        )
+        raise HomeAssistantError("ir_command_not_found")
+
+    hass.services.async_register(
+        DOMAIN,
+        "send_ir_command",
+        _handle_send_ir,
+        schema=vol.Schema(
+            {
+                vol.Required("device_id"): str,
+                vol.Required("action"): str,
+            }
+        ),
+    )
+    hass.data[DOMAIN][_IR_SERVICES_REGISTERED] = True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a single Conti device from a config entry."""
-    # Lazy imports to avoid cascading import errors during config-flow loading
+    hass.data.setdefault(DOMAIN, {})
+
+    if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
+        from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
+        from .ir_manager import IRManager  # noqa: PLC0415
+        from .ir_storage import IRStorage  # noqa: PLC0415
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        device_id = entry.data[CONF_DEVICE_ID]
+        storage = IRStorage(hass, device_id)
+        await storage.async_load()
+
+        oauth = TuyaOAuthManager(hass, entry_id=entry.entry_id)
+        await oauth.async_load()
+        if not oauth.is_configured:
+            oauth_global = TuyaOAuthManager(hass)
+            await oauth_global.async_load()
+            oauth = oauth_global
+
+        cloud = TuyaIRCloud(oauth.get_schema_helper()) if oauth.is_configured else None
+        if cloud is None:
+            access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
+            access_secret = str(entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
+            region = str(entry.data.get(CONF_CLOUD_REGION, "eu")).strip() or "eu"
+            if access_id and access_secret:
+                from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+                cloud = TuyaIRCloud(
+                    TuyaCloudSchemaHelper(access_id, access_secret, region)
+                )
+        ir_manager = IRManager(storage, cloud)
+        hass.data[DOMAIN][entry.entry_id] = {
+            "device_id": device_id,
+            _IR_MANAGER_KEY: ir_manager,
+            "ir_storage": storage,
+        }
+        _register_ir_services(hass)
+        _LOGGER.info(
+            "Set up Conti IR device %s (category=%s)",
+            device_id,
+            entry.data.get(CONF_TUYA_CATEGORY, "infrared"),
+        )
+        return True
+
+    # Lazy imports to avoid cascading import errors during config-flow loading.
     from .coordinator import ContiCoordinator  # noqa: PLC0415
     from .device_manager import DeviceManager  # noqa: PLC0415
-
-    hass.data.setdefault(DOMAIN, {})
 
     # --- Apply verbose logging from options --------------------------------
     if entry.options.get(CONF_VERBOSE_LOGGING, False):
@@ -349,6 +446,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         entry_data = hass.data[DOMAIN].pop(entry.entry_id, {})
         device_id = entry_data.get("device_id") or entry.data.get(CONF_DEVICE_ID)
+        if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
+            _LOGGER.info("Unloaded Conti IR device %s", device_id)
+            return True
 
         manager = hass.data[DOMAIN].get(_MANAGER_KEY)
         runtime_channel = entry.data.get(CONF_RUNTIME_CHANNEL, "local")

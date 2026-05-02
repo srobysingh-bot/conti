@@ -31,6 +31,9 @@ CONF_CLOUD_ACCESS_ID: Final = "cloud_access_id"
 CONF_CLOUD_ACCESS_SECRET: Final = "cloud_access_secret"
 CONF_CLOUD_REGION: Final = "cloud_region"
 CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
+CONF_IR_CATEGORY: Final = "ir_category"
+CONF_IR_BRAND: Final = "ir_brand"
+CONF_IR_MODEL: Final = "ir_model"
 
 # OAuth / Smart Life global cloud account
 CONF_OAUTH_CONFIGURED: Final = "oauth_configured"
@@ -69,6 +72,7 @@ DEVICE_TYPE_FAN: Final = "fan"
 DEVICE_TYPE_CLIMATE: Final = "climate"
 DEVICE_TYPE_SWITCH: Final = "switch"
 DEVICE_TYPE_SENSOR: Final = "sensor"
+DEVICE_TYPE_IR: Final = "ir"
 
 SUPPORTED_DEVICE_TYPES: Final = [
     DEVICE_TYPE_LIGHT,
@@ -83,6 +87,7 @@ SUPPORTED_DEVICE_TYPES: Final = [
 # ---------------------------------------------------------------------------
 RUNTIME_CHANNEL_LOCAL: Final = "local"
 RUNTIME_CHANNEL_CLOUD_SENSOR: Final = "cloud_sensor"
+RUNTIME_CHANNEL_IR: Final = "ir"
 
 DEFAULT_PORT: Final = 6668
 DEFAULT_PROTOCOL_VERSION: Final = "auto"

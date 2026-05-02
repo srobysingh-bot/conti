@@ -118,6 +118,32 @@
         "data": {
           "learn_action": "Action"
         }
+      },
+      "ir_category": {
+        "title": "IR Setup \u2014 Select Category",
+        "description": "Choose the appliance category for this IR remote.",
+        "data": {
+          "ir_category": "Category"
+        }
+      },
+      "ir_brand": {
+        "title": "IR Setup \u2014 Select Brand",
+        "description": "Choose the appliance brand.",
+        "data": {
+          "ir_brand": "Brand"
+        }
+      },
+      "ir_model": {
+        "title": "IR Setup \u2014 Select Model",
+        "description": "Choose the matching remote model.\n\n{ac_warning}",
+        "data": {
+          "ir_model": "Model"
+        }
+      },
+      "ir_fetch": {
+        "title": "IR Setup \u2014 Fetch Library",
+        "description": "Conti is fetching and storing the IR command library.",
+        "data": {}
       }
     },
     "abort": {
@@ -153,6 +179,11 @@
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
       "incomplete_cct_map": "This light looks like a warm/cool (CCT) device, but the mapping is missing brightness and/or colour temperature. Use Guided Learn or Manual Edit before finishing.",
+      "ir_library_fetch_failed": "Could not fetch or store the Tuya IR command library. Check cloud access and try again.",
+      "ir_command_not_found": "The selected IR command, category, brand, or model was not found.",
+      "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
+      "ir_learning_failed": "IR learning failed. Make sure the remote was captured and try again.",
+      "ir_send_failed": "IR command sending failed on all available paths.",
       "unknown": "An unexpected error occurred."
     }
   },
@@ -187,10 +218,35 @@
           "night_brightness_pct": "Night \u2014 brightness (%)",
           "night_kelvin": "Night \u2014 colour temperature (K)"
         }
+      },
+      "ir_options": {
+        "title": "IR Device Options",
+        "description": "Manage learned commands for this IR device.",
+        "data": {
+          "ir_action": "Action"
+        }
+      },
+      "ir_learn": {
+        "title": "Add Missing IR Command",
+        "description": "Enter the action name, then press Submit to start IR learning mode.\n\n{ac_warning}",
+        "data": {
+          "ir_command_action": "Command action",
+          "overwrite": "Overwrite existing command"
+        },
+        "data_description": {
+          "ir_command_action": "Example: swing_vertical_on"
+        }
+      },
+      "ir_learn_capture": {
+        "title": "Capture IR Command",
+        "description": "Point the original remote at the IR hub and press the button for **{action}**, then click Submit.",
+        "data": {}
       }
     },
     "error": {
-      "invalid_dp_map": "The DP mapping JSON is not valid."
+      "invalid_dp_map": "The DP mapping JSON is not valid.",
+      "ir_learning_failed": "IR learning failed. Make sure the captured payload is not empty or too short.",
+      "ir_command_exists": "That IR command already exists. Enable overwrite to replace it."
     }
   }
 }
