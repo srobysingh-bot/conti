@@ -671,6 +671,123 @@ class TuyaOAuthManager:
         self._sync_from_helper(helper)
         return result
 
+    async def async_get_ir_categories(self, device_id: str) -> Any:
+        """Fetch IR categories through the Smart Life QR sharing session."""
+        paths = [
+            f"/v2.0/infrareds/{device_id}/categories",
+            f"/v1.0/infrareds/{device_id}/categories",
+        ]
+        return await self._sharing_api_get_first(device_id, paths)
+
+    async def async_get_ir_brands(
+        self,
+        category_id: str,
+        *,
+        device_id: str = "",
+    ) -> Any:
+        """Fetch IR brands through the Smart Life QR sharing session."""
+        paths = []
+        if device_id:
+            paths.extend(
+                [
+                    f"/v2.0/infrareds/{device_id}/categories/{category_id}/brands",
+                    f"/v2.0/infrareds/{device_id}/brands?category_id={category_id}",
+                    f"/v1.0/infrareds/{device_id}/categories/{category_id}/brands",
+                ]
+            )
+        paths.append(f"/v2.0/infrareds/brands?category_id={category_id}")
+        return await self._sharing_api_get_first(device_id, paths)
+
+    async def async_get_ir_remotes(
+        self,
+        category_id: str,
+        brand_id: str,
+        *,
+        device_id: str = "",
+    ) -> Any:
+        """Fetch IR remote models through the Smart Life QR sharing session."""
+        paths = []
+        if device_id:
+            paths.extend(
+                [
+                    f"/v2.0/infrareds/{device_id}/remotes?category_id={category_id}&brand_id={brand_id}",
+                    f"/v2.0/infrareds/{device_id}/categories/{category_id}/brands/{brand_id}/remote-indexs",
+                    f"/v1.0/infrareds/{device_id}/categories/{category_id}/brands/{brand_id}",
+                ]
+            )
+        paths.append(
+            f"/v2.0/infrareds/remotes?category_id={category_id}&brand_id={brand_id}"
+        )
+        return await self._sharing_api_get_first(device_id, paths)
+
+    async def async_get_ir_remote_commands(
+        self,
+        device_id: str,
+        category_id: str,
+        brand_id: str,
+        remote_index: str,
+    ) -> Any:
+        """Fetch IR command rules through the Smart Life QR sharing session."""
+        paths = [
+            (
+                f"/v2.0/infrareds/{device_id}/categories/{category_id}/brands/"
+                f"{brand_id}/remotes/{remote_index}/rules"
+            ),
+            (
+                f"/v1.0/infrareds/{device_id}/categories/{category_id}/brands/"
+                f"{brand_id}/remotes/{remote_index}/rules"
+            ),
+        ]
+        return await self._sharing_api_get_first(device_id, paths)
+
+    async def async_send_ir_command(
+        self,
+        device_id: str,
+        command: dict[str, Any],
+    ) -> bool:
+        """Send an IR command through the Smart Life QR sharing session."""
+        payload = command.get("payload", command)
+        if not isinstance(payload, dict):
+            return False
+
+        path = str(payload.get("path", "")).strip()
+        body = payload.get("body")
+        if path and isinstance(body, dict):
+            result = await self._sharing_api_post(device_id, path, body)
+            return result is not None
+
+        body = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"path", "method"}
+        }
+        if not body:
+            return False
+
+        if payload.get("remote_id"):
+            path = f"/v2.0/infrareds/{device_id}/remotes/{payload['remote_id']}/raw/command"
+        else:
+            path = f"/v2.0/infrareds/{device_id}/testing/raw/command"
+        result = await self._sharing_api_post(device_id, path, body)
+        return result is not None
+
+    async def async_start_ir_learning(self, device_id: str) -> Any:
+        """Start IR learning mode through the Smart Life QR sharing session."""
+        path = f"/v1.0/infrareds/{device_id}/learning-state?state=true"
+        return await self._sharing_api_put(device_id, path, {})
+
+    async def async_capture_ir_learning_code(
+        self,
+        device_id: str,
+        learning_time: str,
+    ) -> Any:
+        """Fetch a learned IR code through the Smart Life QR sharing session."""
+        path = (
+            f"/v1.0/infrareds/{device_id}/learning-codes"
+            f"?learning_time={learning_time}"
+        )
+        return await self._sharing_api_get(device_id, path)
+
     def get_schema_helper(self) -> Any:
         """Return the underlying TuyaCloudSchemaHelper (for schema_to_dp_map)."""
         return self._get_helper()
@@ -718,6 +835,186 @@ class TuyaOAuthManager:
         functions = [_serialize_entry(c, f) for c, f in func_attr.items()]
         status = [_serialize_entry(c, s) for c, s in sr_attr.items()]
         return {"functions": functions, "status": status}
+
+    async def _sharing_api_get_first(
+        self,
+        device_id: str,
+        paths: list[str],
+    ) -> Any:
+        """Return the first non-empty response from the QR sharing API."""
+        last_result: Any = None
+        for path in paths:
+            result = await self._sharing_api_get(device_id, path)
+            if result not in (None, {}, []):
+                return result
+            last_result = result
+        return last_result
+
+    async def _sharing_api_get(self, device_id: str, path: str) -> Any:
+        """Make an authenticated GET request using the QR sharing session."""
+        return await self._sharing_api_request(device_id, "GET", path)
+
+    async def _sharing_api_post(
+        self,
+        device_id: str,
+        path: str,
+        body: dict[str, Any],
+    ) -> Any:
+        """Make an authenticated POST request using the QR sharing session."""
+        return await self._sharing_api_request(device_id, "POST", path, body=body)
+
+    async def _sharing_api_put(
+        self,
+        device_id: str,
+        path: str,
+        body: dict[str, Any],
+    ) -> Any:
+        """Make an authenticated PUT request using the QR sharing session."""
+        return await self._sharing_api_request(device_id, "PUT", path, body=body)
+
+    async def _sharing_api_request(
+        self,
+        device_id: str,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        """Call Tuya's encrypted Device Sharing API with the QR session."""
+        if not await self.async_ensure_token():
+            _LOGGER.error(
+                "Tuya OAuth IR API skipped: token unavailable device_id=%s path=%s",
+                device_id,
+                path,
+            )
+            return None
+        if not self.is_qr_mode or not self._refresh_token or not self._terminal_id:
+            _LOGGER.error(
+                "Tuya OAuth IR API skipped: Smart Life QR session incomplete "
+                "device_id=%s path=%s response_body=%s",
+                device_id,
+                path,
+                {
+                    "qr_mode": self.is_qr_mode,
+                    "has_refresh_token": bool(self._refresh_token),
+                    "has_terminal_id": bool(self._terminal_id),
+                },
+            )
+            return None
+
+        try:
+            manager = self._build_sharing_manager()
+        except ImportError:
+            _LOGGER.error(
+                "Tuya OAuth IR API unavailable: tuya-device-sharing-sdk is not installed "
+                "device_id=%s path=%s response_body=%s",
+                device_id,
+                path,
+                "missing tuya_sharing package",
+            )
+            return None
+
+        def _request() -> Any:
+            api = manager.customer_api
+            if method == "GET":
+                return api.get(path)
+            if method == "POST":
+                return api.post(path, None, body or {})
+            if method == "PUT":
+                return api.put(path, body or {})
+            raise ValueError(f"Unsupported sharing API method {method}")
+
+        try:
+            response = await self._hass.async_add_executor_job(_request)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.error(
+                "Tuya OAuth IR API failed: device_id=%s path=%s response_body=%s",
+                device_id,
+                path,
+                exc,
+            )
+            return None
+
+        self._sync_from_sharing_manager(manager)
+        if not isinstance(response, dict):
+            _LOGGER.error(
+                "Tuya OAuth IR API returned non-dict response: device_id=%s path=%s response_body=%s",
+                device_id,
+                path,
+                response,
+            )
+            return None
+
+        if not response.get("success"):
+            _LOGGER.error(
+                "Tuya OAuth IR API returned failure: device_id=%s path=%s response_body=%s",
+                device_id,
+                path,
+                response,
+            )
+            return None
+
+        _LOGGER.debug(
+            "Tuya OAuth IR API OK: device_id=%s path=%s response_body=%s",
+            device_id,
+            path,
+            response,
+        )
+        return response.get("result", {})
+
+    def _build_sharing_manager(self) -> Any:
+        """Build a tuya_sharing Manager from the stored QR session."""
+        from tuya_sharing import Manager  # noqa: PLC0415
+
+        from .cloud_schema import TUYA_HA_CLIENT_ID  # noqa: PLC0415
+
+        endpoint = self._endpoint_url or "https://openapi.tuyaeu.com"
+        token_response = {
+            "uid": self._uid,
+            "access_token": self._access_token,
+            "refresh_token": self._refresh_token,
+            "expire_time": max(0, int(self._token_expiry - time.time())),
+            "t": int(time.time() * 1000),
+        }
+        return Manager(
+            client_id=TUYA_HA_CLIENT_ID,
+            user_code=self._user_code,
+            terminal_id=self._terminal_id,
+            end_point=endpoint,
+            token_response=token_response,
+        )
+
+    def _sync_from_sharing_manager(self, manager: Any) -> None:
+        """Persist refreshed QR tokens from the tuya_sharing Manager."""
+        token_info = getattr(getattr(manager, "customer_api", None), "token_info", None)
+        if token_info is None:
+            return
+
+        access_token = str(getattr(token_info, "access_token", "") or "")
+        refresh_token = str(getattr(token_info, "refresh_token", "") or "")
+        expiry_ms = float(getattr(token_info, "expire_time", 0.0) or 0.0)
+        token_expiry = expiry_ms / 1000 if expiry_ms > 10_000_000_000 else expiry_ms
+        uid = str(getattr(token_info, "uid", "") or "")
+
+        changed = (
+            access_token
+            and (
+                access_token != self._access_token
+                or refresh_token != self._refresh_token
+                or token_expiry != self._token_expiry
+            )
+        )
+        if access_token:
+            self._access_token = access_token
+        if refresh_token:
+            self._refresh_token = refresh_token
+        if token_expiry:
+            self._token_expiry = token_expiry
+        if uid:
+            self._uid = uid
+
+        if changed:
+            self._hass.async_create_task(self.async_save())
 
     def _get_helper(self) -> Any:
         """Lazy-create and return the TuyaCloudSchemaHelper."""

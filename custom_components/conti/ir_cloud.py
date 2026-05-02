@@ -1,4 +1,9 @@
-"""Tuya IR OpenAPI wrapper for Conti."""
+"""Tuya IR OAuth wrapper for Conti.
+
+IR onboarding uses the Smart Life QR session managed by TuyaOAuthManager.
+Do not route IR library or command calls through signed Tuya OpenAPI helpers:
+QR-login accounts do not have access_id/access_secret.
+"""
 
 from __future__ import annotations
 
@@ -7,24 +12,20 @@ import time
 from typing import Any
 
 from .ir_actions import normalize_ir_action
+from .tuya_oauth import TuyaOAuthManager
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class TuyaIRCloud:
-    """Small wrapper around the existing Tuya cloud helper for IR APIs."""
+    """Small wrapper around the Smart Life OAuth session for IR APIs."""
 
-    def __init__(self, cloud_helper: Any) -> None:
-        self._helper = cloud_helper
+    def __init__(self, oauth_manager: TuyaOAuthManager) -> None:
+        self._oauth = oauth_manager
 
     async def list_categories(self, device_id: str) -> list[dict[str, Any]]:
         """List IR appliance categories supported by an IR hub."""
-        result = await self._api_get(
-            f"/v2.0/infrareds/{device_id}/categories",
-            strict=False,
-        )
-        if not result:
-            result = await self._api_get(f"/v1.0/infrareds/{device_id}/categories")
+        result = await self._oauth.async_get_ir_categories(device_id)
         items = _coerce_list(result)
         return [
             {
@@ -40,19 +41,10 @@ class TuyaIRCloud:
         self, device_id: str, category: str
     ) -> list[dict[str, Any]]:
         """List brands for an IR category."""
-        result = await self._api_get(
-            f"/v2.0/infrareds/{device_id}/categories/{category}/brands",
-            strict=False,
+        result = await self._oauth.async_get_ir_brands(
+            category,
+            device_id=device_id,
         )
-        if not result:
-            result = await self._api_get(
-                f"/v2.0/infrareds/{device_id}/brands?category_id={category}",
-                strict=False,
-            )
-        if not result:
-            result = await self._api_get(
-                f"/v1.0/infrareds/{device_id}/categories/{category}/brands"
-            )
         items = _coerce_list(result)
         return [
             {
@@ -68,46 +60,44 @@ class TuyaIRCloud:
         self, device_id: str, category: str, brand: str
     ) -> list[dict[str, Any]]:
         """List model/remote indexes for an IR brand."""
-        paths = [
-            f"/v2.0/infrareds/{device_id}/remotes?category_id={category}&brand_id={brand}",
-            f"/v2.0/infrareds/{device_id}/categories/{category}/brands/{brand}/remote-indexs",
-            f"/v1.0/infrareds/{device_id}/categories/{category}/brands/{brand}",
+        result = await self._oauth.async_get_ir_remotes(
+            category,
+            brand,
+            device_id=device_id,
+        )
+        items = _coerce_list(result)
+        models = [
+            {
+                "id": str(
+                    item.get("remote_index")
+                    or item.get("remote_index_id")
+                    or item.get("remote_id")
+                    or item.get("id")
+                    or ""
+                ).strip(),
+                "name": str(
+                    item.get("remote_name")
+                    or item.get("model")
+                    or item.get("name")
+                    or item.get("remote_index")
+                    or item.get("remote_id")
+                    or ""
+                ).strip(),
+                "category_id": category,
+                "brand_id": brand,
+                "remote_index": str(
+                    item.get("remote_index")
+                    or item.get("remote_index_id")
+                    or item.get("remote_id")
+                    or item.get("id")
+                    or ""
+                ).strip(),
+                "raw": item,
+            }
+            for item in items
+            if isinstance(item, dict)
         ]
-        last: list[dict[str, Any]] = []
-        for path in paths:
-            result = await self._api_get(path, strict=False)
-            items = _coerce_list(result)
-            if items:
-                last = [
-                    {
-                        "id": str(
-                            item.get("remote_index")
-                            or item.get("remote_index_id")
-                            or item.get("id")
-                            or ""
-                        ).strip(),
-                        "name": str(
-                            item.get("remote_name")
-                            or item.get("model")
-                            or item.get("name")
-                            or item.get("remote_index")
-                            or ""
-                        ).strip(),
-                        "category_id": category,
-                        "brand_id": brand,
-                        "remote_index": str(
-                            item.get("remote_index")
-                            or item.get("remote_index_id")
-                            or item.get("id")
-                            or ""
-                        ).strip(),
-                        "raw": item,
-                    }
-                    for item in items
-                    if isinstance(item, dict)
-                ]
-                break
-        return [item for item in last if item.get("id")]
+        return [item for item in models if item.get("id")]
 
     async def fetch_commands(
         self, device_id: str, model: dict[str, Any] | str
@@ -122,18 +112,12 @@ class TuyaIRCloud:
         if not category_id or not brand_id or not remote_index:
             raise ValueError("IR model must include category_id, brand_id and remote_index")
 
-        path = (
-            f"/v2.0/infrareds/{device_id}/categories/{category_id}/brands/"
-            f"{brand_id}/remotes/{remote_index}/rules"
+        result = await self._oauth.async_get_ir_remote_commands(
+            device_id,
+            category_id,
+            brand_id,
+            remote_index,
         )
-        result = await self._api_get(path, strict=False)
-        if not result:
-            path = (
-                f"/v1.0/infrareds/{device_id}/categories/{category_id}/brands/"
-                f"{brand_id}/remotes/{remote_index}/rules"
-            )
-            result = await self._api_get(path, strict=True)
-
         commands = _normalize_commands(
             result,
             category_id=category_id,
@@ -149,39 +133,12 @@ class TuyaIRCloud:
         return commands
 
     async def send_command(self, device_id: str, command: dict[str, Any]) -> bool:
-        """Send a stored command through Tuya Cloud."""
-        payload = command.get("payload", command)
-        if not isinstance(payload, dict):
-            return False
-
-        path = str(payload.get("path", "")).strip()
-        body = payload.get("body")
-        if path and isinstance(body, dict):
-            result = await self._api_post(path, body, strict=False)
-            return result is not None
-
-        body = {
-            key: value
-            for key, value in payload.items()
-            if key not in {"path", "method"}
-        }
-        if not body:
-            return False
-
-        if payload.get("remote_id"):
-            path = f"/v2.0/infrareds/{device_id}/remotes/{payload['remote_id']}/raw/command"
-        else:
-            path = f"/v2.0/infrareds/{device_id}/testing/raw/command"
-        result = await self._api_post(path, body, strict=False)
-        return result is not None
+        """Send a stored command through the Smart Life OAuth session."""
+        return await self._oauth.async_send_ir_command(device_id, command)
 
     async def start_learning(self, device_id: str) -> str:
         """Enable IR learning mode and return the learning timestamp."""
-        result = await self._api_put(
-            f"/v1.0/infrareds/{device_id}/learning-state?state=true",
-            {},
-            strict=True,
-        )
+        result = await self._oauth.async_start_ir_learning(device_id)
         learning_time = ""
         if isinstance(result, dict):
             learning_time = str(result.get("t") or result.get("learning_time") or "")
@@ -194,9 +151,9 @@ class TuyaIRCloud:
         self, device_id: str, learning_time: str
     ) -> dict[str, Any] | None:
         """Query the IR code captured during learning mode."""
-        result = await self._api_get(
-            f"/v1.0/infrareds/{device_id}/learning-codes?learning_time={learning_time}",
-            strict=True,
+        result = await self._oauth.async_capture_ir_learning_code(
+            device_id,
+            learning_time,
         )
         if not isinstance(result, dict):
             return None
@@ -205,69 +162,6 @@ class TuyaIRCloud:
         if not success or not code:
             return None
         return {"code": code, "learning_time": learning_time}
-
-    async def _api_get(
-        self, path: str, strict: bool = True
-    ) -> dict[str, Any] | list[Any] | None:
-        ensure = getattr(self._helper, "_ensure_token", None)
-        if ensure is not None and not await ensure(strict=strict):
-            return None
-        api_get = getattr(self._helper, "_api_get")
-        return await api_get(path, strict=strict)
-
-    async def _api_post(
-        self, path: str, body: dict[str, Any], strict: bool = True
-    ) -> dict[str, Any] | None:
-        ensure = getattr(self._helper, "_ensure_token", None)
-        if ensure is not None and not await ensure(strict=strict):
-            return None
-        api_post = getattr(self._helper, "_api_post")
-        return await api_post(path, body, strict=strict)
-
-    async def _api_put(
-        self, path: str, body: dict[str, Any], strict: bool = True
-    ) -> dict[str, Any] | None:
-        """Make an authenticated PUT request using the existing helper."""
-        import json as _json  # noqa: PLC0415
-
-        import aiohttp  # noqa: PLC0415
-
-        ensure = getattr(self._helper, "_ensure_token", None)
-        if ensure is not None and not await ensure(strict=strict):
-            return None
-
-        token = getattr(self._helper, "_token", "")
-        base_url = getattr(self._helper, "_base_url", "")
-        sign_request = getattr(self._helper, "_sign_request")
-        body_str = _json.dumps(body) if body else ""
-        headers = sign_request("PUT", path, body_str, token)
-        headers["Content-Type"] = "application/json"
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.put(
-                    f"{base_url}{path}",
-                    headers=headers,
-                    data=body_str if body_str else None,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                    ssl=True,
-                ) as resp:
-                    data = await resp.json()
-        except Exception as exc:  # noqa: BLE001
-            if strict:
-                raise
-            _LOGGER.debug("Tuya cloud PUT %s error: %s", path, exc)
-            return None
-
-        if isinstance(data, dict) and data.get("success"):
-            result = data.get("result", {})
-            if isinstance(result, dict):
-                result.setdefault("t", data.get("t"))
-            return result if isinstance(result, dict) else {"result": result, "t": data.get("t")}
-
-        if strict:
-            raise RuntimeError(f"Tuya cloud PUT failed for {path}: {data}")
-        return None
 
 
 def _coerce_list(payload: Any) -> list[Any]:

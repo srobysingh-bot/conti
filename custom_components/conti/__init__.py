@@ -189,17 +189,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await oauth_global.async_load()
             oauth = oauth_global
 
-        cloud = TuyaIRCloud(oauth.get_schema_helper()) if oauth.is_configured else None
-        if cloud is None:
-            access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
-            access_secret = str(entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
-            region = str(entry.data.get(CONF_CLOUD_REGION, "eu")).strip() or "eu"
-            if access_id and access_secret:
-                from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
-
-                cloud = TuyaIRCloud(
-                    TuyaCloudSchemaHelper(access_id, access_secret, region)
-                )
+        cloud = TuyaIRCloud(oauth) if oauth.is_configured else None
         ir_manager = IRManager(storage, cloud)
         hass.data[DOMAIN][entry.entry_id] = {
             "device_id": device_id,

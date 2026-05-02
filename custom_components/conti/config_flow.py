@@ -672,10 +672,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         The user only selects a data-centre region.  On submit a QR code
         is generated and the flow moves to the scan step.
         """
-        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
-
-        oauth = TuyaOAuthManager(self.hass)
-        await oauth.async_load()
+        oauth = await self._get_oauth_manager()
 
         errors: dict[str, str] = {}
 
@@ -745,8 +742,6 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             QrErrorCorrectionLevel,
         )
 
-        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
-
         # Guard: if no QR token the user arrived here out of sequence.
         if not self._qr_code_token:
             _LOGGER.warning(
@@ -758,8 +753,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             # User clicked Submit — poll for scan confirmation.
-            oauth = TuyaOAuthManager(self.hass)
-            await oauth.async_load()
+            oauth = await self._get_oauth_manager()
 
             _LOGGER.debug(
                 "Polling QR login for token prefix=%s…", self._qr_code_token[:8]
@@ -817,8 +811,6 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Smart Life device picker — auto-discovered from cloud account."""
-        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
-
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -827,8 +819,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "cloud_no_device_match"
             else:
                 # Fetch full device info (with local_key).
-                oauth = TuyaOAuthManager(self.hass)
-                await oauth.async_load()
+                oauth = await self._get_oauth_manager()
                 info = await oauth.async_get_device_info(selected_id)
 
                 if info is None:
@@ -901,8 +892,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         return await self.async_step_review()
 
         # Fetch device list from stored OAuth.
-        oauth = TuyaOAuthManager(self.hass)
-        await oauth.async_load()
+        oauth = await self._get_oauth_manager()
         if not oauth.is_configured:
             return await self.async_step_oauth_login()
 
@@ -1369,32 +1359,30 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
         _LOGGER.info("IR device detected device=%s category=%s", device_id, category)
 
+    async def _get_oauth_manager(self) -> Any:
+        """Return the cached Smart Life OAuth manager for this flow."""
+        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+        if self._oauth_manager is None:
+            self._oauth_manager = TuyaOAuthManager(self.hass)
+            await self._oauth_manager.async_load()
+        return self._oauth_manager
+
     async def _get_ir_cloud(self) -> Any:
-        """Return an IR cloud wrapper from current OAuth or project credentials."""
+        """Return an IR cloud wrapper backed by the Smart Life QR session."""
         from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
 
-        if self._onboarding_mode in {"smart_life", "ir_device"}:
-            from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
-
-            if self._oauth_manager is None:
-                self._oauth_manager = TuyaOAuthManager(self.hass)
-                await self._oauth_manager.async_load()
-            return TuyaIRCloud(self._oauth_manager.get_schema_helper())
-
-        auth = self._cloud_auth
-        from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
-
-        helper = TuyaCloudSchemaHelper(
-            auth["access_id"], auth["access_secret"], auth["region"]
-        )
-        return TuyaIRCloud(helper)
+        oauth = await self._get_oauth_manager()
+        if not oauth.is_configured:
+            raise RuntimeError("Smart Life OAuth session is required for IR setup")
+        if self._flow_data.get("ir_mode") and not oauth.is_qr_mode:
+            raise RuntimeError("IR setup requires a Smart Life QR OAuth session")
+        return TuyaIRCloud(oauth)
 
     async def async_step_ir_select_device(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """IR setup: select an IR hub from the Smart Life account."""
-        from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
-
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -1434,8 +1422,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_ir_category()
 
         if not self._cloud_candidates:
-            oauth = TuyaOAuthManager(self.hass)
-            await oauth.async_load()
+            oauth = await self._get_oauth_manager()
             if not oauth.is_configured:
                 return await self.async_step_ir_login()
 
@@ -2948,11 +2935,6 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
         }
 
-        if self._cloud_auth.get("access_id") and self._cloud_auth.get("access_secret"):
-            entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
-            entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth["access_secret"]
-            entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get("region", "eu")
-
         return self.async_create_entry(
             title=self._flow_data[CONF_NAME],
             data=entry_data,
@@ -3295,22 +3277,12 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def _create_ir_learning_session(self, device_id: str) -> Any:
-        """Create an IR learning session using stored cloud credentials."""
+        """Create an IR learning session using the Smart Life QR session."""
         from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
         from .ir_learning import IRLearningSession  # noqa: PLC0415
         from .ir_storage import IRStorage  # noqa: PLC0415
 
         storage = IRStorage(self.hass, device_id)
-
-        access_id = str(self._entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
-        access_secret = str(self._entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")).strip()
-        region = str(self._entry.data.get(CONF_CLOUD_REGION, "eu")).strip() or "eu"
-        if access_id and access_secret:
-            from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
-
-            cloud = TuyaIRCloud(TuyaCloudSchemaHelper(access_id, access_secret, region))
-            return IRLearningSession(storage, cloud=cloud)
-
         from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
 
         oauth = TuyaOAuthManager(self.hass, entry_id=self._entry.entry_id)
@@ -3318,7 +3290,7 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         if not oauth.is_configured:
             oauth = TuyaOAuthManager(self.hass)
             await oauth.async_load()
-        cloud = TuyaIRCloud(oauth.get_schema_helper()) if oauth.is_configured else None
+        cloud = TuyaIRCloud(oauth) if oauth.is_configured else None
         return IRLearningSession(storage, cloud=cloud)
 
     # -- Helpers ------------------------------------------------------------

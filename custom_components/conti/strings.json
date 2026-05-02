@@ -187,7 +187,7 @@
       "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
       "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
       "incomplete_cct_map": "This light looks like a warm/cool (CCT) device, but the mapping is missing brightness and/or colour temperature. Use Guided Learn or Manual Edit before finishing.",
-      "ir_library_fetch_failed": "Could not fetch or store the Tuya IR command library. Check cloud access and try again.",
+      "ir_library_fetch_failed": "Unable to fetch IR library. Device may be offline, unsupported, or not linked to this Smart Life account.",
       "ir_no_device_found": "No IR devices found.\n\nMake sure:\n- The device is added in Smart Life\n- The device category is IR remote\n- You are using the same Smart Life account",
       "ir_command_not_found": "The selected IR command, category, brand, or model was not found.",
       "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
