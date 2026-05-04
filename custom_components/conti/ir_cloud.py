@@ -7,6 +7,7 @@ QR-login accounts do not have access_id/access_secret.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -25,9 +26,9 @@ class TuyaIRCloud:
 
     async def list_categories(self, device_id: str) -> list[dict[str, Any]]:
         """List IR appliance categories supported by an IR hub."""
-        result = await self._oauth.async_get_ir_categories(device_id)
+        result = await _retry_ir_api(self._oauth.async_get_ir_categories, device_id)
         items = _coerce_list(result)
-        return [
+        categories = [
             {
                 "id": str(item.get("category_id") or item.get("id") or "").strip(),
                 "name": str(item.get("category_name") or item.get("name") or "").strip(),
@@ -36,17 +37,22 @@ class TuyaIRCloud:
             for item in items
             if isinstance(item, dict)
         ]
+        _LOGGER.info("IR: Categories found=%d device=%s", len(categories), device_id)
+        return categories
 
     async def list_device_remotes(self, device_id: str) -> list[dict[str, Any]]:
         """List remotes already available on an IR hub."""
-        result = await self._oauth.async_get_ir_device_remotes(device_id)
-        return _normalize_remote_items(_coerce_list(result))
+        result = await _retry_ir_api(self._oauth.async_get_ir_device_remotes, device_id)
+        remotes = _normalize_remote_items(_coerce_list(result))
+        _LOGGER.info("IR: Remotes found=%d device=%s", len(remotes), device_id)
+        return remotes
 
     async def list_brands(
         self, device_id: str, category: str
     ) -> list[dict[str, Any]]:
         """List brands for an IR category."""
-        result = await self._oauth.async_get_ir_brands(
+        result = await _retry_ir_api(
+            self._oauth.async_get_ir_brands,
             category,
             device_id=device_id,
         )
@@ -65,7 +71,8 @@ class TuyaIRCloud:
         self, device_id: str, category: str, brand: str
     ) -> list[dict[str, Any]]:
         """List model/remote indexes for an IR brand."""
-        result = await self._oauth.async_get_ir_remotes(
+        result = await _retry_ir_api(
+            self._oauth.async_get_ir_remotes,
             category,
             brand,
             device_id=device_id,
@@ -94,7 +101,8 @@ class TuyaIRCloud:
         if not category_id or not brand_id or not remote_index:
             raise ValueError("IR model must include category_id, brand_id and remote_index")
 
-        result = await self._oauth.async_get_ir_remote_commands(
+        result = await _retry_ir_api(
+            self._oauth.async_get_ir_remote_commands,
             device_id,
             category_id,
             brand_id,
@@ -129,6 +137,14 @@ class TuyaIRCloud:
         _LOGGER.info("IR learning mode started device=%s", device_id)
         return learning_time
 
+    async def stop_learning(self, device_id: str) -> None:
+        """Disable IR learning mode."""
+        stop = getattr(self._oauth, "async_stop_ir_learning", None)
+        if stop is None:
+            return
+        await stop(device_id)
+        _LOGGER.info("IR learning mode stopped device=%s", device_id)
+
     async def capture_learning_code(
         self, device_id: str, learning_time: str
     ) -> dict[str, Any] | None:
@@ -144,6 +160,23 @@ class TuyaIRCloud:
         if not success or not code:
             return None
         return {"code": code, "learning_time": learning_time}
+
+
+async def _retry_ir_api(call: Any, *args: Any, attempts: int = 2, **kwargs: Any) -> Any:
+    """Retry flaky Tuya IR reads once before falling back."""
+    last_result: Any = None
+    for attempt in range(attempts):
+        try:
+            result = await call(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("IR API call failed attempt=%d/%d: %s", attempt + 1, attempts, exc)
+            result = None
+        if result not in (None, {}, []):
+            return result
+        last_result = result
+        if attempt + 1 < attempts:
+            await asyncio.sleep(0.5)
+    return last_result
 
 
 def _coerce_list(payload: Any) -> list[Any]:

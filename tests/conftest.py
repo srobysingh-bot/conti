@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Stub the 'homeassistant' namespace so imports of custom_components.conti
 # succeed outside a real Home Assistant environment.
@@ -25,6 +27,7 @@ _HA_MODULES = [
     "homeassistant.helpers.device_registry",
     "homeassistant.helpers.storage",
     "homeassistant.components",
+    "homeassistant.components.remote",
     "homeassistant.components.climate",
     "homeassistant.components.fan",
     "homeassistant.components.light",
@@ -48,8 +51,6 @@ if "tinytuya" not in sys.modules:
     _tinytuya_mock = MagicMock()
     _tinytuya_mock.CONTROL = 7  # real tinytuya constant for CONTROL cmd
     sys.modules["tinytuya"] = _tinytuya_mock
-
-import pytest
 
 
 @pytest.fixture

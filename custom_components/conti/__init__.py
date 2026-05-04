@@ -197,6 +197,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "ir_storage": storage,
         }
         _register_ir_services(hass)
+        await hass.config_entries.async_forward_entry_setups(entry, ["remote"])
         _LOGGER.info(
             "Set up Conti IR device %s (category=%s)",
             device_id,

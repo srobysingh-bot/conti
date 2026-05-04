@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from .ir_cloud import TuyaIRCloud
 from .ir_storage import IRStorage
@@ -44,11 +46,15 @@ class IRLearningSession:
         """Capture a learned payload from Tuya cloud."""
         if self._cloud is None:
             raise IRLearningError("No IR cloud handler configured")
-        payload = await self._cloud.capture_learning_code(device_id, learning_time)
-        if not payload:
-            raise IRLearningError("Captured IR payload is empty")
-        self._validate_payload(payload)
-        return payload
+        try:
+            await asyncio.sleep(4)
+            payload = await self._cloud.capture_learning_code(device_id, learning_time)
+            if not payload:
+                raise IRLearningError("Captured IR payload is empty")
+            self._validate_payload(payload)
+            return payload
+        finally:
+            await self._cloud.stop_learning(device_id)
 
     async def learn_command(
         self,

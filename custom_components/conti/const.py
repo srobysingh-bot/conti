@@ -102,7 +102,7 @@ DEFAULT_SCAN_INTERVAL: Final = 10  # seconds
 # ---------------------------------------------------------------------------
 # Platforms to forward
 # ---------------------------------------------------------------------------
-PLATFORMS: Final = ["light", "switch", "sensor", "fan", "climate"]
+PLATFORMS: Final = ["light", "switch", "sensor", "fan", "climate", "remote"]
 
 # ---------------------------------------------------------------------------
 # Storage

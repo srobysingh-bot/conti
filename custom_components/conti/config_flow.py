@@ -1585,9 +1585,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 try:
                     remotes = await cloud.list_device_remotes(device_id)
                     _LOGGER.info(
-                        "[IR] Remotes fetch result for device %s: count=%d",
-                        device_id,
+                        "IR: Remotes found=%d device=%s",
                         len(remotes),
+                        device_id,
                     )
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("IR remotes fetch failed via OAuth")
@@ -1619,8 +1619,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 and not self._ir_models
                 and "base" not in errors
             ):
-                _LOGGER.info(
-                    "[IR] No cloud remotes or categories for device %s; falling back to learning mode",
+                _LOGGER.warning(
+                    "IR: No library found, switching to learning mode device=%s",
                     device_id,
                 )
                 return await self._async_create_ir_learning_fallback_entry()
@@ -1674,7 +1674,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         if not choices and "base" not in errors:
             _LOGGER.info(
-                "[IR] No brands for device %s category=%s; falling back to learning mode",
+                "IR: No brands for device %s category=%s; switching to learning mode",
                 device_id,
                 category_id,
             )
@@ -1742,7 +1742,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         if not choices and "base" not in errors:
             _LOGGER.info(
-                "[IR] No remote models for device %s; falling back to learning mode",
+                "IR: No remote models for device %s; switching to learning mode",
                 device_id,
             )
             return await self._async_create_ir_learning_fallback_entry()
@@ -1771,7 +1771,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             commands = await cloud.fetch_commands(device_id, self._ir_model)
             if not commands:
                 _LOGGER.info(
-                    "[IR] Remote command library empty for device %s; falling back to learning mode",
+                    "IR: No library found, switching to learning mode device=%s",
                     device_id,
                 )
                 return await self._async_create_ir_learning_fallback_entry()
