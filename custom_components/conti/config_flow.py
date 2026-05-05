@@ -276,7 +276,13 @@ def _normalize_ir_categories(payload: Any) -> list[dict[str, Any]]:
     categories: dict[str, dict[str, Any]] = {}
     for item in _coerce_ir_category_list(payload):
         if isinstance(item, dict):
-            raw_id = str(item.get("category_id") or item.get("id") or "").strip()
+            raw_id = str(
+                item.get("category")
+                or item.get("category_code")
+                or item.get("category_id")
+                or item.get("id")
+                or ""
+            ).strip()
             raw_name = str(item.get("category_name") or item.get("name") or raw_id).strip()
             normalized = normalize_category(raw_name or raw_id)
             category_id = raw_id or normalized
@@ -286,10 +292,10 @@ def _normalize_ir_categories(payload: Any) -> list[dict[str, Any]]:
             category_id = normalized
             raw = item
 
-        if not normalized:
+        if not category_id:
             continue
         categories.setdefault(
-            normalized,
+            category_id,
             {
                 "id": category_id,
                 "name": normalized,
@@ -1424,6 +1430,85 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise RuntimeError("IR setup requires a Smart Life QR OAuth session")
         return TuyaIRCloud(oauth)
 
+    async def _async_try_ir_category_brand_remotes(
+        self,
+        device_id: str,
+        cloud: Any,
+    ) -> bool:
+        """Try Smart Life's category -> brand -> remotes IR library path."""
+        for category in self._ir_categories:
+            raw_category = category.get("raw")
+            if isinstance(raw_category, dict):
+                category_id = str(
+                    raw_category.get("category")
+                    or raw_category.get("category_code")
+                    or raw_category.get("category_id")
+                    or category.get("id")
+                    or ""
+                ).strip()
+            else:
+                category_id = str(category.get("id", "")).strip()
+            if not category_id:
+                continue
+            try:
+                _LOGGER.warning("IR FLOW: trying category=%s", category_id)
+                brands = await cloud.list_brands(device_id, category_id)
+                _LOGGER.warning("IR DEBUG: brands=%s", brands)
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception(
+                    "IR brand fetch failed for %s category=%s",
+                    device_id,
+                    category_id,
+                )
+                continue
+
+            if not brands:
+                continue
+
+            for brand in brands:
+                raw_brand = brand.get("raw")
+                if isinstance(raw_brand, dict):
+                    brand_id = str(
+                        raw_brand.get("brand_id")
+                        or raw_brand.get("brand_code")
+                        or raw_brand.get("brand")
+                        or brand.get("id")
+                        or ""
+                    ).strip()
+                else:
+                    brand_id = str(brand.get("id", "")).strip()
+                if not brand_id:
+                    continue
+                try:
+                    _LOGGER.warning("IR FLOW: trying brand=%s", brand_id)
+                    remotes = await cloud.list_models(device_id, category_id, brand_id)
+                    _LOGGER.warning("IR DEBUG: remotes=%s", remotes)
+                    _LOGGER.warning("IR FLOW: remotes result=%s", remotes)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception(
+                        "IR model fetch failed for %s category=%s brand=%s",
+                        device_id,
+                        category_id,
+                        brand_id,
+                    )
+                    continue
+
+                if remotes:
+                    self._ir_category = category
+                    self._ir_brand = brand
+                    self._ir_brands = brands
+                    self._ir_models = remotes
+                    _LOGGER.info(
+                        "[IR] Using category/brand remote library for device %s "
+                        "category=%s brand=%s",
+                        device_id,
+                        category_id,
+                        brand_id,
+                    )
+                    return True
+
+        return False
+
     async def async_step_ir_select_device(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
@@ -1584,6 +1669,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 remotes: list[dict[str, Any]] = []
                 try:
                     remotes = await cloud.list_device_remotes(device_id)
+                    _LOGGER.warning("IR DEBUG: remotes=%s", remotes)
                     _LOGGER.info(
                         "IR: Remotes found=%d device=%s",
                         len(remotes),
@@ -1606,6 +1692,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         device_id,
                     )
                     categories = await oauth.async_get_ir_categories(device_id)
+                    _LOGGER.warning("IR DEBUG: categories=%s", categories)
                     self._ir_categories = _normalize_ir_categories(categories)
                     _LOGGER.info(
                         "[IR] Category fetch result for device %s: count=%d",
@@ -1614,6 +1701,19 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("IR category fetch failed via OAuth")
+
+                if self._ir_categories:
+                    try:
+                        if await self._async_try_ir_category_brand_remotes(
+                            device_id,
+                            cloud,
+                        ):
+                            return await self.async_step_ir_model()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.exception(
+                            "IR category/brand remote fallback failed for %s",
+                            device_id,
+                        )
             if (
                 not self._ir_categories
                 and not self._ir_models

@@ -30,7 +30,13 @@ class TuyaIRCloud:
         items = _coerce_list(result)
         categories = [
             {
-                "id": str(item.get("category_id") or item.get("id") or "").strip(),
+                "id": str(
+                    item.get("category")
+                    or item.get("category_code")
+                    or item.get("category_id")
+                    or item.get("id")
+                    or ""
+                ).strip(),
                 "name": str(item.get("category_name") or item.get("name") or "").strip(),
                 "raw": item,
             }
@@ -59,8 +65,19 @@ class TuyaIRCloud:
         items = _coerce_list(result)
         return [
             {
-                "id": str(item.get("brand_id") or item.get("id") or "").strip(),
-                "name": str(item.get("brand_name") or item.get("name") or "").strip(),
+                "id": str(
+                    item.get("brand_id")
+                    or item.get("brand_code")
+                    or item.get("brand")
+                    or item.get("id")
+                    or ""
+                ).strip(),
+                "name": str(
+                    item.get("brand_name")
+                    or item.get("name")
+                    or item.get("brand")
+                    or ""
+                ).strip(),
                 "raw": item,
             }
             for item in items
@@ -231,13 +248,15 @@ def _normalize_remote_items(
             continue
         seen.add(model_id)
         category_id = str(
-            item.get("category_id")
-            or item.get("category")
+            item.get("category")
+            or item.get("category_code")
+            or item.get("category_id")
             or default_category
             or ""
         ).strip()
         brand_id = str(
             item.get("brand_id")
+            or item.get("brand_code")
             or item.get("brand")
             or default_brand
             or ""
