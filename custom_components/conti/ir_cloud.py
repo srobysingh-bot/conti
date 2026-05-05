@@ -53,6 +53,11 @@ class TuyaIRCloud:
         _LOGGER.info("IR: Remotes found=%d device=%s", len(remotes), device_id)
         return remotes
 
+    async def resolve_infrared_id(self, device_id: str) -> str:
+        """Return the Tuya infrared_id used by the IR APIs."""
+        infrared_id = await self._oauth.async_get_infrared_id(device_id)
+        return str(infrared_id or "").strip()
+
     async def list_brands(
         self, device_id: str, category: str
     ) -> list[dict[str, Any]]:
@@ -147,8 +152,7 @@ class TuyaIRCloud:
                 remote_index,
                 len(commands),
             )
-            if commands:
-                return commands
+            return commands
 
         result = await _retry_ir_api(
             self._oauth.async_get_ir_remote_commands,

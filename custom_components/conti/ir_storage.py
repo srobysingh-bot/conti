@@ -51,11 +51,17 @@ class IRStorage:
                     "category": "",
                     "brand": "",
                     "model": "",
+                    "infrared_id": "",
+                    "category_id": "",
+                    "brand_id": "",
                     "remote_id": "",
                     "commands": {},
                 }
             data.setdefault("device_id", self._device_id)
             data.setdefault("type", "")
+            data.setdefault("infrared_id", "")
+            data.setdefault("category_id", "")
+            data.setdefault("brand_id", "")
             data.setdefault("remote_id", "")
             data.setdefault("commands", {})
             self._data = data
@@ -74,6 +80,9 @@ class IRStorage:
         model: str,
         commands: dict[str, dict[str, Any]],
         profile_type: str = "",
+        infrared_id: str = "",
+        category_id: str = "",
+        brand_id: str = "",
         remote_id: str = "",
     ) -> None:
         """Persist a complete cloud-fetched command library."""
@@ -87,6 +96,9 @@ class IRStorage:
                 "category": category,
                 "brand": brand,
                 "model": model,
+                "infrared_id": infrared_id,
+                "category_id": category_id,
+                "brand_id": brand_id,
                 "remote_id": remote_id,
                 "commands": normalized_commands,
             }
@@ -135,6 +147,9 @@ class IRStorage:
                 "category": "",
                 "brand": "",
                 "model": "",
+                "infrared_id": "",
+                "category_id": "",
+                "brand_id": "",
                 "remote_id": "",
                 "commands": {},
             }
