@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 STANDARD_IR_ACTIONS: dict[str, list[str]] = {
-    "power": ["power", "power_on", "turn_on", "on_off"],
+    "power": ["power", "on_off", "toggle_power"],
+    "power_on": ["power_on", "turn_on", "on"],
+    "power_off": ["power_off", "turn_off", "off"],
     "swing_vertical": [
         "swing_vertical",
         "vertical_swing",

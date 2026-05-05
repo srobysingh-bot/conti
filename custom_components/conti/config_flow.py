@@ -83,6 +83,7 @@ from .const import (
     CONF_IR_BRAND,
     CONF_IR_CATEGORY,
     CONF_IR_MODEL,
+    CONF_IR_PROFILE_TYPE,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
     CONF_LOW_POWER_DEVICE,
@@ -252,11 +253,38 @@ IR_CATEGORIES = {
 }
 
 IR_DEVICE_KEYWORDS = ("infrared", "remote")
+IR_AC_CATEGORIES = {
+    "5",
+    "ac",
+    "air_conditioner",
+    "air conditioner",
+    "airconditioner",
+    "climate",
+    "kt",
+}
 
 
 def normalize_category(cat: str) -> str:
     """Normalize IR category labels for stable UI choices."""
     return cat.strip().lower()
+
+
+def _is_ir_ac_category(category: dict[str, Any]) -> bool:
+    """Return True when an IR library category represents an AC/climate remote."""
+    values: list[str] = []
+    raw = category.get("raw")
+    if isinstance(raw, dict):
+        values.extend(
+            str(raw.get(key) or "")
+            for key in ("category", "category_code", "category_id", "name", "category_name")
+        )
+    values.extend(str(category.get(key) or "") for key in ("id", "name"))
+    normalized = {
+        normalize_category(value).replace("-", "_")
+        for value in values
+        if str(value).strip()
+    }
+    return any(value in IR_AC_CATEGORIES for value in normalized)
 
 
 def _coerce_ir_category_list(payload: Any) -> list[Any]:
@@ -1883,6 +1911,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 brand=str(self._ir_brand.get("name") or self._ir_brand.get("id") or ""),
                 model=str(self._ir_model.get("name") or self._ir_model.get("id") or ""),
                 commands=commands,
+                profile_type="ac" if _is_ir_ac_category(self._ir_category) else "",
             )
             _LOGGER.info(
                 "IR library fetch result device=%s commands=%d",
@@ -3152,6 +3181,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             brand=str(self._ir_brand.get("name") or self._ir_brand.get("id") or ""),
             model=str(self._ir_model.get("name") or self._ir_model.get("id") or ""),
             commands={},
+            profile_type="ac" if _is_ir_ac_category(self._ir_category) else "",
         )
         _LOGGER.info("[IR] Created learning-only IR entry for device %s", device_id)
         return self._create_ir_config_entry()
@@ -3179,6 +3209,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_IR_MODEL: str(
                 self._ir_model.get("name") or self._ir_model.get("id") or ""
             ),
+            CONF_IR_PROFILE_TYPE: "ac" if _is_ir_ac_category(self._ir_category) else "",
         }
 
         return self.async_create_entry(

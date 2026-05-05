@@ -47,12 +47,14 @@ class IRStorage:
             if not isinstance(data, dict):
                 data = {
                     "device_id": self._device_id,
+                    "type": "",
                     "category": "",
                     "brand": "",
                     "model": "",
                     "commands": {},
                 }
             data.setdefault("device_id", self._device_id)
+            data.setdefault("type", "")
             data.setdefault("commands", {})
             self._data = data
             _LOGGER.debug(
@@ -69,6 +71,7 @@ class IRStorage:
         brand: str,
         model: str,
         commands: dict[str, dict[str, Any]],
+        profile_type: str = "",
     ) -> None:
         """Persist a complete cloud-fetched command library."""
         normalized_commands: dict[str, dict[str, Any]] = {}
@@ -77,6 +80,7 @@ class IRStorage:
         async with self._lock:
             self._data = {
                 "device_id": self._device_id,
+                "type": profile_type,
                 "category": category,
                 "brand": brand,
                 "model": model,
@@ -123,6 +127,7 @@ class IRStorage:
         async with self._lock:
             data = self._data or {
                 "device_id": self._device_id,
+                "type": "",
                 "category": "",
                 "brand": "",
                 "model": "",
@@ -151,3 +156,14 @@ class IRStorage:
         data = await self.async_load()
         commands = data.get("commands", {})
         return commands if isinstance(commands, dict) else {}
+
+    async def async_profile_type(self) -> str:
+        """Return the stored IR profile type, such as ``ac``."""
+        data = await self.async_load()
+        profile_type = str(data.get("type") or "").strip().lower()
+        if profile_type:
+            return profile_type
+        category = str(data.get("category") or "").strip().lower().replace("-", "_")
+        if category in {"ac", "air_conditioner", "air conditioner", "airconditioner", "kt", "5"}:
+            return "ac"
+        return ""

@@ -29,6 +29,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
     CONF_DP_MAP,
+    CONF_RUNTIME_CHANNEL,
     DEVICE_TYPE_CLIMATE,
     DOMAIN,
     DP_KEY_CURRENT_TEMP,
@@ -37,6 +38,7 @@ from .const import (
     DP_KEY_POWER,
     DP_KEY_TARGET_TEMP,
     MANUFACTURER,
+    RUNTIME_CHANNEL_IR,
 )
 from .coordinator import ContiCoordinator
 
@@ -62,6 +64,12 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
+        from .ir_climate import async_setup_ir_climate_entry  # noqa: PLC0415
+
+        await async_setup_ir_climate_entry(hass, entry, async_add_entities)
+        return
+
     if entry.data.get(CONF_DEVICE_TYPE) != DEVICE_TYPE_CLIMATE:
         return
 

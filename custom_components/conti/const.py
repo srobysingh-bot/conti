@@ -34,6 +34,7 @@ CONF_EXTERNAL_ON_PROFILE: Final = "external_on_profile"  # legacy JSON blob
 CONF_IR_CATEGORY: Final = "ir_category"
 CONF_IR_BRAND: Final = "ir_brand"
 CONF_IR_MODEL: Final = "ir_model"
+CONF_IR_PROFILE_TYPE: Final = "ir_profile_type"
 
 # OAuth / Smart Life global cloud account
 CONF_OAUTH_CONFIGURED: Final = "oauth_configured"
