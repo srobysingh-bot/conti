@@ -154,27 +154,12 @@ class TuyaIRCloud:
             )
             return commands
 
-        result = await _retry_ir_api(
-            self._oauth.async_get_ir_remote_commands,
-            device_id,
-            category_id,
-            brand_id,
-            remote_index,
-        )
-        commands = _normalize_commands(
-            result,
-            category_id=category_id,
-            brand_id=brand_id,
-            remote_index=remote_index,
-            remote_id=remote_id,
-        )
-        _LOGGER.info(
-            "Fetched IR library for %s remote_index=%s (%d commands)",
+        _LOGGER.warning(
+            "IR: Cannot fetch keys without remote_id device=%s remote_index=%s",
             device_id,
             remote_index,
-            len(commands),
         )
-        return commands
+        return {}
 
     async def ensure_remote(
         self,

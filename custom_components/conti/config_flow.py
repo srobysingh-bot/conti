@@ -252,6 +252,7 @@ IR_CATEGORIES = {
     "ir",
     "infrared_remote",
     "universal_remote",
+    "wnykq",
     "wf_ir",
     "rf_ir",
 }
@@ -1682,6 +1683,24 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         device_id = self._flow_data.get(CONF_DEVICE_ID, "")
 
+        device_category = str(self._tuya_category or "").strip().lower()
+        if (
+            user_input is None
+            and not self._ir_category
+            and device_category in IR_CATEGORIES
+        ):
+            self._ir_category = {
+                "id": device_category,
+                "name": normalize_category(device_category),
+                "raw": {"category": device_category},
+            }
+            _LOGGER.info(
+                "IR: Using device category as selected IR category device=%s category=%s",
+                device_id,
+                device_category,
+            )
+            return await self.async_step_ir_brand()
+
         if user_input is not None:
             category_id = str(user_input.get("ir_category", "")).strip()
             selected = next(
@@ -1699,6 +1718,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not oauth or not oauth.is_configured:
                 errors["base"] = "ir_requires_login"
             else:
+                cloud = await self._get_ir_cloud()
                 try:
                     _LOGGER.info(
                         "[IR] Fetching categories via OAuth for device %s",
@@ -1714,16 +1734,45 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
                 except Exception:  # noqa: BLE001
                     _LOGGER.exception("IR category fetch failed via OAuth")
+
+                if not self._ir_categories:
+                    try:
+                        remotes = await cloud.list_device_remotes(device_id)
+                        _LOGGER.info(
+                            "IR: Existing remotes found=%d device=%s",
+                            len(remotes),
+                            device_id,
+                        )
+                        if remotes:
+                            self._ir_models = remotes
+                            if not self._ir_category:
+                                fallback_category = device_category or "infrared"
+                                self._ir_category = {
+                                    "id": fallback_category,
+                                    "name": normalize_category(fallback_category),
+                                    "raw": {"category": fallback_category},
+                                }
+                            if not self._ir_brand:
+                                first_brand = str(remotes[0].get("brand_id") or "").strip()
+                                self._ir_brand = {
+                                    "id": first_brand,
+                                    "name": first_brand,
+                                    "raw": remotes[0].get("raw", remotes[0]),
+                                }
+                            return await self.async_step_ir_model()
+                    except Exception:  # noqa: BLE001
+                        _LOGGER.exception("IR remotes fetch failed via OAuth")
+
             if (
                 not self._ir_categories
                 and not self._ir_models
                 and "base" not in errors
             ):
                 _LOGGER.warning(
-                    "IR: No categories found for device=%s",
+                    "IR: No categories or remotes found, switching to learning mode device=%s",
                     device_id,
                 )
-                errors["base"] = "ir_command_not_found"
+                return await self._async_create_ir_learning_fallback_entry()
 
         choices = {
             item["id"]: item.get("name") or item["id"]

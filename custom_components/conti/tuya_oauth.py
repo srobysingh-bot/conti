@@ -678,11 +678,10 @@ class TuyaOAuthManager:
         infrared_id = await self.async_get_infrared_id(device_id)
         if not infrared_id:
             return None
-        paths = [
+        return await self._sharing_api_get(
+            device_id,
             f"/v2.0/infrareds/{infrared_id}/categories",
-            f"/v1.0/infrareds/{infrared_id}/categories",
-        ]
-        return await self._sharing_api_get_first(device_id, paths)
+        )
 
     async def async_get_ir_device_remotes(self, device_id: str) -> Any:
         """Fetch remotes already known to an IR hub through the QR session."""
@@ -725,20 +724,13 @@ class TuyaOAuthManager:
         device_id: str = "",
     ) -> Any:
         """Fetch IR brands through the Smart Life QR sharing session."""
-        paths = []
-        if device_id:
-            infrared_id = await self.async_get_infrared_id(device_id)
-            if not infrared_id:
-                return None
-            paths.extend(
-                [
-                    f"/v2.0/infrareds/{infrared_id}/categories/{category_id}/brands",
-                    f"/v2.0/infrareds/{infrared_id}/brands?category_id={category_id}",
-                    f"/v1.0/infrareds/{infrared_id}/categories/{category_id}/brands",
-                ]
-            )
-        paths.append(f"/v2.0/infrareds/brands?category_id={category_id}")
-        return await self._sharing_api_get_first(device_id, paths)
+        infrared_id = await self.async_get_infrared_id(device_id)
+        if not infrared_id:
+            return None
+        return await self._sharing_api_get(
+            device_id,
+            f"/v2.0/infrareds/{infrared_id}/brands",
+        )
 
     async def async_get_ir_remotes(
         self,
@@ -748,45 +740,13 @@ class TuyaOAuthManager:
         device_id: str = "",
     ) -> Any:
         """Fetch IR remote models through the Smart Life QR sharing session."""
-        paths = []
-        if device_id:
-            infrared_id = await self.async_get_infrared_id(device_id)
-            if not infrared_id:
-                return None
-            paths.extend(
-                [
-                    f"/v2.0/infrareds/{infrared_id}/remotes?category_id={category_id}&brand_id={brand_id}",
-                    f"/v2.0/infrareds/{infrared_id}/categories/{category_id}/brands/{brand_id}/remote-indexs",
-                    f"/v1.0/infrareds/{infrared_id}/categories/{category_id}/brands/{brand_id}",
-                ]
-            )
-        paths.append(
-            f"/v2.0/infrareds/remotes?category_id={category_id}&brand_id={brand_id}"
-        )
-        return await self._sharing_api_get_first(device_id, paths)
-
-    async def async_get_ir_remote_commands(
-        self,
-        device_id: str,
-        category_id: str,
-        brand_id: str,
-        remote_index: str,
-    ) -> Any:
-        """Fetch IR command rules through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         if not infrared_id:
             return None
-        paths = [
-            (
-                f"/v2.0/infrareds/{infrared_id}/categories/{category_id}/brands/"
-                f"{brand_id}/remotes/{remote_index}/rules"
-            ),
-            (
-                f"/v1.0/infrareds/{infrared_id}/categories/{category_id}/brands/"
-                f"{brand_id}/remotes/{remote_index}/rules"
-            ),
-        ]
-        return await self._sharing_api_get_first(device_id, paths)
+        return await self._sharing_api_get(
+            device_id,
+            f"/v2.0/infrareds/{infrared_id}/remotes",
+        )
 
     async def async_get_ir_remote_keys(
         self,
@@ -913,36 +873,6 @@ class TuyaOAuthManager:
                 return result
         return None
 
-    async def async_list_infrareds(self) -> list[dict[str, Any]]:
-        """List IR hubs visible to the Smart Life account."""
-        result = await self._sharing_api_get("", "/v2.0/infrareds")
-        infrareds: list[dict[str, Any]] = []
-        if isinstance(result, list):
-            infrareds = [item for item in result if isinstance(item, dict)]
-        elif isinstance(result, dict):
-            for key in ("list", "items", "records", "data", "result"):
-                value = result.get(key)
-                if isinstance(value, list):
-                    infrareds = [item for item in value if isinstance(item, dict)]
-                    break
-
-        for item in infrareds:
-            device_id = str(
-                item.get("device_id")
-                or item.get("dev_id")
-                or item.get("id")
-                or ""
-            ).strip()
-            infrared_id = str(
-                item.get("infrared_id")
-                or item.get("infraredId")
-                or item.get("id")
-                or ""
-            ).strip()
-            if device_id and infrared_id:
-                self._infrared_id_cache[device_id] = infrared_id
-        return infrareds
-
     async def async_get_infrared_id(self, device_id: str) -> str | None:
         """Resolve the IR API infrared_id for a Tuya device_id."""
         device_id = str(device_id).strip()
@@ -950,48 +880,9 @@ class TuyaOAuthManager:
             return None
         if cached := self._infrared_id_cache.get(device_id):
             return cached
-
-        for item in await self.async_list_infrareds():
-            possible_device_ids = {
-                str(item.get("device_id") or "").strip(),
-                str(item.get("dev_id") or "").strip(),
-                str(item.get("id") or "").strip(),
-            }
-            if device_id not in possible_device_ids:
-                continue
-            infrared_id = str(
-                item.get("infrared_id")
-                or item.get("infraredId")
-                or item.get("id")
-                or ""
-            ).strip()
-            if infrared_id:
-                self._infrared_id_cache[device_id] = infrared_id
-                _LOGGER.info(
-                    "IR: Using infrared_id=%s for device_id=%s",
-                    infrared_id,
-                    device_id,
-                )
-                return infrared_id
-
-        devices = await self.async_list_devices_sharing()
-        ir_categories = {"wnykq", "wf_ir", "rf_ir", "infrared"}
-        for device in devices:
-            _LOGGER.warning("IR DEVICE DATA: %s", device)
-            if str(device.get("id") or "").strip() != device_id:
-                continue
-            category = str(device.get("category") or "").strip()
-            if category in ir_categories:
-                self._infrared_id_cache[device_id] = device_id
-                _LOGGER.info(
-                    "IR: Using infrared_id=%s for device_id=%s after capability validation",
-                    device_id,
-                    device_id,
-                )
-                return device_id
-
-        _LOGGER.error("Unable to resolve Tuya infrared_id for device_id=%s", device_id)
-        return None
+        self._infrared_id_cache[device_id] = device_id
+        _LOGGER.info("IR: Using device_id as infrared_id=%s", device_id)
+        return device_id
 
     def get_schema_helper(self) -> Any:
         """Return the underlying TuyaCloudSchemaHelper (for schema_to_dp_map)."""
