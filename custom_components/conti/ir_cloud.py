@@ -105,7 +105,7 @@ class TuyaIRCloud:
     async def fetch_commands(
         self, device_id: str, model: dict[str, Any] | str
     ) -> dict[str, dict[str, Any]]:
-        """Fetch and normalize the command library for a remote index."""
+        """Create the selected remote, then fetch and normalize its keys."""
         model_data = _parse_model(model)
         category_id = str(model_data.get("category_id", "")).strip()
         brand_id = str(model_data.get("brand_id", "")).strip()
@@ -117,6 +117,38 @@ class TuyaIRCloud:
         ).strip()
         if not category_id or not brand_id or not remote_index:
             raise ValueError("IR model must include category_id, brand_id and remote_index")
+
+        remote_id = str(model_data.get("remote_id") or "").strip()
+        if not remote_id:
+            remote_id = await self.ensure_remote(
+                device_id,
+                category_id,
+                brand_id,
+                remote_index,
+            )
+
+        if remote_id:
+            result = await _retry_ir_api(
+                self._oauth.async_get_ir_remote_keys,
+                device_id,
+                remote_id,
+            )
+            commands = _normalize_commands(
+                result,
+                category_id=category_id,
+                brand_id=brand_id,
+                remote_index=remote_index,
+                remote_id=remote_id,
+            )
+            _LOGGER.info(
+                "Fetched IR keys for %s remote_id=%s remote_index=%s (%d commands)",
+                device_id,
+                remote_id,
+                remote_index,
+                len(commands),
+            )
+            if commands:
+                return commands
 
         result = await _retry_ir_api(
             self._oauth.async_get_ir_remote_commands,
@@ -130,6 +162,7 @@ class TuyaIRCloud:
             category_id=category_id,
             brand_id=brand_id,
             remote_index=remote_index,
+            remote_id=remote_id,
         )
         _LOGGER.info(
             "Fetched IR library for %s remote_index=%s (%d commands)",
@@ -139,13 +172,47 @@ class TuyaIRCloud:
         )
         return commands
 
+    async def ensure_remote(
+        self,
+        device_id: str,
+        category_id: str,
+        brand_id: str,
+        remote_index: str,
+    ) -> str:
+        """Ensure the selected library remote exists and return remote_id."""
+        await _retry_ir_api(
+            self._oauth.async_add_ir_remote,
+            device_id,
+            category_id,
+            brand_id,
+            remote_index,
+            name="Conti Remote",
+        )
+        remotes = await self.list_device_remotes(device_id)
+        remote_id = _select_remote_id(remotes, category_id, brand_id, remote_index)
+        if remote_id:
+            _LOGGER.info(
+                "IR: Created/resolved remote_id=%s device=%s remote_index=%s",
+                remote_id,
+                device_id,
+                remote_index,
+            )
+        else:
+            _LOGGER.warning(
+                "IR: add-remote did not yield a remote_id device=%s remote_index=%s remotes=%s",
+                device_id,
+                remote_index,
+                remotes,
+            )
+        return remote_id
+
     async def send_command(self, device_id: str, command: dict[str, Any]) -> bool:
         """Send a stored command through the Smart Life OAuth session."""
         return await self._oauth.async_send_ir_command(device_id, command)
 
-    async def start_learning(self, device_id: str) -> str:
+    async def start_learning(self, device_id: str, remote_id: str = "") -> str:
         """Enable IR learning mode and return the learning timestamp."""
-        result = await self._oauth.async_start_ir_learning(device_id)
+        result = await self._oauth.async_start_ir_learning(device_id, remote_id)
         learning_time = ""
         if isinstance(result, dict):
             learning_time = str(result.get("t") or result.get("learning_time") or "")
@@ -154,21 +221,22 @@ class TuyaIRCloud:
         _LOGGER.info("IR learning mode started device=%s", device_id)
         return learning_time
 
-    async def stop_learning(self, device_id: str) -> None:
+    async def stop_learning(self, device_id: str, remote_id: str = "") -> None:
         """Disable IR learning mode."""
         stop = getattr(self._oauth, "async_stop_ir_learning", None)
         if stop is None:
             return
-        await stop(device_id)
+        await stop(device_id, remote_id)
         _LOGGER.info("IR learning mode stopped device=%s", device_id)
 
     async def capture_learning_code(
-        self, device_id: str, learning_time: str
+        self, device_id: str, learning_time: str, remote_id: str = ""
     ) -> dict[str, Any] | None:
         """Query the IR code captured during learning mode."""
         result = await self._oauth.async_capture_ir_learning_code(
             device_id,
             learning_time,
+            remote_id,
         )
         if not isinstance(result, dict):
             return None
@@ -288,6 +356,7 @@ def _normalize_commands(
     category_id: str,
     brand_id: str,
     remote_index: str,
+    remote_id: str = "",
 ) -> dict[str, dict[str, Any]]:
     items = _coerce_list(payload)
     if not items and isinstance(payload, dict):
@@ -310,6 +379,7 @@ def _normalize_commands(
                 "category_id": category_id,
                 "brand_id": brand_id,
                 "remote_index": remote_index,
+                "remote_id": remote_id,
                 "key_id": item.get("key_id") or item.get("keyId") or item.get("id"),
                 "key": item.get("key") or item.get("code") or action,
                 "rule": item,
@@ -332,3 +402,29 @@ def _command_action(item: dict[str, Any]) -> str:
     for old, new in ((" ", "_"), ("-", "_"), ("/", "_")):
         action = action.replace(old, new)
     return normalize_ir_action("_".join(part for part in action.split("_") if part))
+
+
+def _select_remote_id(
+    remotes: list[dict[str, Any]],
+    category_id: str,
+    brand_id: str,
+    remote_index: str,
+) -> str:
+    """Pick the remote_id that best matches the selected library index."""
+    fallback = ""
+    for remote in remotes:
+        remote_id = str(remote.get("remote_id") or remote.get("id") or "").strip()
+        if not remote_id:
+            continue
+        if not fallback:
+            fallback = remote_id
+        item_category = str(remote.get("category_id") or "").strip()
+        item_brand = str(remote.get("brand_id") or "").strip()
+        item_index = str(remote.get("remote_index") or remote.get("id") or "").strip()
+        if (
+            item_index == remote_index
+            and (not item_category or item_category == category_id)
+            and (not item_brand or item_brand == brand_id)
+        ):
+            return remote_id
+    return fallback

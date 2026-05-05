@@ -29,16 +29,20 @@ class IRLearningSession:
         *,
         capture_payload: IRPayloadCapture | None = None,
         cloud: TuyaIRCloud | None = None,
+        remote_id: str = "",
     ) -> None:
         self._storage = storage
         self._capture_payload = capture_payload
         self._cloud = cloud
+        self._remote_id = remote_id
 
     async def start_learning(self, device_id: str) -> str:
         """Start learning mode on the IR hub."""
         if self._cloud is None:
             raise IRLearningError("No IR cloud handler configured")
-        return await self._cloud.start_learning(device_id)
+        if not self._remote_id:
+            self._remote_id = await self._storage.async_remote_id()
+        return await self._cloud.start_learning(device_id, self._remote_id)
 
     async def capture_learned_payload(
         self, device_id: str, learning_time: str
@@ -48,13 +52,19 @@ class IRLearningSession:
             raise IRLearningError("No IR cloud handler configured")
         try:
             await asyncio.sleep(4)
-            payload = await self._cloud.capture_learning_code(device_id, learning_time)
+            if not self._remote_id:
+                self._remote_id = await self._storage.async_remote_id()
+            payload = await self._cloud.capture_learning_code(
+                device_id,
+                learning_time,
+                self._remote_id,
+            )
             if not payload:
                 raise IRLearningError("Captured IR payload is empty")
             self._validate_payload(payload)
             return payload
         finally:
-            await self._cloud.stop_learning(device_id)
+            await self._cloud.stop_learning(device_id, self._remote_id)
 
     async def learn_command(
         self,

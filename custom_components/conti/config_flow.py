@@ -84,6 +84,7 @@ from .const import (
     CONF_IR_CATEGORY,
     CONF_IR_MODEL,
     CONF_IR_PROFILE_TYPE,
+    CONF_IR_REMOTE_ID,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
     CONF_LOW_POWER_DEVICE,
@@ -672,6 +673,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._ir_category: dict[str, Any] = {}
         self._ir_brand: dict[str, Any] = {}
         self._ir_model: dict[str, Any] = {}
+        self._remote_id: str = ""
         # Smart Life QR login state
         self._qr_code_url: str = ""
         self._qr_code_token: str = ""
@@ -1896,6 +1898,23 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         try:
             cloud = await self._get_ir_cloud()
+            category_id = str(self._ir_model.get("category_id") or self._ir_category.get("id") or "").strip()
+            brand_id = str(self._ir_model.get("brand_id") or self._ir_brand.get("id") or "").strip()
+            remote_index = str(
+                self._ir_model.get("remote_index")
+                or self._ir_model.get("id")
+                or ""
+            ).strip()
+            if not self._remote_id and category_id and brand_id and remote_index:
+                self._remote_id = await cloud.ensure_remote(
+                    device_id,
+                    category_id,
+                    brand_id,
+                    remote_index,
+                )
+                if self._remote_id:
+                    self._ir_model["remote_id"] = self._remote_id
+
             commands = await cloud.fetch_commands(device_id, self._ir_model)
             if not commands:
                 _LOGGER.info(
@@ -1912,6 +1931,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 model=str(self._ir_model.get("name") or self._ir_model.get("id") or ""),
                 commands=commands,
                 profile_type="ac" if _is_ir_ac_category(self._ir_category) else "",
+                remote_id=self._remote_id,
             )
             _LOGGER.info(
                 "IR library fetch result device=%s commands=%d",
@@ -3182,6 +3202,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             model=str(self._ir_model.get("name") or self._ir_model.get("id") or ""),
             commands={},
             profile_type="ac" if _is_ir_ac_category(self._ir_category) else "",
+            remote_id=self._remote_id or str(self._ir_model.get("remote_id") or ""),
         )
         _LOGGER.info("[IR] Created learning-only IR entry for device %s", device_id)
         return self._create_ir_config_entry()
@@ -3209,6 +3230,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_IR_MODEL: str(
                 self._ir_model.get("name") or self._ir_model.get("id") or ""
             ),
+            CONF_IR_REMOTE_ID: self._remote_id or str(self._ir_model.get("remote_id") or ""),
             CONF_IR_PROFILE_TYPE: "ac" if _is_ir_ac_category(self._ir_category) else "",
         }
 
@@ -3568,7 +3590,10 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
             oauth = TuyaOAuthManager(self.hass)
             await oauth.async_load()
         cloud = TuyaIRCloud(oauth) if oauth.is_configured else None
-        return IRLearningSession(storage, cloud=cloud)
+        remote_id = str(self._entry.data.get(CONF_IR_REMOTE_ID, "")).strip()
+        if not remote_id:
+            remote_id = await storage.async_remote_id()
+        return IRLearningSession(storage, cloud=cloud, remote_id=remote_id)
 
     # -- Helpers ------------------------------------------------------------
 

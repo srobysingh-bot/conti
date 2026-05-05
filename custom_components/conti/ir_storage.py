@@ -51,10 +51,12 @@ class IRStorage:
                     "category": "",
                     "brand": "",
                     "model": "",
+                    "remote_id": "",
                     "commands": {},
                 }
             data.setdefault("device_id", self._device_id)
             data.setdefault("type", "")
+            data.setdefault("remote_id", "")
             data.setdefault("commands", {})
             self._data = data
             _LOGGER.debug(
@@ -72,6 +74,7 @@ class IRStorage:
         model: str,
         commands: dict[str, dict[str, Any]],
         profile_type: str = "",
+        remote_id: str = "",
     ) -> None:
         """Persist a complete cloud-fetched command library."""
         normalized_commands: dict[str, dict[str, Any]] = {}
@@ -84,6 +87,7 @@ class IRStorage:
                 "category": category,
                 "brand": brand,
                 "model": model,
+                "remote_id": remote_id,
                 "commands": normalized_commands,
             }
             await self._store.async_save(self._data)
@@ -131,6 +135,7 @@ class IRStorage:
                 "category": "",
                 "brand": "",
                 "model": "",
+                "remote_id": "",
                 "commands": {},
             }
             commands = data.setdefault("commands", {})
@@ -167,3 +172,8 @@ class IRStorage:
         if category in {"ac", "air_conditioner", "air conditioner", "airconditioner", "kt", "5"}:
             return "ac"
         return ""
+
+    async def async_remote_id(self) -> str:
+        """Return the Tuya remote_id created for this IR library."""
+        data = await self.async_load()
+        return str(data.get("remote_id") or "").strip()

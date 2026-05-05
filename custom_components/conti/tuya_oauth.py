@@ -694,6 +694,30 @@ class TuyaOAuthManager:
             f"/v2.0/infrareds/{infrared_id}/remotes",
         )
 
+    async def async_add_ir_remote(
+        self,
+        device_id: str,
+        category_id: str,
+        brand_id: str,
+        remote_index: str,
+        *,
+        name: str = "Conti Remote",
+    ) -> Any:
+        """Create a remote on an IR hub from a selected library index."""
+        infrared_id = await self.async_get_infrared_id(device_id)
+        if not infrared_id:
+            return None
+        return await self._sharing_api_post(
+            device_id,
+            f"/v1.0/infrareds/{infrared_id}/normal/add-remote",
+            {
+                "category_id": category_id,
+                "brand_id": brand_id,
+                "remote_index": remote_index,
+                "name": name,
+            },
+        )
+
     async def async_get_ir_brands(
         self,
         category_id: str,
@@ -764,6 +788,21 @@ class TuyaOAuthManager:
         ]
         return await self._sharing_api_get_first(device_id, paths)
 
+    async def async_get_ir_remote_keys(
+        self,
+        device_id: str,
+        remote_id: str,
+    ) -> Any:
+        """Fetch command keys for a created remote."""
+        infrared_id = await self.async_get_infrared_id(device_id)
+        if not infrared_id:
+            return None
+        paths = [
+            f"/v2.0/infrareds/{infrared_id}/remotes/{remote_id}/keys",
+            f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/keys",
+        ]
+        return await self._sharing_api_get_first(device_id, paths)
+
     async def async_send_ir_command(
         self,
         device_id: str,
@@ -787,8 +826,19 @@ class TuyaOAuthManager:
         body = {
             key: value
             for key, value in payload.items()
-            if key not in {"path", "method"}
+            if key
+            not in {
+                "path",
+                "method",
+                "remote_id",
+                "category_id",
+                "brand_id",
+                "remote_index",
+            }
         }
+        rule = body.pop("rule", None)
+        if isinstance(rule, dict):
+            body = {**rule, **{key: value for key, value in body.items() if value is not None}}
         if not body:
             return False
 
@@ -799,36 +849,69 @@ class TuyaOAuthManager:
         result = await self._sharing_api_post(device_id, path, body)
         return result is not None
 
-    async def async_start_ir_learning(self, device_id: str) -> Any:
+    async def async_start_ir_learning(
+        self,
+        device_id: str,
+        remote_id: str = "",
+    ) -> Any:
         """Start IR learning mode through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         if not infrared_id:
             return None
-        path = f"/v1.0/infrareds/{infrared_id}/learning-state?state=true"
-        return await self._sharing_api_put(device_id, path, {})
+        paths = []
+        if remote_id:
+            paths.append(
+                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-state?state=true"
+            )
+        paths.append(f"/v1.0/infrareds/{infrared_id}/learning-state?state=true")
+        for path in paths:
+            result = await self._sharing_api_put(device_id, path, {})
+            if result is not None:
+                return result
+        return None
 
     async def async_capture_ir_learning_code(
         self,
         device_id: str,
         learning_time: str,
+        remote_id: str = "",
     ) -> Any:
         """Fetch a learned IR code through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         if not infrared_id:
             return None
-        path = (
+        paths = []
+        if remote_id:
+            paths.append(
+                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
+                f"?learning_time={learning_time}"
+            )
+        paths.append(
             f"/v1.0/infrareds/{infrared_id}/learning-codes"
             f"?learning_time={learning_time}"
         )
-        return await self._sharing_api_get(device_id, path)
+        return await self._sharing_api_get_first(device_id, paths)
 
-    async def async_stop_ir_learning(self, device_id: str) -> Any:
+    async def async_stop_ir_learning(
+        self,
+        device_id: str,
+        remote_id: str = "",
+    ) -> Any:
         """Stop IR learning mode through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         if not infrared_id:
             return None
-        path = f"/v1.0/infrareds/{infrared_id}/learning-state?state=false"
-        return await self._sharing_api_put(device_id, path, {})
+        paths = []
+        if remote_id:
+            paths.append(
+                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-state?state=false"
+            )
+        paths.append(f"/v1.0/infrareds/{infrared_id}/learning-state?state=false")
+        for path in paths:
+            result = await self._sharing_api_put(device_id, path, {})
+            if result is not None:
+                return result
+        return None
 
     async def async_list_infrareds(self) -> list[dict[str, Any]]:
         """List IR hubs visible to the Smart Life account."""
