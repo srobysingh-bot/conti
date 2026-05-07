@@ -816,16 +816,25 @@ class TuyaOAuthManager:
     ) -> Any:
         """Start IR learning mode through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
+        _LOGGER.info(
+            "IR learning resolve device_id=%s infrared_id=%s remote_id=%s",
+            device_id,
+            infrared_id,
+            remote_id,
+        )
         if not infrared_id:
             return None
-        paths = []
-        if remote_id:
-            paths.append(
-                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-state?state=true"
+        requests = [
+            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state?state=true"),
+            ("GET", f"/v1.0/infrareds/{infrared_id}/learning-state?state=true"),
+        ]
+        for method, path in requests:
+            result = (
+                await self._sharing_api_put(device_id, path, {})
+                if method == "PUT"
+                else await self._sharing_api_get(device_id, path)
             )
-        paths.append(f"/v1.0/infrareds/{infrared_id}/learning-state?state=true")
-        for path in paths:
-            result = await self._sharing_api_put(device_id, path, {})
+            _LOGGER.debug("IR LEARN START response=%s", result)
             if result is not None:
                 return result
         return None
@@ -838,19 +847,31 @@ class TuyaOAuthManager:
     ) -> Any:
         """Fetch a learned IR code through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
+        _LOGGER.info(
+            "IR learning poll resolve device_id=%s infrared_id=%s remote_id=%s learning_time=%s",
+            device_id,
+            infrared_id,
+            remote_id,
+            learning_time,
+        )
         if not infrared_id:
             return None
-        paths = []
+        paths = [
+            f"/v2.0/infrareds/{infrared_id}/learning-codes"
+            f"?learning_time={learning_time}",
+            f"/v1.0/infrareds/{infrared_id}/learning-codes"
+            f"?learning_time={learning_time}",
+        ]
         if remote_id:
             paths.append(
-                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
-                f"?learning_time={learning_time}"
+                f"/v2.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
             )
-        paths.append(
-            f"/v1.0/infrareds/{infrared_id}/learning-codes"
-            f"?learning_time={learning_time}"
-        )
-        return await self._sharing_api_get_first(device_id, paths)
+            paths.append(
+                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
+            )
+        result = await self._sharing_api_get_first(device_id, paths)
+        _LOGGER.debug("IR LEARN POLL response=%s", result)
+        return result
 
     async def async_stop_ir_learning(
         self,
@@ -859,16 +880,25 @@ class TuyaOAuthManager:
     ) -> Any:
         """Stop IR learning mode through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
+        _LOGGER.info(
+            "IR learning stop resolve device_id=%s infrared_id=%s remote_id=%s",
+            device_id,
+            infrared_id,
+            remote_id,
+        )
         if not infrared_id:
             return None
-        paths = []
-        if remote_id:
-            paths.append(
-                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-state?state=false"
+        requests = [
+            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state?state=false"),
+            ("GET", f"/v1.0/infrareds/{infrared_id}/learning-state?state=false"),
+        ]
+        for method, path in requests:
+            result = (
+                await self._sharing_api_put(device_id, path, {})
+                if method == "PUT"
+                else await self._sharing_api_get(device_id, path)
             )
-        paths.append(f"/v1.0/infrareds/{infrared_id}/learning-state?state=false")
-        for path in paths:
-            result = await self._sharing_api_put(device_id, path, {})
+            _LOGGER.debug("IR LEARN STOP response=%s", result)
             if result is not None:
                 return result
         return None
@@ -879,9 +909,18 @@ class TuyaOAuthManager:
         if not device_id:
             return None
         if cached := self._infrared_id_cache.get(device_id):
+            _LOGGER.debug(
+                "IR: cached infrared_id device_id=%s infrared_id=%s",
+                device_id,
+                cached,
+            )
             return cached
         self._infrared_id_cache[device_id] = device_id
-        _LOGGER.info("IR: Using device_id as infrared_id=%s", device_id)
+        _LOGGER.info(
+            "IR: Using device_id as infrared_id device_id=%s infrared_id=%s",
+            device_id,
+            device_id,
+        )
         return device_id
 
     def get_schema_helper(self) -> Any:
@@ -1024,9 +1063,11 @@ class TuyaOAuthManager:
             response = await self._hass.async_add_executor_job(_request)
         except Exception as exc:  # noqa: BLE001
             _LOGGER.error(
-                "Tuya OAuth IR API failed: device_id=%s path=%s response_body=%s",
+                "Tuya OAuth IR API failed: device_id=%s method=%s path=%s status=%s response_body=%s",
                 device_id,
+                method,
                 path,
+                getattr(exc, "status", "unknown"),
                 exc,
             )
             return None
@@ -1034,26 +1075,32 @@ class TuyaOAuthManager:
         self._sync_from_sharing_manager(manager)
         if not isinstance(response, dict):
             _LOGGER.error(
-                "Tuya OAuth IR API returned non-dict response: device_id=%s path=%s response_body=%s",
+                "Tuya OAuth IR API returned non-dict response: device_id=%s method=%s path=%s status=%s response_body=%s",
                 device_id,
+                method,
                 path,
+                "unknown",
                 response,
             )
             return None
 
         if not response.get("success"):
             _LOGGER.error(
-                "Tuya OAuth IR API returned failure: device_id=%s path=%s response_body=%s",
+                "Tuya OAuth IR API returned failure: device_id=%s method=%s path=%s status=%s response_body=%s",
                 device_id,
+                method,
                 path,
+                response.get("status", "unknown"),
                 response,
             )
             return None
 
         _LOGGER.debug(
-            "Tuya OAuth IR API OK: device_id=%s path=%s response_body=%s",
+            "Tuya OAuth IR API OK: device_id=%s method=%s path=%s status=%s response_body=%s",
             device_id,
+            method,
             path,
+            response.get("status", "unknown"),
             response,
         )
         return response.get("result", {})

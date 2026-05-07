@@ -14,6 +14,8 @@ _LOGGER = logging.getLogger(__name__)
 
 IRPayloadCapture = Callable[[str, str], Awaitable[Any]]
 MIN_LEARNED_IR_PAYLOAD_SIZE = 16
+IR_LEARN_POLL_INTERVAL = 2.0
+IR_LEARN_TIMEOUT = 15.0
 
 
 class IRLearningError(Exception):
@@ -42,7 +44,10 @@ class IRLearningSession:
             raise IRLearningError("No IR cloud handler configured")
         if not self._remote_id:
             self._remote_id = await self._storage.async_remote_id()
-        return await self._cloud.start_learning(device_id, self._remote_id)
+        learning_time = await self._cloud.start_learning(device_id, self._remote_id)
+        if not learning_time:
+            raise IRLearningError("IR learning start failed")
+        return learning_time
 
     async def capture_learned_payload(
         self, device_id: str, learning_time: str
@@ -51,18 +56,32 @@ class IRLearningSession:
         if self._cloud is None:
             raise IRLearningError("No IR cloud handler configured")
         try:
-            await asyncio.sleep(4)
             if not self._remote_id:
                 self._remote_id = await self._storage.async_remote_id()
-            payload = await self._cloud.capture_learning_code(
+            deadline = asyncio.get_running_loop().time() + IR_LEARN_TIMEOUT
+            last_payload: Any = None
+            while True:
+                payload = await self._cloud.capture_learning_code(
+                    device_id,
+                    learning_time,
+                    self._remote_id,
+                )
+                _LOGGER.debug("IR LEARN POLL response=%s", payload)
+                if payload:
+                    self._validate_payload(payload)
+                    return payload
+                last_payload = payload
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+                await asyncio.sleep(IR_LEARN_POLL_INTERVAL)
+            _LOGGER.warning(
+                "IR learning timed out device=%s learning_time=%s timeout=%ss last_response=%s",
                 device_id,
                 learning_time,
-                self._remote_id,
+                IR_LEARN_TIMEOUT,
+                last_payload,
             )
-            if not payload:
-                raise IRLearningError("Captured IR payload is empty")
-            self._validate_payload(payload)
-            return payload
+            raise IRLearningError("Captured IR payload is empty")
         finally:
             await self._cloud.stop_learning(device_id, self._remote_id)
 

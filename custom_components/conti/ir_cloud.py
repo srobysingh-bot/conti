@@ -235,13 +235,40 @@ class TuyaIRCloud:
 
     async def start_learning(self, device_id: str, remote_id: str = "") -> str:
         """Enable IR learning mode and return the learning timestamp."""
+        infrared_id = await self.resolve_infrared_id(device_id)
+        _LOGGER.info(
+            "IR learning start device_id=%s infrared_id=%s remote_id=%s",
+            device_id,
+            infrared_id,
+            remote_id,
+        )
         result = await self._oauth.async_start_ir_learning(device_id, remote_id)
+        _LOGGER.debug("IR LEARN START response=%s", result)
+        if result in (None, False):
+            _LOGGER.warning(
+                "IR learning start failed device=%s infrared_id=%s response=%s",
+                device_id,
+                infrared_id,
+                result,
+            )
+            return ""
         learning_time = ""
         if isinstance(result, dict):
-            learning_time = str(result.get("t") or result.get("learning_time") or "")
+            learning_time = str(
+                result.get("t")
+                or result.get("learning_time")
+                or result.get("learningTime")
+                or result.get("time")
+                or ""
+            )
         if not learning_time:
             learning_time = str(int(time.time() * 1000))
-        _LOGGER.info("IR learning mode started device=%s", device_id)
+        _LOGGER.info(
+            "IR learning mode started device=%s infrared_id=%s learning_time=%s",
+            device_id,
+            infrared_id,
+            learning_time,
+        )
         return learning_time
 
     async def stop_learning(self, device_id: str, remote_id: str = "") -> None:
@@ -249,8 +276,9 @@ class TuyaIRCloud:
         stop = getattr(self._oauth, "async_stop_ir_learning", None)
         if stop is None:
             return
-        await stop(device_id, remote_id)
-        _LOGGER.info("IR learning mode stopped device=%s", device_id)
+        result = await stop(device_id, remote_id)
+        _LOGGER.debug("IR LEARN STOP response=%s", result)
+        _LOGGER.info("IR learning mode stopped device=%s response=%s", device_id, result)
 
     async def capture_learning_code(
         self, device_id: str, learning_time: str, remote_id: str = ""
@@ -261,11 +289,29 @@ class TuyaIRCloud:
             learning_time,
             remote_id,
         )
+        _LOGGER.debug("IR LEARN POLL response=%s", result)
         if not isinstance(result, dict):
+            _LOGGER.warning(
+                "IR learning capture returned non-dict device=%s response=%s",
+                device_id,
+                result,
+            )
             return None
-        code = result.get("code")
+        code = (
+            result.get("code")
+            or result.get("codes")
+            or result.get("key")
+            or result.get("data")
+            or result.get("payload")
+        )
         success = bool(result.get("success", bool(code)))
         if not success or not code:
+            _LOGGER.warning(
+                "IR learning capture empty device=%s learning_time=%s response=%s",
+                device_id,
+                learning_time,
+                result,
+            )
             return None
         return {"code": code, "learning_time": learning_time}
 
