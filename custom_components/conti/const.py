@@ -41,6 +41,7 @@ CONF_IR_BRAND_ID: Final = "ir_brand_id"
 CONF_IR_PROFILE_TYPE: Final = "ir_profile_type"
 CONF_IR_PACK_MANUFACTURER: Final = "ir_pack_manufacturer"
 CONF_IR_PACK_MODEL: Final = "ir_pack_model"
+CONF_IR_SELECTED_PACK: Final = "ir_selected_pack"
 
 # OAuth / Smart Life global cloud account
 CONF_OAUTH_CONFIGURED: Final = "oauth_configured"

@@ -90,6 +90,7 @@ from .const import (
     CONF_IR_PACK_MODEL,
     CONF_IR_PROFILE_TYPE,
     CONF_IR_REMOTE_ID,
+    CONF_IR_SELECTED_PACK,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
     CONF_LOW_POWER_DEVICE,
@@ -1685,8 +1686,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """IR setup step 1: select appliance category."""
-        _LOGGER.warning("No cloud IR library found. Continuing in raw IR mode.")
-        return await self._async_create_ir_learning_fallback_entry()
+        return await self.async_step_ir_pack_manufacturer()
 
         errors: dict[str, str] = {}
         device_id = self._flow_data.get(CONF_DEVICE_ID, "")
@@ -1716,7 +1716,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 None,
             )
             if selected is None:
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
             else:
                 self._ir_category = selected
                 return await self.async_step_ir_brand()
@@ -1780,7 +1780,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "IR: No categories or remotes found, switching to learning mode device=%s",
                     device_id,
                 )
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
 
         choices = {
             item["id"]: item.get("name") or item["id"]
@@ -1788,7 +1788,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if item.get("id")
         }
         if not choices and "base" not in errors:
-            return await self._async_create_ir_learning_fallback_entry()
+            return await self.async_step_ir_pack_manufacturer()
 
         return self.async_show_form(
             step_id="ir_category",
@@ -1806,6 +1806,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         manufacturers = list_manufacturers()
         if user_input is not None:
             manufacturer = str(user_input.get("ir_pack_manufacturer", "")).strip()
+            if manufacturer == "__raw__":
+                _LOGGER.info("IR PACK: user selected raw/learning mode")
+                return await self._async_create_ir_learning_fallback_entry()
             if manufacturer in manufacturers:
                 self._ir_pack_manufacturer = manufacturer
                 _LOGGER.info("IR PACK: manufacturer=%s", manufacturer)
@@ -1819,6 +1822,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self._async_create_ir_learning_fallback_entry()
 
         choices = {item: item.replace("_", " ").title() for item in manufacturers}
+        choices["__raw__"] = "Raw / Learning Mode"
         return self.async_show_form(
             step_id="ir_pack_manufacturer",
             data_schema=vol.Schema(
@@ -1864,10 +1868,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not models:
             _LOGGER.warning(
-                "IR PACK: no bundled models found manufacturer=%s, continuing in raw/learning mode",
+                "IR PACK: no bundled models found manufacturer=%s",
                 manufacturer,
             )
-            return await self._async_create_ir_learning_fallback_entry()
+            errors["base"] = "ir_pack_not_found"
 
         choices = {item: item.replace("_", " ").title() for item in models}
         return self.async_show_form(
@@ -1880,8 +1884,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """IR setup step 2: select appliance brand."""
-        _LOGGER.warning("No cloud IR library found. Continuing in raw IR mode.")
-        return await self._async_create_ir_learning_fallback_entry()
+        return await self.async_step_ir_pack_manufacturer()
 
         errors: dict[str, str] = {}
         device_id = self._flow_data.get(CONF_DEVICE_ID, "")
@@ -1894,7 +1897,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 None,
             )
             if selected is None:
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
             else:
                 self._ir_brand = selected
                 return await self.async_step_ir_model()
@@ -1905,7 +1908,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._ir_brands = await cloud.list_brands(device_id, category_id)
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("IR brand fetch failed for %s", device_id)
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
 
         choices = {
             item["id"]: item.get("name") or item["id"]
@@ -1918,7 +1921,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 device_id,
                 category_id,
             )
-            return await self._async_create_ir_learning_fallback_entry()
+            return await self.async_step_ir_pack_manufacturer()
 
         return self.async_show_form(
             step_id="ir_brand",
@@ -1930,8 +1933,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """IR setup step 3: select appliance model/remote index."""
-        _LOGGER.warning("No cloud IR library found. Continuing in raw IR mode.")
-        return await self._async_create_ir_learning_fallback_entry()
+        return await self.async_step_ir_pack_manufacturer()
 
         errors: dict[str, str] = {}
         device_id = self._flow_data.get(CONF_DEVICE_ID, "")
@@ -1945,7 +1947,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 None,
             )
             if selected is None:
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
             else:
                 self._ir_model = selected
                 if not self._ir_category and selected.get("category_id"):
@@ -1976,7 +1978,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("IR model fetch failed for %s", device_id)
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
 
         choices = {
             item["id"]: item.get("name") or item["id"]
@@ -1988,7 +1990,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "IR: No remote models for device %s",
                 device_id,
             )
-            return await self._async_create_ir_learning_fallback_entry()
+            return await self.async_step_ir_pack_manufacturer()
 
         warning = ""
         category_name = str(self._ir_category.get("name", "")).lower()
@@ -2006,8 +2008,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """IR setup step 4: fetch and store the selected library."""
-        _LOGGER.warning("No cloud IR library found. Continuing in raw IR mode.")
-        return await self._async_create_ir_learning_fallback_entry()
+        return await self.async_step_ir_pack_manufacturer()
 
         errors: dict[str, str] = {}
         device_id = self._flow_data.get(CONF_DEVICE_ID, "")
@@ -2072,7 +2073,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self._create_ir_config_entry()
         except Exception:  # noqa: BLE001
             _LOGGER.exception("IR library fetch/store failed for %s", device_id)
-            return await self._async_create_ir_learning_fallback_entry()
+            return await self.async_step_ir_pack_manufacturer()
 
         return self.async_show_form(
             step_id="ir_fetch",
@@ -2090,7 +2091,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Cloud path — ask for host when LAN auto-detection did not produce
         a confident single match.  Already-set host is never reached here."""
         if self._flow_data.get("ir_mode"):
-            return await self._async_create_ir_learning_fallback_entry()
+            return await self.async_step_ir_pack_manufacturer()
 
         errors: dict[str, str] = {}
 
@@ -2163,7 +2164,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         Second call (user_input set): process form, route forward.
         """
         if self._flow_data.get("ir_mode"):
-            return await self._async_create_ir_learning_fallback_entry()
+            return await self.async_step_ir_pack_manufacturer()
 
         errors: dict[str, str] = {}
 
@@ -3419,6 +3420,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_IR_PROFILE_TYPE: "ac" if _is_ir_ac_category(self._ir_category) else "",
             CONF_IR_PACK_MANUFACTURER: self._ir_pack_manufacturer,
             CONF_IR_PACK_MODEL: self._ir_pack_model,
+            CONF_IR_SELECTED_PACK: (
+                f"{self._ir_pack_manufacturer}/{self._ir_pack_model}"
+                if self._ir_pack_manufacturer and self._ir_pack_model
+                else ""
+            ),
         }
 
         return self.async_create_entry(
