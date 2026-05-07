@@ -86,6 +86,8 @@ from .const import (
     CONF_IR_CATEGORY_ID,
     CONF_IR_INFRARED_ID,
     CONF_IR_MODEL,
+    CONF_IR_PACK_MANUFACTURER,
+    CONF_IR_PACK_MODEL,
     CONF_IR_PROFILE_TYPE,
     CONF_IR_REMOTE_ID,
     CONF_MAPPING_CONFIDENCE,
@@ -679,6 +681,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._ir_model: dict[str, Any] = {}
         self._infrared_id: str = ""
         self._remote_id: str = ""
+        self._ir_pack_manufacturer: str = ""
+        self._ir_pack_model: str = ""
+        self._ir_pack: dict[str, Any] = {}
         # Smart Life QR login state
         self._qr_code_url: str = ""
         self._qr_code_token: str = ""
@@ -941,7 +946,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         await self._apply_ir_candidate(selected_device)
                         await self.async_set_unique_id(selected_id)
                         self._abort_if_unique_id_configured()
-                        return await self._async_create_ir_learning_fallback_entry()
+                        return await self.async_step_ir_pack_manufacturer()
 
                     # Try to resolve host.
                     await self._apply_cloud_candidate(selected_device)
@@ -1068,7 +1073,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         await self._apply_ir_candidate(selected)
                         await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
                         self._abort_if_unique_id_configured()
-                        return await self._async_create_ir_learning_fallback_entry()
+                        return await self.async_step_ir_pack_manufacturer()
                     try:
                         refreshed = await self._cloud_get_credentials(
                             selected.get("device_id", "")
@@ -1158,7 +1163,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     await self._apply_ir_candidate(selected)
                     await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
                     self._abort_if_unique_id_configured()
-                    return await self._async_create_ir_learning_fallback_entry()
+                    return await self.async_step_ir_pack_manufacturer()
 
                 if not str(selected.get("local_key", "")).strip():
                     try:
@@ -1577,14 +1582,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     _LOGGER.info("Selected manual IR device: %s", selected_id)
                     await self.async_set_unique_id(selected_id)
                     self._abort_if_unique_id_configured()
-                    return await self._async_create_ir_learning_fallback_entry()
+                    return await self.async_step_ir_pack_manufacturer()
                 errors["base"] = "ir_no_device_found"
             else:
                 await self._apply_ir_candidate(selected)
                 _LOGGER.info("Selected IR device: %s", selected_id)
                 await self.async_set_unique_id(selected_id)
                 self._abort_if_unique_id_configured()
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
 
         if not self._cloud_candidates:
             oauth = await self._get_oauth_manager()
@@ -1640,7 +1645,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 _LOGGER.info("Selected IR device: %s", selected_id)
                 await self.async_set_unique_id(selected_id)
                 self._abort_if_unique_id_configured()
-                return await self._async_create_ir_learning_fallback_entry()
+                return await self.async_step_ir_pack_manufacturer()
             if not ir_devices and "base" not in errors:
                 errors["base"] = "ir_no_device_found"
 
@@ -1788,6 +1793,86 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="ir_category",
             data_schema=vol.Schema({vol.Required("ir_category"): vol.In(choices) if choices else str}),
+            errors=errors,
+        )
+
+    async def async_step_ir_pack_manufacturer(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup: select a bundled raw IR pack manufacturer."""
+        from .ir_code_packs import list_manufacturers  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+        manufacturers = list_manufacturers()
+        if user_input is not None:
+            manufacturer = str(user_input.get("ir_pack_manufacturer", "")).strip()
+            if manufacturer in manufacturers:
+                self._ir_pack_manufacturer = manufacturer
+                _LOGGER.info("IR PACK: manufacturer=%s", manufacturer)
+                return await self.async_step_ir_pack_model()
+            errors["base"] = "ir_pack_not_found"
+
+        if not manufacturers:
+            _LOGGER.warning(
+                "IR PACK: no bundled packs found, continuing in raw/learning mode"
+            )
+            return await self._async_create_ir_learning_fallback_entry()
+
+        choices = {item: item.replace("_", " ").title() for item in manufacturers}
+        return self.async_show_form(
+            step_id="ir_pack_manufacturer",
+            data_schema=vol.Schema(
+                {vol.Required("ir_pack_manufacturer"): vol.In(choices)}
+            ),
+            errors=errors,
+        )
+
+    async def async_step_ir_pack_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """IR setup: select and bind a bundled raw IR pack model."""
+        from .ir_code_packs import list_models, load_ir_pack  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+        manufacturer = self._ir_pack_manufacturer
+        models = list_models(manufacturer)
+        if user_input is not None:
+            model = str(user_input.get("ir_pack_model", "")).strip()
+            if model in models:
+                try:
+                    pack = load_ir_pack(manufacturer, model)
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "IR PACK: malformed pack manufacturer=%s model=%s error=%s",
+                        manufacturer,
+                        model,
+                        exc,
+                    )
+                    errors["base"] = "ir_pack_invalid"
+                else:
+                    self._ir_pack_model = model
+                    self._ir_pack = pack
+                    _LOGGER.info("IR PACK: manufacturer=%s", manufacturer)
+                    _LOGGER.info("IR PACK: model=%s", model)
+                    _LOGGER.info(
+                        "IR PACK: loaded commands=%s",
+                        len(pack.get("commands", {})),
+                    )
+                    return await self._async_create_ir_pack_entry()
+            else:
+                errors["base"] = "ir_pack_not_found"
+
+        if not models:
+            _LOGGER.warning(
+                "IR PACK: no bundled models found manufacturer=%s, continuing in raw/learning mode",
+                manufacturer,
+            )
+            return await self._async_create_ir_learning_fallback_entry()
+
+        choices = {item: item.replace("_", " ").title() for item in models}
+        return self.async_show_form(
+            step_id="ir_pack_model",
+            data_schema=vol.Schema({vol.Required("ir_pack_model"): vol.In(choices)}),
             errors=errors,
         )
 
@@ -3225,6 +3310,49 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=entry_data,
         )
 
+    async def _async_create_ir_pack_entry(
+        self,
+    ) -> config_entries.ConfigFlowResult:
+        """Create an IR entry bound to a bundled local raw IR pack."""
+        from .ir_storage import IRStorage  # noqa: PLC0415
+
+        device_id = self._flow_data[CONF_DEVICE_ID]
+        commands = self._ir_pack.get("commands", {})
+        manufacturer = str(
+            self._ir_pack.get("manufacturer") or self._ir_pack_manufacturer
+        ).strip()
+        model = str(self._ir_pack.get("model") or self._ir_pack_model).strip()
+        profile_type = str(self._ir_pack.get("type") or "ac").strip()
+
+        self._ir_category = {"id": profile_type or "ac", "name": profile_type or "ac", "raw": {}}
+        self._ir_brand = {
+            "id": self._ir_pack_manufacturer,
+            "name": manufacturer or self._ir_pack_manufacturer,
+            "raw": {},
+        }
+        self._ir_model = {
+            "id": self._ir_pack_model,
+            "name": model or self._ir_pack_model,
+            "raw": {},
+        }
+
+        storage = IRStorage(self.hass, device_id)
+        await storage.async_save_library(
+            category=profile_type or "ac",
+            brand=manufacturer or self._ir_pack_manufacturer,
+            model=model or self._ir_pack_model,
+            commands=commands if isinstance(commands, dict) else {},
+            profile_type=profile_type or "ac",
+            infrared_id=self._infrared_id,
+            category_id=profile_type or "ac",
+            brand_id=self._ir_pack_manufacturer,
+            remote_id=self._remote_id,
+        )
+        _LOGGER.info("IR PACK: manufacturer=%s", self._ir_pack_manufacturer)
+        _LOGGER.info("IR PACK: model=%s", self._ir_pack_model)
+        _LOGGER.info("IR PACK: loaded commands=%s", len(commands))
+        return self._create_ir_config_entry()
+
     async def _async_create_ir_learning_fallback_entry(
         self,
     ) -> config_entries.ConfigFlowResult:
@@ -3267,7 +3395,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_PROTOCOL_VERSION: "auto",
             CONF_DEVICE_TYPE: DEVICE_TYPE_IR,
             CONF_DP_MAP: "{}",
-            CONF_MAPPING_SOURCE: "ir_raw",
+            CONF_MAPPING_SOURCE: "ir_pack" if self._ir_pack_model else "ir_raw",
             CONF_MAPPING_CONFIDENCE: 1.0,
             CONF_RUNTIME_CHANNEL: RUNTIME_CHANNEL_IR,
             CONF_TUYA_CATEGORY: self._tuya_category or "infrared",
@@ -3289,6 +3417,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._ir_model.get("brand_id") or self._ir_brand.get("id") or ""
             ),
             CONF_IR_PROFILE_TYPE: "ac" if _is_ir_ac_category(self._ir_category) else "",
+            CONF_IR_PACK_MANUFACTURER: self._ir_pack_manufacturer,
+            CONF_IR_PACK_MODEL: self._ir_pack_model,
         }
 
         return self.async_create_entry(

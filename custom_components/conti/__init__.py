@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
@@ -135,7 +136,11 @@ def _register_ir_services(hass: HomeAssistant) -> None:
                 and entry_data.get(_IR_MANAGER_KEY) is not None
             ):
                 storage = entry_data.get("ir_storage")
-                if storage is not None and await storage.async_get_command(action) is None:
+                if (
+                    storage is not None
+                    and not _is_raw_ir_action(action)
+                    and await storage.async_get_command(action) is None
+                ):
                     raise HomeAssistantError("ir_command_not_found")
                 try:
                     await entry_data[_IR_MANAGER_KEY].send_ir_command(
@@ -153,6 +158,30 @@ def _register_ir_services(hass: HomeAssistant) -> None:
         )
         raise HomeAssistantError("ir_command_not_found")
 
+    async def _handle_import_ir_pack(call: Any) -> None:
+        device_id = str(call.data["device_id"]).strip()
+        path = _resolve_ir_pack_path(hass, str(call.data["path"]).strip())
+        overwrite = bool(call.data.get("overwrite", False))
+        storage = _find_ir_storage(hass, device_id)
+        if storage is None:
+            raise HomeAssistantError("ir_device_not_found")
+        imported = await storage.async_import_code_pack_file(path, overwrite=overwrite)
+        _LOGGER.info(
+            "Imported IR code pack device=%s path=%s commands=%d",
+            device_id,
+            path,
+            imported,
+        )
+
+    async def _handle_export_ir_pack(call: Any) -> None:
+        device_id = str(call.data["device_id"]).strip()
+        path = _resolve_ir_pack_path(hass, str(call.data["path"]).strip())
+        storage = _find_ir_storage(hass, device_id)
+        if storage is None:
+            raise HomeAssistantError("ir_device_not_found")
+        await storage.async_export_code_pack_file(path)
+        _LOGGER.info("Exported IR code pack device=%s path=%s", device_id, path)
+
     hass.services.async_register(
         DOMAIN,
         "send_ir_command",
@@ -165,7 +194,52 @@ def _register_ir_services(hass: HomeAssistant) -> None:
             }
         ),
     )
+    hass.services.async_register(
+        DOMAIN,
+        "import_ir_code_pack",
+        _handle_import_ir_pack,
+        schema=vol.Schema(
+            {
+                vol.Required("device_id"): str,
+                vol.Required("path"): str,
+                vol.Optional("overwrite", default=False): bool,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "export_ir_code_pack",
+        _handle_export_ir_pack,
+        schema=vol.Schema(
+            {
+                vol.Required("device_id"): str,
+                vol.Required("path"): str,
+            }
+        ),
+    )
     hass.data[DOMAIN][_IR_SERVICES_REGISTERED] = True
+
+
+def _find_ir_storage(hass: HomeAssistant, device_id: str) -> Any | None:
+    for entry_data in hass.data.get(DOMAIN, {}).values():
+        if (
+            isinstance(entry_data, dict)
+            and entry_data.get("device_id") == device_id
+            and entry_data.get("ir_storage") is not None
+        ):
+            return entry_data["ir_storage"]
+    return None
+
+
+def _resolve_ir_pack_path(hass: HomeAssistant, raw_path: str) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = Path(hass.config.path(raw_path))
+    return path
+
+
+def _is_raw_ir_action(action: str) -> bool:
+    return str(action).strip().startswith(("raw:", "base64:"))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -197,8 +271,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "ir_storage": storage,
         }
         _register_ir_services(hass)
-        _LOGGER.info("Forwarding Conti IR entry %s to remote platform", entry.entry_id)
-        await hass.config_entries.async_forward_entry_setups(entry, [Platform.REMOTE])
+        ir_platforms = [Platform.REMOTE, Platform.CLIMATE]
+        _LOGGER.info("Forwarding Conti IR entry %s to platforms %s", entry.entry_id, ir_platforms)
+        await hass.config_entries.async_forward_entry_setups(entry, ir_platforms)
         _LOGGER.info(
             "Set up Conti IR device %s (category=%s)",
             device_id,
@@ -440,7 +515,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Conti config entry — disconnect device and clean up."""
     platforms = (
-        [Platform.REMOTE]
+        [Platform.REMOTE, Platform.CLIMATE]
         if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR
         else PLATFORMS
     )

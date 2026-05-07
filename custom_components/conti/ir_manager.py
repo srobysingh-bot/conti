@@ -55,6 +55,16 @@ class IRManager:
         """
         command = await self._storage.async_get_command(action)
         if not command:
+            raw_command = _raw_command_from_action(action)
+            if raw_command is not None:
+                _LOGGER.info(
+                    "IR execution path device=%s action=%s path=raw",
+                    device_id,
+                    action,
+                )
+                if await self._send_cloud(device_id, raw_command):
+                    return True
+                raise IRSendError("ir_send_failed")
             _LOGGER.warning(
                 "IR command not configured device=%s action=%s",
                 device_id,
@@ -63,11 +73,12 @@ class IRManager:
             raise IRCommandNotConfigured("command_not_configured")
 
         source = str(command.get("source", "")).strip() or "cloud"
-        if source == "cloud":
+        if source in {"cloud", "raw", "code_pack"}:
             _LOGGER.info(
-                "IR execution path device=%s action=%s path=cloud",
+                "IR execution path device=%s action=%s path=%s",
                 device_id,
                 action,
+                source,
             )
             if await self._send_cloud(device_id, command):
                 return True
@@ -126,3 +137,13 @@ class IRManager:
         if ok:
             _LOGGER.info("IR execution path device=%s path=cloud ok", device_id)
         return ok
+
+
+def _raw_command_from_action(action: str) -> dict[str, Any] | None:
+    action = str(action).strip()
+    if not action.startswith(("raw:", "base64:")):
+        return None
+    return {
+        "source": "raw",
+        "payload": {"code": action.split(":", 1)[1].strip()},
+    }

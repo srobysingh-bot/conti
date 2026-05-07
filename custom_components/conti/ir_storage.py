@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import DOMAIN
+from .ir_code_packs import (
+    PACK_DIR_NAME,
+    PACK_SCHEMA_VERSION,
+    async_export_code_pack,
+    async_load_code_pack,
+    normalize_code_pack,
+)
 from .ir_actions import ir_action_aliases, normalize_ir_action
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,10 +73,11 @@ class IRStorage:
             data.setdefault("remote_id", "")
             data.setdefault("commands", {})
             self._data = data
+            await self._async_import_default_pack_if_empty()
             _LOGGER.debug(
                 "Loaded IR library for %s (%d commands)",
                 self._device_id,
-                len(data.get("commands", {})),
+                len(self._data.get("commands", {})),
             )
             return self._data
 
@@ -171,6 +180,79 @@ class IRStorage:
                 normalized_action,
             )
 
+    async def async_import_code_pack(
+        self,
+        pack: dict[str, Any],
+        *,
+        overwrite: bool = False,
+    ) -> int:
+        """Import raw IR commands from a normalized local code pack."""
+        normalized = normalize_code_pack(pack)
+        imported = 0
+        await self.async_load()
+        async with self._lock:
+            data = self._data or {
+                "device_id": self._device_id,
+                "type": "",
+                "category": "",
+                "brand": "",
+                "model": "",
+                "infrared_id": "",
+                "category_id": "",
+                "brand_id": "",
+                "remote_id": "",
+                "commands": {},
+            }
+            commands = data.setdefault("commands", {})
+            if not isinstance(commands, dict):
+                commands = {}
+                data["commands"] = commands
+            for action, command in normalized["commands"].items():
+                if action in commands and not overwrite:
+                    continue
+                commands[action] = command
+                imported += 1
+            if normalized.get("type"):
+                data["type"] = normalized["type"]
+            if normalized.get("manufacturer"):
+                data["brand"] = normalized["manufacturer"]
+            if normalized.get("model"):
+                data["model"] = normalized["model"]
+            self._data = data
+            await self._store.async_save(data)
+        _LOGGER.info(
+            "Imported IR code pack for %s commands=%d overwrite=%s",
+            self._device_id,
+            imported,
+            overwrite,
+        )
+        return imported
+
+    async def async_import_code_pack_file(
+        self,
+        path: str | Path,
+        *,
+        overwrite: bool = False,
+    ) -> int:
+        """Import a JSON/YAML raw IR code pack from disk."""
+        pack = await async_load_code_pack(Path(path))
+        return await self.async_import_code_pack(pack, overwrite=overwrite)
+
+    async def async_export_code_pack_file(self, path: str | Path) -> None:
+        """Export stored commands as a JSON raw IR code pack."""
+        data = await self.async_load()
+        commands = data.get("commands", {})
+        await async_export_code_pack(
+            Path(path),
+            {
+                "schema_version": PACK_SCHEMA_VERSION,
+                "manufacturer": data.get("brand", ""),
+                "model": data.get("model", ""),
+                "type": data.get("type", ""),
+                "commands": commands if isinstance(commands, dict) else {},
+            },
+        )
+
     async def async_all_commands(self) -> dict[str, dict[str, Any]]:
         """Return all commands for this device."""
         data = await self.async_load()
@@ -192,3 +274,35 @@ class IRStorage:
         """Return the Tuya remote_id created for this IR library."""
         data = await self.async_load()
         return str(data.get("remote_id") or "").strip()
+
+    async def _async_import_default_pack_if_empty(self) -> None:
+        """Auto-import a local pack named after the device when storage is empty."""
+        if self._data is None:
+            return
+        commands = self._data.get("commands", {})
+        if isinstance(commands, dict) and commands:
+            return
+
+        pack_dir = Path(self._hass.config.path(PACK_DIR_NAME))
+        for suffix in (".json", ".yaml", ".yml"):
+            path = pack_dir / f"{self._device_id}{suffix}"
+            if not path.exists():
+                continue
+            try:
+                pack = await async_load_code_pack(path)
+                commands = self._data.setdefault("commands", {})
+                if not isinstance(commands, dict):
+                    commands = {}
+                    self._data["commands"] = commands
+                commands.update(pack["commands"])
+                if pack.get("type"):
+                    self._data["type"] = pack["type"]
+                if pack.get("manufacturer"):
+                    self._data["brand"] = pack["manufacturer"]
+                if pack.get("model"):
+                    self._data["model"] = pack["model"]
+                await self._store.async_save(self._data)
+                _LOGGER.info("Auto-imported IR code pack %s", path)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning("IR code pack import failed path=%s error=%s", path, exc)
+            return

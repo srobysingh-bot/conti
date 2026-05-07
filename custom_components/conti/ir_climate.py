@@ -32,11 +32,22 @@ IR_HVAC_MODES: dict[HVACMode, str] = {
     HVACMode.COOL: "cool",
     HVACMode.HEAT: "heat",
     HVACMode.DRY: "dry",
-    HVACMode.FAN_ONLY: "fan_only",
+    HVACMode.FAN_ONLY: "fan",
     HVACMode.AUTO: "auto",
 }
 
-IR_FAN_MODES = ["auto", "low", "medium", "high"]
+IR_FAN_MODES = ["auto", "f1", "f2", "f3", "f4", "f5"]
+IR_FAN_ALIASES = {
+    "low": "f1",
+    "medium": "f3",
+    "mid": "f3",
+    "high": "f5",
+    "1": "f1",
+    "2": "f2",
+    "3": "f3",
+    "4": "f4",
+    "5": "f5",
+}
 DEFAULT_TEMP = 24
 MIN_TEMP = 16
 MAX_TEMP = 30
@@ -104,6 +115,7 @@ class ContiIRClimate(ClimateEntity):
         self._target_temp = DEFAULT_TEMP
         self._hvac_mode = HVACMode.COOL
         self._fan_mode = "auto"
+        self._swing_on = False
         self._attr_unique_id = f"{entry.entry_id}_ir_climate"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, device_id)},
@@ -144,19 +156,21 @@ class ContiIRClimate(ClimateEntity):
             "power": self._power,
             "ir_mode": IR_HVAC_MODES.get(self._hvac_mode, "cool"),
             "ir_fan": self._fan_mode,
+            "ir_swing": "on" if self._swing_on else "off",
+            "state_command": self._state_command_name(),
         }
 
     async def async_turn_on(self) -> None:
         """Turn the virtual AC on."""
         self._power = True
-        if not await self._send_first_available(["power_on", "on", "power"]):
-            if not await self._send_state():
+        if not await self._send_state():
+            if not await self._send_first_available(["power_on", "on", "power"]):
                 raise HomeAssistantError("ir_command_not_found")
         self.async_write_ha_state()
 
     async def async_turn_off(self) -> None:
         """Turn the virtual AC off."""
-        if not await self._send_first_available(["power_off", "off"]):
+        if not await self._send_first_available(["ac_off", "power_off", "off"]):
             if not await self._send_first_available(["power"]):
                 raise HomeAssistantError("ir_command_not_found")
         self._power = False
@@ -198,7 +212,7 @@ class ContiIRClimate(ClimateEntity):
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set fan mode through full-state or fan fallback commands."""
-        normalized = normalize_ir_action(fan_mode)
+        normalized = _normalize_ac_fan(fan_mode)
         self._fan_mode = normalized if normalized in IR_FAN_MODES else fan_mode
         self._power = True
         if not await self._send_state():
@@ -209,19 +223,39 @@ class ContiIRClimate(ClimateEntity):
         self.async_write_ha_state()
 
     async def _send_state(self) -> bool:
-        """Send an exact state command when the library exposes one."""
+        """Send a full-state AC command when the raw code pack exposes one."""
+        state_command = self._state_command_name()
+        candidates = [state_command]
+        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
         temp = int(self._target_temp)
-        candidates = []
-        for mode in self._mode_candidates():
+        swing = "on" if self._swing_on else "off"
+        if mode != "fan":
             candidates.extend(
                 [
+                    f"ac_{mode}_{temp}_{self._fan_mode}_swing_{swing}",
+                    f"ac_{mode}_{temp}_auto_swing_{swing}",
                     f"{mode}_{temp}_{self._fan_mode}",
                     f"{mode}_{temp}",
-                    f"{mode}_temp_{temp}_{self._fan_mode}",
-                    f"{mode}_temp_{temp}",
+                ]
+            )
+        else:
+            candidates.extend(
+                [
+                    f"ac_fan_{self._fan_mode}_swing_{swing}",
+                    f"fan_{self._fan_mode}",
+                    "fan",
                 ]
             )
         return await self._send_first_available(candidates)
+
+    def _state_command_name(self) -> str:
+        """Return canonical full-state AC raw command name."""
+        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
+        swing = "on" if self._swing_on else "off"
+        if mode == "fan":
+            return f"ac_fan_{self._fan_mode}_swing_{swing}"
+        temp = max(MIN_TEMP, min(MAX_TEMP, int(self._target_temp)))
+        return f"ac_{mode}_{temp}_{self._fan_mode}_swing_{swing}"
 
     def _mode_candidates(self) -> list[str]:
         """Return likely IR action fragments for the selected HVAC mode."""
@@ -264,3 +298,8 @@ class ContiIRClimate(ClimateEntity):
             raise HomeAssistantError("ir_command_not_found") from exc
         except IRSendError as exc:
             raise HomeAssistantError("ir_send_failed") from exc
+
+
+def _normalize_ac_fan(fan_mode: str) -> str:
+    normalized = normalize_ir_action(fan_mode)
+    return IR_FAN_ALIASES.get(normalized, normalized)

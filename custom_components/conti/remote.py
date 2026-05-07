@@ -198,7 +198,7 @@ class ContiIRRemote(RemoteEntity):
                     self._device_id,
                     str(action),
                     payload,
-                    overwrite=bool(kwargs.get("overwrite", True)),
+                    overwrite=bool(kwargs.get("overwrite", False)),
                 )
             except IRLearningError as exc:
                 raise HomeAssistantError("ir_learn_failed") from exc
