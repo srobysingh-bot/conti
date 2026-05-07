@@ -1471,6 +1471,155 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise RuntimeError("IR setup requires a Smart Life QR OAuth session")
         return TuyaIRCloud(oauth)
 
+    async def _async_prepare_ir_runtime_metadata(
+        self,
+        *,
+        category_id: str = "",
+        brand_id: str = "",
+        remote_index: str = "",
+    ) -> None:
+        """Resolve runtime infrared/remote identifiers without blocking setup."""
+        device_id = str(self._flow_data.get(CONF_DEVICE_ID, "")).strip()
+        if not device_id:
+            return
+        try:
+            cloud = await self._get_ir_cloud()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "IR runtime metadata unavailable device=%s error=%s",
+                device_id,
+                exc,
+            )
+            return
+
+        if not self._infrared_id:
+            try:
+                self._infrared_id = await cloud.resolve_infrared_id(device_id)
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "IR runtime infrared_id resolution failed device=%s error=%s",
+                    device_id,
+                    exc,
+                )
+
+        if self._remote_id:
+            return
+
+        if category_id and brand_id and remote_index:
+            try:
+                self._remote_id = await cloud.ensure_remote(
+                    device_id,
+                    category_id,
+                    brand_id,
+                    remote_index,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "IR runtime remote bind failed device=%s infrared_id=%s "
+                    "category_id=%s brand_id=%s remote_index=%s error=%s",
+                    device_id,
+                    self._infrared_id,
+                    category_id,
+                    brand_id,
+                    remote_index,
+                    exc,
+                )
+            if self._remote_id:
+                if not self._ir_model:
+                    self._ir_model = {}
+                self._ir_model.update(
+                    {
+                        "remote_id": self._remote_id,
+                        "category_id": category_id,
+                        "brand_id": brand_id,
+                        "remote_index": remote_index,
+                    }
+                )
+                _LOGGER.info(
+                    "IR runtime remote bound device=%s infrared_id=%s remote_id=%s",
+                    device_id,
+                    self._infrared_id,
+                    self._remote_id,
+                )
+                return
+
+        try:
+            remotes = await cloud.list_device_remotes(device_id)
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning(
+                "IR runtime remote discovery failed device=%s infrared_id=%s error=%s",
+                device_id,
+                self._infrared_id,
+                exc,
+            )
+            return
+
+        selected_remote = self._select_runtime_remote(remotes)
+        if selected_remote is None:
+            _LOGGER.warning(
+                "IR runtime remote_id unavailable device=%s infrared_id=%s remotes=%s",
+                device_id,
+                self._infrared_id,
+                remotes,
+            )
+            return
+
+        for remote in [selected_remote]:
+            remote_id = str(remote.get("remote_id") or remote.get("id") or "").strip()
+            if not remote_id:
+                continue
+            self._remote_id = remote_id
+            if not self._ir_model:
+                self._ir_model = {}
+            self._ir_model["remote_id"] = remote_id
+            if remote.get("category_id"):
+                self._ir_model.setdefault("category_id", remote.get("category_id"))
+            if remote.get("brand_id"):
+                self._ir_model.setdefault("brand_id", remote.get("brand_id"))
+            if remote.get("remote_index"):
+                self._ir_model.setdefault("remote_index", remote.get("remote_index"))
+            _LOGGER.info(
+                "IR runtime remote resolved device=%s infrared_id=%s remote_id=%s",
+                device_id,
+                self._infrared_id,
+                self._remote_id,
+            )
+            return
+
+        _LOGGER.warning(
+            "IR runtime remote_id unavailable device=%s infrared_id=%s remotes=%s",
+            device_id,
+            self._infrared_id,
+            remotes,
+        )
+
+    def _select_runtime_remote(
+        self,
+        remotes: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Pick the best existing Tuya runtime remote for the selected IR pack."""
+        best: tuple[int, dict[str, Any]] | None = None
+        manufacturer = self._ir_pack_manufacturer.lower()
+        model = self._ir_pack_model.lower().replace("_", " ")
+        for remote in remotes:
+            remote_id = str(remote.get("remote_id") or remote.get("id") or "").strip()
+            if not remote_id:
+                continue
+            score = 1
+            haystack = " ".join(
+                str(remote.get(key) or "").lower().replace("_", " ")
+                for key in ("name", "brand_id", "category_id", "remote_index")
+            )
+            if manufacturer and manufacturer in haystack:
+                score += 4
+            if model and model in haystack:
+                score += 4
+            if any(token in haystack for token in ("ac", "air", "condition", "kt")):
+                score += 2
+            if best is None or score > best[0]:
+                best = (score, remote)
+        return best[1] if best else None
+
     async def _async_try_ir_category_brand_remotes(
         self,
         device_id: str,
@@ -3324,6 +3473,30 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         ).strip()
         model = str(self._ir_pack.get("model") or self._ir_pack_model).strip()
         profile_type = str(self._ir_pack.get("type") or "ac").strip()
+        tuya_meta = self._ir_pack.get("tuya") if isinstance(self._ir_pack, dict) else {}
+        if not isinstance(tuya_meta, dict):
+            tuya_meta = {}
+        category_id = str(
+            tuya_meta.get("category_id")
+            or self._ir_pack.get("category_id")
+            or profile_type
+            or "ac"
+        ).strip()
+        brand_id = str(
+            tuya_meta.get("brand_id")
+            or self._ir_pack.get("brand_id")
+            or self._ir_pack_manufacturer
+        ).strip()
+        remote_index = str(
+            tuya_meta.get("remote_index")
+            or self._ir_pack.get("remote_index")
+            or ""
+        ).strip()
+        await self._async_prepare_ir_runtime_metadata(
+            category_id=category_id,
+            brand_id=brand_id,
+            remote_index=remote_index,
+        )
 
         self._ir_category = {"id": profile_type or "ac", "name": profile_type or "ac", "raw": {}}
         self._ir_brand = {
@@ -3334,6 +3507,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._ir_model = {
             "id": self._ir_pack_model,
             "name": model or self._ir_pack_model,
+            "category_id": category_id,
+            "brand_id": brand_id,
+            "remote_index": remote_index,
+            "remote_id": self._remote_id,
             "raw": {},
         }
 
@@ -3345,8 +3522,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             commands=commands if isinstance(commands, dict) else {},
             profile_type=profile_type or "ac",
             infrared_id=self._infrared_id,
-            category_id=profile_type or "ac",
-            brand_id=self._ir_pack_manufacturer,
+            category_id=category_id,
+            brand_id=brand_id,
             remote_id=self._remote_id,
         )
         _LOGGER.info("IR PACK: manufacturer=%s", self._ir_pack_manufacturer)
@@ -3361,6 +3538,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         from .ir_storage import IRStorage  # noqa: PLC0415
 
         device_id = self._flow_data[CONF_DEVICE_ID]
+        await self._async_prepare_ir_runtime_metadata()
         if not self._ir_category:
             self._ir_category = {"id": "raw", "name": "raw", "raw": {}}
         if not self._ir_brand:

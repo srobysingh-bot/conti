@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.remote import RemoteEntity
@@ -33,6 +34,7 @@ from .ir_manager import IRCommandNotConfigured, IRManager, IRSendError
 from .ir_storage import IRStorage
 
 _LOGGER = logging.getLogger(__name__)
+SCAN_INTERVAL = timedelta(seconds=30)
 
 
 async def async_setup_entry(
@@ -68,7 +70,8 @@ class ContiIRRemote(RemoteEntity):
 
     _attr_has_entity_name = True
     _attr_name = "IR Remote"
-    _attr_available = True
+    _attr_available = False
+    _attr_should_poll = True
     if RemoteEntityFeature is not None and hasattr(
         RemoteEntityFeature, "LEARN_COMMAND"
     ):
@@ -128,7 +131,9 @@ class ContiIRRemote(RemoteEntity):
     async def async_update(self) -> None:
         """Refresh the visible command list from storage."""
         self._commands = await self._storage.async_all_commands()
-        self._attr_available = True
+        self._attr_available = await self._manager.async_is_device_available(
+            self._device_id
+        )
         self._library_supported = bool(
             any(
                 str(command.get("source", "")).strip() == "cloud"
@@ -214,6 +219,8 @@ class ContiIRRemote(RemoteEntity):
         """Send raw IR payloads directly through the IR cloud raw endpoint."""
         raw_payload = _raw_payload_from_command(action) or _raw_payload_from_kwargs(kwargs)
         if raw_payload is None:
+            return False
+        if not await self._manager.async_is_device_available(self._device_id):
             return False
 
         cloud = getattr(self._manager, "_cloud", None)

@@ -121,6 +121,29 @@ class IRStorage:
                 len(normalized_commands),
             )
 
+    async def async_update_runtime_metadata(
+        self,
+        *,
+        infrared_id: str = "",
+        remote_id: str = "",
+        category_id: str = "",
+        brand_id: str = "",
+    ) -> None:
+        """Persist runtime Tuya IR identifiers without replacing commands."""
+        await self.async_load()
+        async with self._lock:
+            data = self._data or {"device_id": self._device_id, "commands": {}}
+            if infrared_id:
+                data["infrared_id"] = infrared_id
+            if remote_id:
+                data["remote_id"] = remote_id
+            if category_id:
+                data["category_id"] = category_id
+            if brand_id:
+                data["brand_id"] = brand_id
+            self._data = data
+            await self._store.async_save(data)
+
     async def async_get_command(
         self, action: str
     ) -> dict[str, Any] | None:
@@ -274,6 +297,11 @@ class IRStorage:
         """Return the Tuya remote_id created for this IR library."""
         data = await self.async_load()
         return str(data.get("remote_id") or "").strip()
+
+    async def async_infrared_id(self) -> str:
+        """Return the Tuya infrared_id for this IR hub."""
+        data = await self.async_load()
+        return str(data.get("infrared_id") or "").strip()
 
     async def _async_import_default_pack_if_empty(self) -> None:
         """Auto-import a local pack named after the device when storage is empty."""

@@ -215,6 +215,47 @@ class TuyaIRCloud:
         """Send a stored command through the Smart Life OAuth session."""
         return await self._oauth.async_send_ir_command(device_id, command)
 
+    async def is_device_online(self, device_id: str) -> bool:
+        """Return whether the physical IR hub is reachable through cloud state."""
+        online = getattr(self._oauth, "async_is_device_online", None)
+        if online is None:
+            return False
+        return bool(await online(device_id))
+
+    async def send_raw_runtime_command(
+        self,
+        device_id: str,
+        raw_code: Any,
+        *,
+        infrared_id: str = "",
+        remote_id: str = "",
+    ) -> bool:
+        """Send raw IR through Tuya's normal runtime remote endpoint."""
+        resolved_infrared_id = infrared_id or await self.resolve_infrared_id(device_id)
+        return await self._oauth.send_raw_runtime_command(
+            resolved_infrared_id,
+            remote_id,
+            raw_code,
+            device_id=device_id,
+        )
+
+    async def send_ac_runtime_command(
+        self,
+        device_id: str,
+        state_payload: dict[str, Any],
+        *,
+        infrared_id: str = "",
+        remote_id: str = "",
+    ) -> bool:
+        """Send structured AC state through Tuya's runtime AC endpoint."""
+        resolved_infrared_id = infrared_id or await self.resolve_infrared_id(device_id)
+        return await self._oauth.send_ac_runtime_command(
+            resolved_infrared_id,
+            remote_id,
+            state_payload,
+            device_id=device_id,
+        )
+
     async def send_raw_command(
         self,
         device_id: str,
@@ -222,7 +263,7 @@ class TuyaIRCloud:
         *,
         remote_id: str = "",
     ) -> bool:
-        """Send a raw IR payload without requiring a cloud library remote."""
+        """Send a raw IR payload through a bound Tuya runtime remote."""
         body = payload if isinstance(payload, dict) else {"code": payload}
         command = {
             "source": "raw",
@@ -231,7 +272,11 @@ class TuyaIRCloud:
                 "remote_id": remote_id,
             },
         }
-        return await self.send_command(device_id, command)
+        return await self.send_raw_runtime_command(
+            device_id,
+            body,
+            remote_id=remote_id,
+        )
 
     async def start_learning(self, device_id: str, remote_id: str = "") -> str:
         """Enable IR learning mode and return the learning timestamp."""

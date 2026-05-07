@@ -476,6 +476,11 @@ class TuyaOAuthManager:
 
         devices: list[dict[str, Any]] = []
         for dev in manager.device_map.values():
+            online_values = [
+                getattr(dev, attr)
+                for attr in ("online", "is_online", "isOnline")
+                if hasattr(dev, attr)
+            ]
             info: dict[str, Any] = {
                 "id": getattr(dev, "id", ""),
                 "name": getattr(dev, "name", ""),
@@ -485,6 +490,8 @@ class TuyaOAuthManager:
                 "product_name": getattr(dev, "product_name", "") or "",
                 "uid": self._uid,
             }
+            if online_values:
+                info["online"] = any(bool(value) for value in online_values)
             if info["id"]:
                 devices.append(info)
                 self._sharing_device_cache[info["id"]] = info
@@ -673,6 +680,29 @@ class TuyaOAuthManager:
         self._sync_from_helper(helper)
         return result
 
+    async def async_is_device_online(self, device_id: str) -> bool:
+        """Return current cloud/sharing online state for a device."""
+        device_id = str(device_id).strip()
+        if not device_id:
+            return False
+
+        if self.is_qr_mode:
+            await self.async_list_devices_sharing()
+            cached = self._sharing_device_cache.get(device_id)
+            if not isinstance(cached, dict):
+                return False
+            if "online" in cached:
+                return bool(cached.get("online"))
+            remotes = await self.async_get_ir_device_remotes(device_id)
+            return remotes is not None
+
+        info = await self.async_get_device_info(device_id)
+        if isinstance(info, dict) and "online" in info:
+            return bool(info.get("online"))
+
+        status = await self.async_get_device_status(device_id)
+        return bool(status)
+
     async def async_get_ir_categories(self, device_id: str) -> Any:
         """Fetch IR categories through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
@@ -780,6 +810,27 @@ class TuyaOAuthManager:
         body = payload.get("body")
         if path and isinstance(body, dict):
             path = path.replace(f"/infrareds/{device_id}/", f"/infrareds/{infrared_id}/")
+            legacy_testing_path = "/".join(("testing", "raw", "command"))
+            if legacy_testing_path in path:
+                remote_id = str(payload.get("remote_id") or "").strip()
+                if not remote_id:
+                    _LOGGER.error(
+                        "IR runtime raw send skipped: device_id=%s infrared_id=%s "
+                        "remote_id=%s response_body=%s",
+                        device_id,
+                        infrared_id,
+                        remote_id,
+                        "legacy testing endpoint rejected without remote_id",
+                    )
+                    return False
+                path = f"/v2.0/infrareds/{infrared_id}/remotes/{remote_id}/raw/command"
+            _LOGGER.debug(
+                "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s payload=%s",
+                infrared_id,
+                payload.get("remote_id", ""),
+                path,
+                body,
+            )
             result = await self._sharing_api_post(device_id, path, body)
             return result is not None
 
@@ -802,11 +853,82 @@ class TuyaOAuthManager:
         if not body:
             return False
 
-        if payload.get("remote_id"):
-            path = f"/v2.0/infrareds/{infrared_id}/remotes/{payload['remote_id']}/raw/command"
-        else:
-            path = f"/v2.0/infrareds/{infrared_id}/testing/raw/command"
-        result = await self._sharing_api_post(device_id, path, body)
+        remote_id = str(payload.get("remote_id") or "").strip()
+        if not remote_id:
+            _LOGGER.error(
+                "IR runtime raw send skipped: device_id=%s infrared_id=%s remote_id=%s response_body=%s",
+                device_id,
+                infrared_id,
+                remote_id,
+                "missing remote_id",
+            )
+            return False
+        return await self.send_raw_runtime_command(
+            infrared_id,
+            remote_id,
+            body,
+            device_id=device_id,
+        )
+
+    async def send_raw_runtime_command(
+        self,
+        infrared_id: str,
+        remote_id: str,
+        raw_code: Any,
+        *,
+        device_id: str = "",
+    ) -> bool:
+        """Send a raw IR packet through the runtime remote endpoint."""
+        infrared_id = str(infrared_id).strip()
+        remote_id = str(remote_id).strip()
+        payload = raw_code if isinstance(raw_code, dict) else {"code": raw_code}
+        if not infrared_id or not remote_id or not payload:
+            _LOGGER.error(
+                "IR runtime raw send skipped: infrared_id=%s remote_id=%s payload=%s",
+                infrared_id,
+                remote_id,
+                payload,
+            )
+            return False
+        path = f"/v2.0/infrareds/{infrared_id}/remotes/{remote_id}/raw/command"
+        _LOGGER.debug(
+            "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s payload=%s",
+            infrared_id,
+            remote_id,
+            path,
+            payload,
+        )
+        result = await self._sharing_api_post(device_id or infrared_id, path, payload)
+        return result is not None
+
+    async def send_ac_runtime_command(
+        self,
+        infrared_id: str,
+        remote_id: str,
+        state_payload: dict[str, Any],
+        *,
+        device_id: str = "",
+    ) -> bool:
+        """Send a structured AC state through Tuya's runtime AC endpoint."""
+        infrared_id = str(infrared_id).strip()
+        remote_id = str(remote_id).strip()
+        if not infrared_id or not remote_id or not state_payload:
+            _LOGGER.error(
+                "IR runtime AC send skipped: infrared_id=%s remote_id=%s payload=%s",
+                infrared_id,
+                remote_id,
+                state_payload,
+            )
+            return False
+        path = f"/v2.0/infrareds/{infrared_id}/air-conditioners/{remote_id}/command"
+        _LOGGER.debug(
+            "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s payload=%s",
+            infrared_id,
+            remote_id,
+            path,
+            state_payload,
+        )
+        result = await self._sharing_api_post(device_id or infrared_id, path, state_payload)
         return result is not None
 
     async def async_start_ir_learning(

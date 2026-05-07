@@ -41,6 +41,12 @@ from .const import (
     CONF_DEVICE_TYPE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
+    CONF_IR_BRAND,
+    CONF_IR_BRAND_ID,
+    CONF_IR_CATEGORY_ID,
+    CONF_IR_INFRARED_ID,
+    CONF_IR_MODEL,
+    CONF_IR_REMOTE_ID,
     CONF_LOCAL_KEY,
     CONF_MAPPING_SOURCE,
     CONF_PROTOCOL_VERSION,
@@ -231,6 +237,36 @@ def _find_ir_storage(hass: HomeAssistant, device_id: str) -> Any | None:
     return None
 
 
+def _select_ir_runtime_remote_id(
+    remotes: list[dict[str, Any]],
+    *,
+    brand: str = "",
+    model: str = "",
+) -> str:
+    """Pick the most likely Tuya runtime remote_id for an IR entry."""
+    best: tuple[int, str] | None = None
+    brand = brand.lower()
+    model = model.lower().replace("_", " ")
+    for remote in remotes:
+        remote_id = str(remote.get("remote_id") or remote.get("id") or "").strip()
+        if not remote_id:
+            continue
+        score = 1
+        haystack = " ".join(
+            str(remote.get(key) or "").lower().replace("_", " ")
+            for key in ("name", "brand_id", "category_id", "remote_index")
+        )
+        if brand and brand in haystack:
+            score += 4
+        if model and model in haystack:
+            score += 4
+        if any(token in haystack for token in ("ac", "air", "condition", "kt")):
+            score += 2
+        if best is None or score > best[0]:
+            best = (score, remote_id)
+    return best[1] if best else ""
+
+
 def _resolve_ir_pack_path(hass: HomeAssistant, raw_path: str) -> Path:
     path = Path(raw_path)
     if not path.is_absolute():
@@ -264,7 +300,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             oauth = oauth_global
 
         cloud = TuyaIRCloud(oauth) if oauth.is_configured else None
-        ir_manager = IRManager(storage, cloud)
+        infrared_id = str(entry.data.get(CONF_IR_INFRARED_ID, "")).strip()
+        remote_id = str(entry.data.get(CONF_IR_REMOTE_ID, "")).strip()
+        if cloud is not None and (not infrared_id or not remote_id):
+            try:
+                infrared_id = infrared_id or await cloud.resolve_infrared_id(device_id)
+                if not remote_id:
+                    remotes = await cloud.list_device_remotes(device_id)
+                    remote_id = _select_ir_runtime_remote_id(
+                        remotes,
+                        brand=str(entry.data.get(CONF_IR_BRAND) or ""),
+                        model=str(entry.data.get(CONF_IR_MODEL) or ""),
+                    )
+                _LOGGER.info(
+                    "IR runtime metadata setup device=%s infrared_id=%s remote_id=%s",
+                    device_id,
+                    infrared_id,
+                    remote_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.warning(
+                    "IR runtime metadata setup failed device=%s error=%s",
+                    device_id,
+                    exc,
+                )
+        await storage.async_update_runtime_metadata(
+            infrared_id=infrared_id,
+            remote_id=remote_id,
+            category_id=str(entry.data.get(CONF_IR_CATEGORY_ID, "")).strip(),
+            brand_id=str(entry.data.get(CONF_IR_BRAND_ID, "")).strip(),
+        )
+        if (
+            infrared_id != str(entry.data.get(CONF_IR_INFRARED_ID, "")).strip()
+            or remote_id != str(entry.data.get(CONF_IR_REMOTE_ID, "")).strip()
+        ):
+            new_data = dict(entry.data)
+            if infrared_id:
+                new_data[CONF_IR_INFRARED_ID] = infrared_id
+            if remote_id:
+                new_data[CONF_IR_REMOTE_ID] = remote_id
+            hass.config_entries.async_update_entry(entry, data=new_data)
+        ir_manager = IRManager(
+            storage,
+            cloud,
+            host=str(entry.data.get(CONF_HOST, "")).strip(),
+            port=int(entry.data.get(CONF_PORT, DEFAULT_PORT) or DEFAULT_PORT),
+        )
         hass.data[DOMAIN][entry.entry_id] = {
             "device_id": device_id,
             _IR_MANAGER_KEY: ir_manager,

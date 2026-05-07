@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.climate import (
@@ -27,6 +28,7 @@ from .ir_manager import IRCommandNotConfigured, IRManager, IRSendError
 from .ir_storage import IRStorage
 
 _LOGGER = logging.getLogger(__name__)
+SCAN_INTERVAL = timedelta(seconds=30)
 
 IR_HVAC_MODES: dict[HVACMode, str] = {
     HVACMode.COOL: "cool",
@@ -34,6 +36,13 @@ IR_HVAC_MODES: dict[HVACMode, str] = {
     HVACMode.DRY: "dry",
     HVACMode.FAN_ONLY: "fan",
     HVACMode.AUTO: "auto",
+}
+TUYA_AC_MODES: dict[str, str] = {
+    "cool": "cold",
+    "heat": "hot",
+    "dry": "wet",
+    "fan": "wind",
+    "auto": "auto",
 }
 
 IR_FAN_MODES = ["auto", "low", "medium", "high"]
@@ -89,6 +98,7 @@ class ContiIRClimate(ClimateEntity):
 
     _attr_has_entity_name = True
     _attr_name = "IR Climate"
+    _attr_should_poll = True
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = 1.0
     _attr_min_temp = MIN_TEMP
@@ -139,7 +149,10 @@ class ContiIRClimate(ClimateEntity):
     async def async_update(self) -> None:
         """Refresh available commands from storage."""
         self._commands = await self._storage.async_all_commands()
-        self._attr_available = bool(self._commands)
+        self._attr_available = bool(
+            self._commands
+            and await self._manager.async_is_device_available(self._device_id)
+        )
         _LOGGER.debug(
             "IR climate available commands count=%s sample=%s",
             len(self._commands),
@@ -183,10 +196,15 @@ class ContiIRClimate(ClimateEntity):
 
     async def async_turn_off(self) -> None:
         """Turn the virtual AC off."""
+        self._power = False
+        if await self._send_ac_runtime_state():
+            self.async_write_ha_state()
+            return
+
         if not await self._send_first_available(["ac_off", "power_off", "off"]):
             if not await self._send_first_available(["power"]):
+                self._power = True
                 raise HomeAssistantError("ir_command_not_found")
-        self._power = False
         self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -238,6 +256,9 @@ class ContiIRClimate(ClimateEntity):
 
     async def _send_state(self) -> bool:
         """Send a full-state AC command when the raw code pack exposes one."""
+        if await self._send_ac_runtime_state():
+            return True
+
         state_command = self._state_command_name()
         _LOGGER.debug("Generated climate key=%s", state_command)
         candidates = [state_command]
@@ -256,6 +277,30 @@ class ContiIRClimate(ClimateEntity):
                 candidates.append(f"fan_{fan_code}")
             candidates.append("fan")
         return await self._send_first_available(candidates)
+
+    async def _send_ac_runtime_state(self) -> bool:
+        """Send structured AC state before falling back to raw pack packets."""
+        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
+        payload = {
+            "power": bool(self._power),
+            "mode": TUYA_AC_MODES.get(mode, mode),
+            "temp": max(MIN_TEMP, min(MAX_TEMP, int(self._target_temp))),
+            "wind": self._fan_mode,
+            "swing": bool(self._swing_on),
+        }
+        send_ac = getattr(self._manager, "send_ac_command", None)
+        if send_ac is None:
+            return False
+        try:
+            return bool(await send_ac(self._device_id, payload))
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "IR structured AC send failed device=%s payload=%s error=%s",
+                self._device_id,
+                payload,
+                exc,
+            )
+            return False
 
     def _state_command_name(self) -> str:
         """Return canonical full-state AC raw command name."""
