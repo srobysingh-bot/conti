@@ -7,6 +7,11 @@ from collections.abc import Iterable
 from typing import Any
 
 from homeassistant.components.remote import RemoteEntity
+
+try:
+    from homeassistant.components.remote import RemoteEntityFeature
+except ImportError:  # pragma: no cover - older Home Assistant versions
+    RemoteEntityFeature = None  # type: ignore[assignment]
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
@@ -17,11 +22,13 @@ from .const import (
     CONF_IR_BRAND,
     CONF_IR_CATEGORY,
     CONF_IR_MODEL,
+    CONF_IR_REMOTE_ID,
     CONF_RUNTIME_CHANNEL,
     DOMAIN,
     MANUFACTURER,
     RUNTIME_CHANNEL_IR,
 )
+from .ir_learning import IRLearningError, IRLearningSession
 from .ir_manager import IRCommandNotConfigured, IRManager, IRSendError
 from .ir_storage import IRStorage
 
@@ -60,6 +67,9 @@ class ContiIRRemote(RemoteEntity):
 
     _attr_has_entity_name = True
     _attr_name = "IR Remote"
+    _attr_available = True
+    if RemoteEntityFeature is not None:
+        _attr_supported_features = RemoteEntityFeature.LEARN_COMMAND
 
     def __init__(
         self,
@@ -73,6 +83,7 @@ class ContiIRRemote(RemoteEntity):
         self._storage = storage
         self._manager = manager
         self._commands: dict[str, dict[str, Any]] = {}
+        self._library_supported = True
         self._attr_unique_id = f"{entry.entry_id}_ir_remote"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, device_id)},
@@ -114,12 +125,20 @@ class ContiIRRemote(RemoteEntity):
     async def async_update(self) -> None:
         """Refresh the visible command list from storage."""
         self._commands = await self._storage.async_all_commands()
-        self._attr_available = bool(self._commands)
+        self._attr_available = True
+        self._library_supported = bool(
+            any(
+                str(command.get("source", "")).strip() == "cloud"
+                for command in self._commands.values()
+                if isinstance(command, dict)
+            )
+        )
         if not self._commands:
             _LOGGER.warning(
-                "IR: No library found for device %s; use learning mode",
+                "IR cloud library unavailable, continuing in raw mode device=%s",
                 self._device_id,
             )
+            self._library_supported = False
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Remote devices are always ready; no-op turn on."""
@@ -132,15 +151,105 @@ class ContiIRRemote(RemoteEntity):
         command: Iterable[str] | str,
         **kwargs: Any,
     ) -> None:
-        """Send one or more stored IR commands."""
+        """Send one or more stored or raw IR commands."""
         commands = [command] if isinstance(command, str) else list(command)
         for action in commands:
             try:
                 await self._manager.send_ir_command(self._device_id, str(action))
             except IRCommandNotConfigured as exc:
+                if await self._async_send_raw_command(str(action), kwargs):
+                    continue
                 raise HomeAssistantError("ir_command_not_found") from exc
             except IRSendError as exc:
                 raise HomeAssistantError("ir_send_failed") from exc
 
         await self.async_update()
         self.async_write_ha_state()
+
+    async def async_learn_command(
+        self,
+        device: str | None = None,
+        command: Iterable[str] | str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Learn or store one or more IR commands without requiring a library."""
+        if command is None:
+            raise HomeAssistantError("ir_command_required")
+
+        commands = [command] if isinstance(command, str) else list(command)
+        session = IRLearningSession(
+            self._storage,
+            cloud=getattr(self._manager, "_cloud", None),
+        )
+        provided_payload = _raw_payload_from_kwargs(kwargs)
+        for action in commands:
+            try:
+                payload = provided_payload
+                if payload is None:
+                    learning_time = await session.start_learning(self._device_id)
+                    payload = await session.capture_learned_payload(
+                        self._device_id,
+                        learning_time,
+                    )
+                await session.learn_command(
+                    self._device_id,
+                    str(action),
+                    payload,
+                    overwrite=bool(kwargs.get("overwrite", True)),
+                )
+            except IRLearningError as exc:
+                raise HomeAssistantError("ir_learn_failed") from exc
+
+        await self.async_update()
+        self.async_write_ha_state()
+
+    async def _async_send_raw_command(
+        self,
+        action: str,
+        kwargs: dict[str, Any],
+    ) -> bool:
+        """Send raw IR payloads directly through the IR cloud raw endpoint."""
+        raw_payload = _raw_payload_from_command(action) or _raw_payload_from_kwargs(kwargs)
+        if raw_payload is None:
+            return False
+
+        cloud = getattr(self._manager, "_cloud", None)
+        if cloud is None or not hasattr(cloud, "send_raw_command"):
+            return False
+
+        remote_id = str(
+            kwargs.get("remote_id")
+            or self._entry.data.get(CONF_IR_REMOTE_ID)
+            or await self._storage.async_remote_id()
+            or ""
+        ).strip()
+        try:
+            return bool(
+                await cloud.send_raw_command(
+                    self._device_id,
+                    raw_payload,
+                    remote_id=remote_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.warning("IR raw command failed device=%s: %s", self._device_id, exc)
+            return False
+
+
+def _raw_payload_from_command(command: str) -> Any | None:
+    """Return a raw payload when the service command itself is raw IR data."""
+    command = str(command).strip()
+    if not command:
+        return None
+    if command.startswith(("raw:", "base64:")):
+        return {"code": command.split(":", 1)[1].strip()}
+    return None
+
+
+def _raw_payload_from_kwargs(kwargs: dict[str, Any]) -> Any | None:
+    """Extract raw IR payload from common service-call fields."""
+    for key in ("raw", "code", "payload", "data"):
+        value = kwargs.get(key)
+        if value not in (None, "", {}, []):
+            return value
+    return None

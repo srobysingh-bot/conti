@@ -23,10 +23,14 @@ class TuyaIRCloud:
 
     def __init__(self, oauth_manager: TuyaOAuthManager) -> None:
         self._oauth = oauth_manager
+        self._library_supported = True
 
     async def list_categories(self, device_id: str) -> list[dict[str, Any]]:
         """List IR appliance categories supported by an IR hub."""
         result = await _retry_ir_api(self._oauth.async_get_ir_categories, device_id)
+        if result in (None, {}, []):
+            self._mark_library_unavailable(device_id)
+            return []
         items = _coerce_list(result)
         categories = [
             {
@@ -49,6 +53,9 @@ class TuyaIRCloud:
     async def list_device_remotes(self, device_id: str) -> list[dict[str, Any]]:
         """List remotes already available on an IR hub."""
         result = await _retry_ir_api(self._oauth.async_get_ir_device_remotes, device_id)
+        if result in (None, {}, []):
+            self._mark_library_unavailable(device_id)
+            return []
         remotes = _normalize_remote_items(_coerce_list(result))
         _LOGGER.info("IR: Remotes found=%d device=%s", len(remotes), device_id)
         return remotes
@@ -67,6 +74,9 @@ class TuyaIRCloud:
             category,
             device_id=device_id,
         )
+        if result in (None, {}, []):
+            self._mark_library_unavailable(device_id)
+            return []
         items = _coerce_list(result)
         return [
             {
@@ -99,6 +109,9 @@ class TuyaIRCloud:
             brand,
             device_id=device_id,
         )
+        if result in (None, {}, []):
+            self._mark_library_unavailable(device_id)
+            return []
         items = _coerce_list(result)
         models = _normalize_remote_items(
             items,
@@ -138,6 +151,9 @@ class TuyaIRCloud:
                 device_id,
                 remote_id,
             )
+            if result in (None, {}, []):
+                self._mark_library_unavailable(device_id)
+                return {}
             commands = _normalize_commands(
                 result,
                 category_id=category_id,
@@ -199,6 +215,24 @@ class TuyaIRCloud:
         """Send a stored command through the Smart Life OAuth session."""
         return await self._oauth.async_send_ir_command(device_id, command)
 
+    async def send_raw_command(
+        self,
+        device_id: str,
+        payload: Any,
+        *,
+        remote_id: str = "",
+    ) -> bool:
+        """Send a raw IR payload without requiring a cloud library remote."""
+        body = payload if isinstance(payload, dict) else {"code": payload}
+        command = {
+            "source": "raw",
+            "payload": {
+                **body,
+                "remote_id": remote_id,
+            },
+        }
+        return await self.send_command(device_id, command)
+
     async def start_learning(self, device_id: str, remote_id: str = "") -> str:
         """Enable IR learning mode and return the learning timestamp."""
         result = await self._oauth.async_start_ir_learning(device_id, remote_id)
@@ -234,6 +268,15 @@ class TuyaIRCloud:
         if not success or not code:
             return None
         return {"code": code, "learning_time": learning_time}
+
+    def _mark_library_unavailable(self, device_id: str) -> None:
+        """Record optional library failure without blocking raw IR operation."""
+        if self._library_supported:
+            _LOGGER.warning(
+                "IR cloud library unavailable, continuing in raw mode device=%s",
+                device_id,
+            )
+        self._library_supported = False
 
 
 async def _retry_ir_api(call: Any, *args: Any, attempts: int = 2, **kwargs: Any) -> Any:
