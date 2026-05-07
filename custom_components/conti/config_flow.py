@@ -1552,25 +1552,27 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return
 
         try:
-            remotes = await cloud.require_device_remotes(device_id)
+            remotes = await cloud.list_device_remotes(device_id)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.error(
-                "Unable to resolve Tuya AC remote profile device=%s infrared_id=%s error=%s",
+            _LOGGER.warning(
+                "Tuya AC remote profile unavailable device=%s infrared_id=%s "
+                "error=%s; continuing with bundled IR pack",
                 device_id,
                 self._infrared_id,
                 exc,
             )
-            raise RuntimeError("Unable to resolve Tuya AC remote profile") from exc
+            return
 
         selected_remote = self._select_runtime_remote(remotes)
         if selected_remote is None:
-            _LOGGER.error(
-                "IR runtime remote_id unavailable device=%s infrared_id=%s remotes=%s",
+            _LOGGER.warning(
+                "Tuya AC remote profile not resolved device=%s infrared_id=%s "
+                "remotes=%s; continuing with bundled IR pack",
                 device_id,
                 self._infrared_id,
                 remotes,
             )
-            raise RuntimeError("Unable to resolve Tuya AC remote profile")
+            return
 
         for remote in [selected_remote]:
             remote_id = str(remote.get("remote_id") or remote.get("id") or "").strip()
@@ -1603,12 +1605,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return
 
         _LOGGER.warning(
-            "IR runtime remote_id unavailable device=%s infrared_id=%s remotes=%s",
+            "Tuya AC remote profile missing remote_id device=%s infrared_id=%s "
+            "remotes=%s; continuing with bundled IR pack",
             device_id,
             self._infrared_id,
             remotes,
         )
-        raise RuntimeError("Unable to resolve Tuya AC remote profile")
 
     def _select_runtime_remote(
         self,
@@ -2026,13 +2028,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "IR PACK: loaded commands=%s",
                         len(pack.get("commands", {})),
                     )
-                    try:
-                        return await self._async_create_ir_pack_entry()
-                    except RuntimeError as exc:
-                        if str(exc) == "Unable to resolve Tuya AC remote profile":
-                            errors["base"] = "ir_remote_profile_not_resolved"
-                        else:
-                            raise
+                    return await self._async_create_ir_pack_entry()
             else:
                 errors["base"] = "ir_pack_not_found"
 

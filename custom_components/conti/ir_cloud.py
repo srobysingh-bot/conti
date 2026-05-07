@@ -60,22 +60,6 @@ class TuyaIRCloud:
         _LOGGER.info("IR: Remotes found=%d device=%s remotes=%s", len(remotes), device_id, remotes)
         return remotes
 
-    async def require_device_remotes(self, device_id: str) -> list[dict[str, Any]]:
-        """List remotes and raise when Tuya remote discovery is unavailable."""
-        result = await self._oauth.async_get_ir_device_remotes(device_id)
-        if result in (None, {}, []):
-            raise RuntimeError("Unable to resolve Tuya AC remote profile")
-        remotes = _normalize_remote_items(_coerce_list(result))
-        if not remotes:
-            raise RuntimeError("Unable to resolve Tuya AC remote profile")
-        _LOGGER.info(
-            "IR: Required remotes found=%d device=%s remotes=%s",
-            len(remotes),
-            device_id,
-            remotes,
-        )
-        return remotes
-
     async def resolve_infrared_id(self, device_id: str) -> str:
         """Return the Tuya infrared_id used by the IR APIs."""
         infrared_id = await self._oauth.async_get_infrared_id(device_id)

@@ -62,7 +62,13 @@ class IRManager:
             return False
         return self._local_support_cache.get(device_id, True)
 
-    async def send_ir_command(self, device_id: str, action: str) -> bool:
+    async def send_ir_command(
+        self,
+        device_id: str,
+        action: str,
+        *,
+        cloud_fallback: bool = True,
+    ) -> bool:
         """Send an IR command by action name.
 
         Cloud-sourced commands use cloud send. Learned commands try local send
@@ -82,7 +88,12 @@ class IRManager:
                     action,
                     _payload_length(raw_command),
                 )
-                if await self._send_cloud(device_id, raw_command):
+                if self.supports_local_ir(device_id):
+                    if await self._send_local(device_id, raw_command):
+                        self._remember_emit(action, raw_command, "local")
+                        return True
+                if cloud_fallback and await self._send_cloud(device_id, raw_command):
+                    self._remember_emit(action, raw_command, "cloud")
                     return True
                 raise IRSendError("ir_send_failed")
             _LOGGER.warning(
@@ -93,6 +104,26 @@ class IRManager:
             raise IRCommandNotConfigured("command_not_configured")
 
         source = str(command.get("source", "")).strip() or "cloud"
+        if source == "code_pack" and self.supports_local_ir(device_id):
+            self._remember_emit(action, command, "code_pack")
+            _LOGGER.info(
+                "IR execution path device=%s action=%s path=code_pack_local "
+                "payload_length=%s",
+                device_id,
+                action,
+                _payload_length(command),
+            )
+            if await self._send_local(device_id, command):
+                self._remember_emit(action, command, "local")
+                return True
+            if cloud_fallback:
+                _LOGGER.warning(
+                    "IR code pack local send failed; falling back to cloud "
+                    "device=%s action=%s",
+                    device_id,
+                    action,
+                )
+
         if source in {"cloud", "raw", "code_pack"}:
             self._remember_emit(action, command, source)
             _LOGGER.info(
@@ -102,7 +133,7 @@ class IRManager:
                 source,
                 _payload_length(command),
             )
-            if await self._send_cloud(device_id, command):
+            if cloud_fallback and await self._send_cloud(device_id, command):
                 return True
             raise IRSendError("ir_send_failed")
 
@@ -115,7 +146,7 @@ class IRManager:
                     action,
                     _payload_length(command),
                 )
-                if await self._send_cloud(device_id, command):
+                if cloud_fallback and await self._send_cloud(device_id, command):
                     return True
                 raise IRSendError("ir_send_failed")
 
@@ -134,7 +165,7 @@ class IRManager:
                 device_id,
                 action,
             )
-            if await self._send_cloud(device_id, command):
+            if cloud_fallback and await self._send_cloud(device_id, command):
                 self._remember_emit(action, command, "cloud")
                 return True
             raise IRSendError("ir_send_failed")
@@ -154,12 +185,13 @@ class IRManager:
         remote_id = await self._storage.async_remote_id()
         infrared_id = await self._storage.async_infrared_id()
         if not remote_id:
-            _LOGGER.error(
-                "IR AC runtime send blocked device=%s infrared_id=%s reason=missing_remote_id",
+            _LOGGER.debug(
+                "IR AC runtime unavailable device=%s infrared_id=%s "
+                "reason=missing_remote_id; using bundled raw fallback",
                 device_id,
                 infrared_id,
             )
-            raise IRRemoteIDNotResolved("Tuya AC remote_id not resolved")
+            return False
         try:
             ok = await self._cloud.send_ac_runtime_command(
                 device_id,

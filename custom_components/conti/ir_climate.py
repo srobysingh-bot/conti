@@ -109,12 +109,6 @@ async def async_setup_ir_climate_entry(
 
     if await storage.async_profile_type() != "ac":
         return
-    if not await storage.async_remote_id():
-        _LOGGER.error(
-            "Conti IR climate setup skipped: Tuya AC remote_id not resolved device=%s",
-            device_id,
-        )
-        return
 
     async_add_entities([ContiIRClimate(entry, device_id, storage, manager)], True)
 
@@ -228,7 +222,9 @@ class ContiIRClimate(ClimateEntity):
         self._power = True
         self._coerce_fan_for_current_state()
         if not await self._send_state():
-            if not await self._send_first_available(["power_on", "on", "power"]):
+            if not await self._send_first_available_with_ac_runtime_fallback(
+                ["power_on", "on", "power"]
+            ):
                 self._restore_state(old_state)
                 raise HomeAssistantError("ir_command_not_found")
         self._sync_dynamic_fan_modes()
@@ -237,14 +233,10 @@ class ContiIRClimate(ClimateEntity):
     async def async_turn_off(self) -> None:
         """Turn the virtual AC off."""
         self._power = False
-        if await self._send_ac_runtime_state():
-            self.async_write_ha_state()
-            return
-
-        if not await self._send_first_available(["ac_off", "power_off", "off"]):
-            if not await self._send_first_available(["power"]):
-                self._power = True
-                raise HomeAssistantError("ir_command_not_found")
+        off_actions = ["ac_off", "power_off", "off", "power"]
+        if not await self._send_first_available_with_ac_runtime_fallback(off_actions):
+            self._power = True
+            raise HomeAssistantError("ir_command_not_found")
         self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -263,7 +255,9 @@ class ContiIRClimate(ClimateEntity):
                 for mode in self._mode_candidates()
                 for action in (f"mode_{mode}", mode)
             ]
-            if not await self._send_first_available([*mode_actions, "mode"]):
+            if not await self._send_first_available_with_ac_runtime_fallback(
+                [*mode_actions, "mode"]
+            ):
                 self._restore_state(old_state)
                 raise HomeAssistantError("ir_command_not_found")
         self._sync_dynamic_fan_modes()
@@ -281,7 +275,9 @@ class ContiIRClimate(ClimateEntity):
         self._power = True
         self._coerce_fan_for_current_state()
         if not await self._send_state():
-            if not await self._send_first_available([f"temp_{new_temp}", str(new_temp)]):
+            if not await self._send_first_available_with_ac_runtime_fallback(
+                [f"temp_{new_temp}", str(new_temp)]
+            ):
                 if not await self._send_temperature_steps(old_state["target_temp"], new_temp):
                     self._restore_state(old_state)
                     raise HomeAssistantError("ir_command_not_found")
@@ -303,7 +299,7 @@ class ContiIRClimate(ClimateEntity):
         self._power = True
         if not await self._send_state():
             fan_code = self._fan_code()
-            if not await self._send_first_available(
+            if not await self._send_first_available_with_ac_runtime_fallback(
                 [f"fan_{fan_code}", f"fan_speed_{fan_code}", "fan_speed", "fan"]
             ):
                 self._restore_state(old_state)
@@ -337,16 +333,20 @@ class ContiIRClimate(ClimateEntity):
         self._fan_mode = IR_FAN_MODE_BY_CODE.get(fan_code, self._fan_mode)
         self._swing_on = swing == "on"
 
+        if await self._send_command(resolved_key, cloud_fallback=False):
+            _LOGGER.debug("IR climate emit transport=raw_pack_local key=%s", resolved_key)
+            return True
+
         if await self._send_ac_runtime_state():
             _LOGGER.debug("IR climate emit transport=ac_runtime key=%s", resolved_key)
             return True
 
-        _LOGGER.debug("IR climate emit transport=raw_pack key=%s", resolved_key)
-        await self._send_command(resolved_key)
+        _LOGGER.debug("IR climate emit transport=raw_pack_cloud key=%s", resolved_key)
+        await self._send_command(resolved_key, cloud_fallback=True)
         return True
 
     async def _send_ac_runtime_state(self) -> bool:
-        """Send structured AC state before falling back to raw pack packets."""
+        """Send structured AC state when local AC emit paths are unavailable."""
         mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
         payload = {
             "power": bool(self._power),
@@ -361,7 +361,14 @@ class ContiIRClimate(ClimateEntity):
         try:
             return bool(await send_ac(self._device_id, payload))
         except IRRemoteIDNotResolved as exc:
-            raise HomeAssistantError("Tuya AC remote_id not resolved") from exc
+            _LOGGER.debug(
+                "IR structured AC send unavailable device=%s payload=%s error=%s; "
+                "falling back to bundled raw pack",
+                self._device_id,
+                payload,
+                exc,
+            )
+            return False
         except IRDeviceUnavailable:
             return False
         except Exception as exc:  # noqa: BLE001
@@ -561,7 +568,12 @@ class ContiIRClimate(ClimateEntity):
             await self._send_command(action)
         return True
 
-    async def _send_first_available(self, actions: list[str]) -> bool:
+    async def _send_first_available(
+        self,
+        actions: list[str],
+        *,
+        cloud_fallback: bool = True,
+    ) -> bool:
         """Send the first command that exists in the stored library."""
         preferred = normalize_ir_action(actions[0]) if actions else ""
         for action in actions:
@@ -573,7 +585,13 @@ class ContiIRClimate(ClimateEntity):
                         preferred,
                         normalized,
                     )
-                await self._send_command(normalized)
+                if await self._send_command(
+                    normalized,
+                    cloud_fallback=cloud_fallback,
+                ):
+                    return True
+                if not cloud_fallback:
+                    continue
                 return True
         _LOGGER.debug(
             "IR climate command fallback exhausted device=%s candidates=%s",
@@ -587,13 +605,38 @@ class ContiIRClimate(ClimateEntity):
         _LOGGER.debug("Available command count=%s", len(self._commands))
         return False
 
-    async def _send_command(self, action: str) -> None:
+    async def _send_first_available_with_ac_runtime_fallback(
+        self,
+        actions: list[str],
+    ) -> bool:
+        """Send local first, then structured AC runtime, then cloud raw fallback."""
+        if await self._send_first_available(actions, cloud_fallback=False):
+            return True
+        if await self._send_ac_runtime_state():
+            return True
+        return await self._send_first_available(actions, cloud_fallback=True)
+
+    async def _send_command(self, action: str, *, cloud_fallback: bool = True) -> bool:
         """Send one normalized IR action and translate failures for HA."""
         try:
-            await self._manager.send_ir_command(self._device_id, action)
+            return bool(
+                await self._manager.send_ir_command(
+                    self._device_id,
+                    action,
+                    cloud_fallback=cloud_fallback,
+                )
+            )
         except IRCommandNotConfigured as exc:
             raise HomeAssistantError("ir_command_not_found") from exc
         except IRSendError as exc:
+            if not cloud_fallback:
+                _LOGGER.debug(
+                    "IR climate local emit unavailable device=%s action=%s error=%s",
+                    self._device_id,
+                    action,
+                    exc,
+                )
+                return False
             raise HomeAssistantError("ir_send_failed") from exc
 
 
