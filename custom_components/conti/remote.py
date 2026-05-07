@@ -59,6 +59,7 @@ async def async_setup_entry(
         )
         return
 
+    _LOGGER.info("Registering Conti IR remote entity for device %s", device_id)
     async_add_entities([ContiIRRemote(entry, device_id, storage, manager)], True)
 
 
@@ -68,7 +69,9 @@ class ContiIRRemote(RemoteEntity):
     _attr_has_entity_name = True
     _attr_name = "IR Remote"
     _attr_available = True
-    if RemoteEntityFeature is not None:
+    if RemoteEntityFeature is not None and hasattr(
+        RemoteEntityFeature, "LEARN_COMMAND"
+    ):
         _attr_supported_features = RemoteEntityFeature.LEARN_COMMAND
 
     def __init__(

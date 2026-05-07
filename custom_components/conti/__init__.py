@@ -24,7 +24,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
@@ -197,7 +197,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "ir_storage": storage,
         }
         _register_ir_services(hass)
-        await hass.config_entries.async_forward_entry_setups(entry, ["remote", "climate"])
+        _LOGGER.info("Forwarding Conti IR entry %s to remote platform", entry.entry_id)
+        await hass.config_entries.async_forward_entry_setups(entry, [Platform.REMOTE])
         _LOGGER.info(
             "Set up Conti IR device %s (category=%s)",
             device_id,
@@ -438,7 +439,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Conti config entry — disconnect device and clean up."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    platforms = (
+        [Platform.REMOTE]
+        if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR
+        else PLATFORMS
+    )
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, platforms)
 
     if unload_ok:
         entry_data = hass.data[DOMAIN].pop(entry.entry_id, {})
