@@ -25,7 +25,13 @@ from .const import (
     MANUFACTURER,
 )
 from .ir_actions import normalize_ir_action
-from .ir_manager import IRCommandNotConfigured, IRManager, IRSendError
+from .ir_manager import (
+    IRCommandNotConfigured,
+    IRDeviceUnavailable,
+    IRManager,
+    IRRemoteIDNotResolved,
+    IRSendError,
+)
 from .ir_storage import IRStorage
 
 _LOGGER = logging.getLogger(__name__)
@@ -102,6 +108,12 @@ async def async_setup_ir_climate_entry(
         return
 
     if await storage.async_profile_type() != "ac":
+        return
+    if not await storage.async_remote_id():
+        _LOGGER.error(
+            "Conti IR climate setup skipped: Tuya AC remote_id not resolved device=%s",
+            device_id,
+        )
         return
 
     async_add_entities([ContiIRClimate(entry, device_id, storage, manager)], True)
@@ -348,6 +360,10 @@ class ContiIRClimate(ClimateEntity):
             return False
         try:
             return bool(await send_ac(self._device_id, payload))
+        except IRRemoteIDNotResolved as exc:
+            raise HomeAssistantError("Tuya AC remote_id not resolved") from exc
+        except IRDeviceUnavailable:
+            return False
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug(
                 "IR structured AC send failed device=%s payload=%s error=%s",

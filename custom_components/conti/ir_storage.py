@@ -93,6 +93,7 @@ class IRStorage:
         category_id: str = "",
         brand_id: str = "",
         remote_id: str = "",
+        remote_index: str = "",
     ) -> None:
         """Persist a complete cloud-fetched command library."""
         normalized_commands: dict[str, dict[str, Any]] = {}
@@ -137,6 +138,8 @@ class IRStorage:
                 data["infrared_id"] = infrared_id
             if remote_id:
                 data["remote_id"] = remote_id
+            if remote_index:
+                data["remote_index"] = remote_index
             if category_id:
                 data["category_id"] = category_id
             if brand_id:
@@ -302,6 +305,20 @@ class IRStorage:
         """Return the Tuya infrared_id for this IR hub."""
         data = await self.async_load()
         return str(data.get("infrared_id") or "").strip()
+
+    async def async_runtime_metadata(self) -> dict[str, str]:
+        """Return persisted Tuya IR runtime identifiers."""
+        data = await self.async_load()
+        return {
+            "infrared_id": str(data.get("infrared_id") or "").strip(),
+            "remote_id": str(data.get("remote_id") or "").strip(),
+            "remote_index": str(data.get("remote_index") or "").strip(),
+            "category_id": str(data.get("category_id") or "").strip(),
+            "brand_id": str(data.get("brand_id") or "").strip(),
+            "category": str(data.get("category") or "").strip(),
+            "brand": str(data.get("brand") or "").strip(),
+            "model": str(data.get("model") or "").strip(),
+        }
 
     async def _async_import_default_pack_if_empty(self) -> None:
         """Auto-import a local pack named after the device when storage is empty."""

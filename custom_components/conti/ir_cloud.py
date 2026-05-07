@@ -57,7 +57,7 @@ class TuyaIRCloud:
             self._mark_library_unavailable(device_id)
             return []
         remotes = _normalize_remote_items(_coerce_list(result))
-        _LOGGER.info("IR: Remotes found=%d device=%s", len(remotes), device_id)
+        _LOGGER.info("IR: Remotes found=%d device=%s remotes=%s", len(remotes), device_id, remotes)
         return remotes
 
     async def resolve_infrared_id(self, device_id: str) -> str:
@@ -278,16 +278,15 @@ class TuyaIRCloud:
             remote_id=remote_id,
         )
 
-    async def start_learning(self, device_id: str, remote_id: str = "") -> str:
-        """Enable IR learning mode and return the learning timestamp."""
+    async def start_learning(self, device_id: str) -> str:
+        """Enable IR hub learning mode and return the learning timestamp."""
         infrared_id = await self.resolve_infrared_id(device_id)
         _LOGGER.info(
-            "IR learning start device_id=%s infrared_id=%s remote_id=%s",
+            "IR learning start device_id=%s infrared_id=%s target=ir_hub",
             device_id,
             infrared_id,
-            remote_id,
         )
-        result = await self._oauth.async_start_ir_learning(device_id, remote_id)
+        result = await self._oauth.async_start_ir_learning(device_id)
         _LOGGER.debug("IR LEARN START response=%s", result)
         if result in (None, False):
             _LOGGER.warning(
@@ -316,23 +315,22 @@ class TuyaIRCloud:
         )
         return learning_time
 
-    async def stop_learning(self, device_id: str, remote_id: str = "") -> None:
-        """Disable IR learning mode."""
+    async def stop_learning(self, device_id: str) -> None:
+        """Disable IR hub learning mode."""
         stop = getattr(self._oauth, "async_stop_ir_learning", None)
         if stop is None:
             return
-        result = await stop(device_id, remote_id)
+        result = await stop(device_id)
         _LOGGER.debug("IR LEARN STOP response=%s", result)
         _LOGGER.info("IR learning mode stopped device=%s response=%s", device_id, result)
 
     async def capture_learning_code(
-        self, device_id: str, learning_time: str, remote_id: str = ""
+        self, device_id: str, learning_time: str
     ) -> dict[str, Any] | None:
         """Query the IR code captured during learning mode."""
         result = await self._oauth.async_capture_ir_learning_code(
             device_id,
             learning_time,
-            remote_id,
         )
         _LOGGER.debug("IR LEARN POLL response=%s", result)
         if not isinstance(result, dict):
@@ -454,6 +452,7 @@ def _normalize_remote_items(
         ).strip()
         name = str(
             item.get("remote_name")
+            or item.get("remoteName")
             or item.get("model")
             or item.get("name")
             or item.get("brand_name")
@@ -463,7 +462,9 @@ def _normalize_remote_items(
             {
                 "id": model_id,
                 "name": name,
+                "remote_name": name,
                 "category_id": category_id,
+                "category": category_id,
                 "brand_id": brand_id,
                 "remote_id": remote_id,
                 "remote_index": remote_index,

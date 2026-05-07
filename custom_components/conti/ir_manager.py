@@ -26,6 +26,14 @@ class IRSendError(IRCommandError):
     """IR command failed on all available execution paths."""
 
 
+class IRRemoteIDNotResolved(IRSendError):
+    """Tuya AC runtime remote_id is required but missing."""
+
+
+class IRDeviceUnavailable(IRSendError):
+    """Physical IR device is not currently reachable."""
+
+
 class IRManager:
     """Execute IR commands from local storage with cloud fallback."""
 
@@ -140,17 +148,18 @@ class IRManager:
     ) -> bool:
         """Send structured AC state via Tuya runtime, when available."""
         if not await self.async_is_device_available(device_id):
-            return False
+            raise IRDeviceUnavailable("ir_device_unavailable")
         if self._cloud is None:
             return False
         remote_id = await self._storage.async_remote_id()
         infrared_id = await self._storage.async_infrared_id()
         if not remote_id:
-            _LOGGER.debug(
-                "IR AC runtime send skipped device=%s reason=missing_remote_id",
+            _LOGGER.error(
+                "IR AC runtime send blocked device=%s infrared_id=%s reason=missing_remote_id",
                 device_id,
+                infrared_id,
             )
-            return False
+            raise IRRemoteIDNotResolved("Tuya AC remote_id not resolved")
         try:
             ok = await self._cloud.send_ac_runtime_command(
                 device_id,
@@ -158,6 +167,8 @@ class IRManager:
                 infrared_id=infrared_id,
                 remote_id=remote_id,
             )
+        except (IRRemoteIDNotResolved, IRDeviceUnavailable):
+            raise
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug("IR AC runtime send failed for %s: %s", device_id, exc)
             return False

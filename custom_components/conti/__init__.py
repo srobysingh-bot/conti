@@ -46,6 +46,7 @@ from .const import (
     CONF_IR_CATEGORY_ID,
     CONF_IR_INFRARED_ID,
     CONF_IR_MODEL,
+    CONF_IR_REMOTE_INDEX,
     CONF_IR_REMOTE_ID,
     CONF_LOCAL_KEY,
     CONF_MAPPING_SOURCE,
@@ -222,6 +223,33 @@ def _register_ir_services(hass: HomeAssistant) -> None:
         except Exception as exc:  # noqa: BLE001
             raise HomeAssistantError("ir_send_failed") from exc
 
+    async def _handle_debug_list_ir_remotes(call: Any) -> None:
+        device_id = str(call.data["device_id"]).strip()
+        entry_data = _find_ir_entry_data(hass, device_id)
+        if entry_data is None:
+            raise HomeAssistantError("ir_device_not_found")
+        cloud = getattr(entry_data.get(_IR_MANAGER_KEY), "_cloud", None)
+        storage = entry_data.get("ir_storage")
+        if cloud is None or storage is None:
+            raise HomeAssistantError("ir_cloud_not_available")
+        infrared_id = await storage.async_infrared_id()
+        if not infrared_id:
+            infrared_id = await cloud.resolve_infrared_id(device_id)
+        remotes = await cloud.list_device_remotes(device_id)
+        _LOGGER.warning(
+            "IR DEBUG remotes: infrared_id=%s available_remotes=%s",
+            infrared_id,
+            [
+                {
+                    "remote_id": remote.get("remote_id") or remote.get("id"),
+                    "remote_name": remote.get("remote_name") or remote.get("name"),
+                    "category": remote.get("category_id") or remote.get("category"),
+                    "remote_index": remote.get("remote_index"),
+                }
+                for remote in remotes
+            ],
+        )
+
     hass.services.async_register(
         DOMAIN,
         "send_ir_command",
@@ -280,6 +308,12 @@ def _register_ir_services(hass: HomeAssistant) -> None:
         _handle_resend_last_ir,
         schema=vol.Schema({vol.Required("device_id"): str}),
     )
+    hass.services.async_register(
+        DOMAIN,
+        "debug_list_ir_remotes",
+        _handle_debug_list_ir_remotes,
+        schema=vol.Schema({vol.Required("device_id"): str}),
+    )
     hass.data[DOMAIN][_IR_SERVICES_REGISTERED] = True
 
 
@@ -305,6 +339,13 @@ def _find_ir_manager(hass: HomeAssistant, device_id: str) -> Any | None:
     return None
 
 
+def _find_ir_entry_data(hass: HomeAssistant, device_id: str) -> dict[str, Any] | None:
+    for entry_data in hass.data.get(DOMAIN, {}).values():
+        if isinstance(entry_data, dict) and entry_data.get("device_id") == device_id:
+            return entry_data
+    return None
+
+
 def _raw_payload_from_service(data: dict[str, Any]) -> Any:
     for key in ("raw", "code", "payload"):
         value = data.get(key)
@@ -315,14 +356,14 @@ def _raw_payload_from_service(data: dict[str, Any]) -> Any:
     return None
 
 
-def _select_ir_runtime_remote_id(
+def _select_ir_runtime_remote(
     remotes: list[dict[str, Any]],
     *,
     brand: str = "",
     model: str = "",
-) -> str:
-    """Pick the most likely Tuya runtime remote_id for an IR entry."""
-    best: tuple[int, str] | None = None
+) -> dict[str, Any] | None:
+    """Pick the most likely Tuya runtime remote for an IR entry."""
+    best: tuple[int, dict[str, Any]] | None = None
     brand = brand.lower()
     model = model.lower().replace("_", " ")
     for remote in remotes:
@@ -341,8 +382,8 @@ def _select_ir_runtime_remote_id(
         if any(token in haystack for token in ("ac", "air", "condition", "kt")):
             score += 2
         if best is None or score > best[0]:
-            best = (score, remote_id)
-    return best[1] if best else ""
+            best = (score, remote)
+    return best[1] if best else None
 
 
 def _resolve_ir_pack_path(hass: HomeAssistant, raw_path: str) -> Path:
@@ -385,11 +426,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 infrared_id = infrared_id or await cloud.resolve_infrared_id(device_id)
                 if not remote_id:
                     remotes = await cloud.list_device_remotes(device_id)
-                    remote_id = _select_ir_runtime_remote_id(
+                    selected_remote = _select_ir_runtime_remote(
                         remotes,
                         brand=str(entry.data.get(CONF_IR_BRAND) or ""),
                         model=str(entry.data.get(CONF_IR_MODEL) or ""),
                     )
+                    if selected_remote:
+                        remote_id = str(
+                            selected_remote.get("remote_id")
+                            or selected_remote.get("id")
+                            or ""
+                        ).strip()
+                        _LOGGER.info(
+                            "Resolved Tuya AC remote: infrared_id=%s remote_id=%s "
+                            "remote_name=%s category=%s",
+                            infrared_id,
+                            remote_id,
+                            selected_remote.get("remote_name")
+                            or selected_remote.get("name")
+                            or remote_id,
+                            selected_remote.get("category_id")
+                            or selected_remote.get("category")
+                            or "air_conditioner",
+                        )
                 _LOGGER.info(
                     "IR runtime metadata setup device=%s infrared_id=%s remote_id=%s",
                     device_id,
@@ -405,6 +464,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await storage.async_update_runtime_metadata(
             infrared_id=infrared_id,
             remote_id=remote_id,
+            remote_index=str(entry.data.get(CONF_IR_REMOTE_INDEX, "")).strip(),
             category_id=str(entry.data.get(CONF_IR_CATEGORY_ID, "")).strip(),
             brand_id=str(entry.data.get(CONF_IR_BRAND_ID, "")).strip(),
         )

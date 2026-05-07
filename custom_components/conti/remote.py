@@ -188,6 +188,7 @@ class ContiIRRemote(RemoteEntity):
         session = IRLearningSession(
             self._storage,
             cloud=getattr(self._manager, "_cloud", None),
+            remote_id="",
         )
         provided_payload = _raw_payload_from_kwargs(kwargs)
         for action in commands:

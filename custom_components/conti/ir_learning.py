@@ -36,15 +36,13 @@ class IRLearningSession:
         self._storage = storage
         self._capture_payload = capture_payload
         self._cloud = cloud
-        self._remote_id = remote_id
+        self._remote_id = ""
 
     async def start_learning(self, device_id: str) -> str:
         """Start learning mode on the IR hub."""
         if self._cloud is None:
             raise IRLearningError("No IR cloud handler configured")
-        if not self._remote_id:
-            self._remote_id = await self._storage.async_remote_id()
-        learning_time = await self._cloud.start_learning(device_id, self._remote_id)
+        learning_time = await self._cloud.start_learning(device_id)
         if not learning_time:
             raise IRLearningError("IR learning start failed")
         return learning_time
@@ -56,15 +54,12 @@ class IRLearningSession:
         if self._cloud is None:
             raise IRLearningError("No IR cloud handler configured")
         try:
-            if not self._remote_id:
-                self._remote_id = await self._storage.async_remote_id()
             deadline = asyncio.get_running_loop().time() + IR_LEARN_TIMEOUT
             last_payload: Any = None
             while True:
                 payload = await self._cloud.capture_learning_code(
                     device_id,
                     learning_time,
-                    self._remote_id,
                 )
                 _LOGGER.debug("IR LEARN POLL response=%s", payload)
                 if payload:
@@ -83,7 +78,7 @@ class IRLearningSession:
             )
             raise IRLearningError("Captured IR payload is empty")
         finally:
-            await self._cloud.stop_learning(device_id, self._remote_id)
+            await self._cloud.stop_learning(device_id)
 
     async def learn_command(
         self,

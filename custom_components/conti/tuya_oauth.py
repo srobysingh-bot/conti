@@ -971,15 +971,13 @@ class TuyaOAuthManager:
     async def async_start_ir_learning(
         self,
         device_id: str,
-        remote_id: str = "",
     ) -> Any:
         """Start IR learning mode through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         _LOGGER.info(
-            "IR learning resolve device_id=%s infrared_id=%s remote_id=%s",
+            "IR learning resolve device_id=%s infrared_id=%s",
             device_id,
             infrared_id,
-            remote_id,
         )
         if not infrared_id:
             return None
@@ -1017,15 +1015,13 @@ class TuyaOAuthManager:
         self,
         device_id: str,
         learning_time: str,
-        remote_id: str = "",
     ) -> Any:
         """Fetch a learned IR code through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         _LOGGER.info(
-            "IR learning poll resolve device_id=%s infrared_id=%s remote_id=%s learning_time=%s",
+            "IR learning poll resolve device_id=%s infrared_id=%s learning_time=%s",
             device_id,
             infrared_id,
-            remote_id,
             learning_time,
         )
         if not infrared_id:
@@ -1037,13 +1033,6 @@ class TuyaOAuthManager:
             f"/v1.0/infrareds/{infrared_id}/learning-codes"
             f"?learning_time={learning_time}",
         ]
-        if remote_id:
-            paths.append(
-                f"/v2.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
-            )
-            paths.append(
-                f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
-            )
         result = await self._sharing_api_get_first(device_id, paths)
         _LOGGER.debug(
             "IR LEARN POLL response learning_time=%s response=%s",
@@ -1055,15 +1044,13 @@ class TuyaOAuthManager:
     async def async_stop_ir_learning(
         self,
         device_id: str,
-        remote_id: str = "",
     ) -> Any:
         """Stop IR learning mode through the Smart Life QR sharing session."""
         infrared_id = await self.async_get_infrared_id(device_id)
         _LOGGER.info(
-            "IR learning stop resolve device_id=%s infrared_id=%s remote_id=%s",
+            "IR learning stop resolve device_id=%s infrared_id=%s",
             device_id,
             infrared_id,
-            remote_id,
         )
         if not infrared_id:
             return None

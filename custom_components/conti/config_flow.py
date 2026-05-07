@@ -90,6 +90,7 @@ from .const import (
     CONF_IR_PACK_MODEL,
     CONF_IR_PROFILE_TYPE,
     CONF_IR_REMOTE_ID,
+    CONF_IR_REMOTE_INDEX,
     CONF_IR_SELECTED_PACK,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
@@ -1536,6 +1537,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                 )
                 _LOGGER.info(
+                    "Resolved Tuya AC remote: infrared_id=%s remote_id=%s "
+                    "remote_name=%s category=air_conditioner",
+                    self._infrared_id,
+                    self._remote_id,
+                    remote_index,
+                )
+                _LOGGER.info(
                     "IR runtime remote bound device=%s infrared_id=%s remote_id=%s",
                     device_id,
                     self._infrared_id,
@@ -1578,6 +1586,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._ir_model.setdefault("brand_id", remote.get("brand_id"))
             if remote.get("remote_index"):
                 self._ir_model.setdefault("remote_index", remote.get("remote_index"))
+            _LOGGER.info(
+                "Resolved Tuya AC remote: infrared_id=%s remote_id=%s "
+                "remote_name=%s category=%s",
+                self._infrared_id,
+                self._remote_id,
+                remote.get("remote_name") or remote.get("name") or remote_id,
+                remote.get("category_id") or remote.get("category") or "air_conditioner",
+            )
             _LOGGER.info(
                 "IR runtime remote resolved device=%s infrared_id=%s remote_id=%s",
                 device_id,
@@ -3589,6 +3605,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             CONF_IR_INFRARED_ID: self._infrared_id,
             CONF_IR_REMOTE_ID: self._remote_id or str(self._ir_model.get("remote_id") or ""),
+            CONF_IR_REMOTE_INDEX: str(self._ir_model.get("remote_index") or ""),
             CONF_IR_CATEGORY_ID: str(
                 self._ir_model.get("category_id") or self._ir_category.get("id") or ""
             ),
@@ -3961,10 +3978,7 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
             oauth = TuyaOAuthManager(self.hass)
             await oauth.async_load()
         cloud = TuyaIRCloud(oauth) if oauth.is_configured else None
-        remote_id = str(self._entry.data.get(CONF_IR_REMOTE_ID, "")).strip()
-        if not remote_id:
-            remote_id = await storage.async_remote_id()
-        return IRLearningSession(storage, cloud=cloud, remote_id=remote_id)
+        return IRLearningSession(storage, cloud=cloud, remote_id="")
 
     # -- Helpers ------------------------------------------------------------
 
