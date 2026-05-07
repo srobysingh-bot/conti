@@ -37,11 +37,10 @@ def normalize_code_pack(pack: dict[str, Any]) -> dict[str, Any]:
         )
 
     raw_commands = pack.get("commands", pack)
-    if not isinstance(raw_commands, dict):
-        raise IRCodePackError("IR code pack commands must be a mapping")
+    command_items = _iter_command_items(raw_commands)
 
     commands: dict[str, dict[str, Any]] = {}
-    for action, payload in raw_commands.items():
+    for action, payload in command_items:
         normalized_action = normalize_ir_action(str(action))
         if not normalized_action:
             continue
@@ -60,6 +59,36 @@ def normalize_code_pack(pack: dict[str, Any]) -> dict[str, Any]:
         "type": str(pack.get("type") or pack.get("profile_type") or "").strip(),
         "commands": commands,
     }
+
+
+def _iter_command_items(raw_commands: Any) -> list[tuple[str, Any]]:
+    """Return command/action pairs from canonical or learned export shapes."""
+    if isinstance(raw_commands, dict):
+        return list(raw_commands.items())
+    if not isinstance(raw_commands, list):
+        raise IRCodePackError("IR code pack commands must be a mapping or list")
+
+    items: list[tuple[str, Any]] = []
+    for item in raw_commands:
+        if not isinstance(item, dict):
+            raise IRCodePackError("IR command list entries must be mappings")
+        action = str(
+            item.get("action")
+            or item.get("command")
+            or item.get("name")
+            or item.get("key")
+            or ""
+        ).strip()
+        payload = (
+            item.get("payload")
+            or item.get("raw")
+            or item.get("code")
+            or item.get("data")
+        )
+        if not action or payload in (None, "", {}, []):
+            raise IRCodePackError("IR command list entries require action and payload")
+        items.append((action, payload))
+    return items
 
 
 async def async_load_code_pack(path: Path) -> dict[str, Any]:

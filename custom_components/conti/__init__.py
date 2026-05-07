@@ -188,6 +188,40 @@ def _register_ir_services(hass: HomeAssistant) -> None:
         await storage.async_export_code_pack_file(path)
         _LOGGER.info("Exported IR code pack device=%s path=%s", device_id, path)
 
+    async def _handle_test_ir_raw_emit(call: Any) -> None:
+        device_id = str(call.data["device_id"]).strip()
+        transport_mode = str(call.data.get("transport_mode", "cloud")).strip()
+        remote_id = str(call.data.get("remote_id", "")).strip()
+        raw_payload = _raw_payload_from_service(call.data)
+        if raw_payload in (None, "", {}, []):
+            raise HomeAssistantError("ir_raw_payload_required")
+        manager = _find_ir_manager(hass, device_id)
+        if manager is None:
+            raise HomeAssistantError("ir_device_not_found")
+        try:
+            await manager.test_raw_emit(
+                device_id,
+                raw_payload,
+                transport_mode=transport_mode,
+                remote_id=remote_id,
+            )
+        except HomeAssistantError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HomeAssistantError("ir_send_failed") from exc
+
+    async def _handle_resend_last_ir(call: Any) -> None:
+        device_id = str(call.data["device_id"]).strip()
+        manager = _find_ir_manager(hass, device_id)
+        if manager is None:
+            raise HomeAssistantError("ir_device_not_found")
+        try:
+            await manager.resend_last(device_id)
+        except HomeAssistantError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HomeAssistantError("ir_send_failed") from exc
+
     hass.services.async_register(
         DOMAIN,
         "send_ir_command",
@@ -223,6 +257,29 @@ def _register_ir_services(hass: HomeAssistant) -> None:
             }
         ),
     )
+    hass.services.async_register(
+        DOMAIN,
+        "test_ir_raw_emit",
+        _handle_test_ir_raw_emit,
+        schema=vol.Schema(
+            {
+                vol.Required("device_id"): str,
+                vol.Optional("raw"): object,
+                vol.Optional("code"): object,
+                vol.Optional("payload"): object,
+                vol.Optional("transport_mode", default="cloud"): vol.In(
+                    ["cloud", "raw_runtime", "tuya", "local"]
+                ),
+                vol.Optional("remote_id"): str,
+            }
+        ),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "resend_last_ir",
+        _handle_resend_last_ir,
+        schema=vol.Schema({vol.Required("device_id"): str}),
+    )
     hass.data[DOMAIN][_IR_SERVICES_REGISTERED] = True
 
 
@@ -234,6 +291,27 @@ def _find_ir_storage(hass: HomeAssistant, device_id: str) -> Any | None:
             and entry_data.get("ir_storage") is not None
         ):
             return entry_data["ir_storage"]
+    return None
+
+
+def _find_ir_manager(hass: HomeAssistant, device_id: str) -> Any | None:
+    for entry_data in hass.data.get(DOMAIN, {}).values():
+        if (
+            isinstance(entry_data, dict)
+            and entry_data.get("device_id") == device_id
+            and entry_data.get(_IR_MANAGER_KEY) is not None
+        ):
+            return entry_data[_IR_MANAGER_KEY]
+    return None
+
+
+def _raw_payload_from_service(data: dict[str, Any]) -> Any:
+    for key in ("raw", "code", "payload"):
+        value = data.get(key)
+        if value not in (None, "", {}, []):
+            if isinstance(value, str) and value.startswith(("raw:", "base64:")):
+                return {"code": value.split(":", 1)[1].strip()}
+            return value
     return None
 
 

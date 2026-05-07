@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -65,6 +66,19 @@ IR_FAN_CODE_BY_MODE = {
     "medium": "f3",
     "high": "f4",
 }
+IR_FAN_MODE_BY_CODE = {
+    "auto": "auto",
+    "f1": "low",
+    "f2": "medium",
+    "f3": "medium",
+    "f4": "high",
+    "f5": "high",
+}
+AC_STATE_RE = re.compile(
+    r"^ac_(?P<mode>cool|heat|dry|auto)_(?P<temp>\d{2})_"
+    r"(?P<fan>auto|f[1-5])_swing_(?P<swing>on|off)$"
+)
+AC_FAN_RE = re.compile(r"^ac_fan_(?P<fan>auto|f[1-5])_swing_(?P<swing>on|off)$")
 DEFAULT_TEMP = 24
 MIN_TEMP = 16
 MAX_TEMP = 30
@@ -129,6 +143,11 @@ class ContiIRClimate(ClimateEntity):
         self._storage = storage
         self._manager = manager
         self._commands: dict[str, dict[str, Any]] = {}
+        self._state_commands: set[tuple[str, int, str, str]] = set()
+        self._state_key_by_tuple: dict[tuple[str, int, str, str], str] = {}
+        self._available_temps: set[int] = set()
+        self._available_fan_codes: set[str] = set()
+        self._available_modes: set[str] = set()
         self._power = False
         self._target_temp = DEFAULT_TEMP
         self._hvac_mode = HVACMode.COOL
@@ -149,6 +168,8 @@ class ContiIRClimate(ClimateEntity):
     async def async_update(self) -> None:
         """Refresh available commands from storage."""
         self._commands = await self._storage.async_all_commands()
+        self._refresh_capabilities_from_commands()
+        self._sync_dynamic_fan_modes()
         self._attr_available = bool(
             self._commands
             and await self._manager.async_is_device_available(self._device_id)
@@ -184,14 +205,21 @@ class ContiIRClimate(ClimateEntity):
             "ir_fan": self._fan_mode,
             "ir_swing": "on" if self._swing_on else "off",
             "state_command": self._state_command_name(),
+            "supported_temperatures": sorted(self._available_temps),
+            "supported_modes": sorted(self._available_modes),
+            "supported_fan_codes": sorted(self._available_fan_codes),
         }
 
     async def async_turn_on(self) -> None:
         """Turn the virtual AC on."""
+        old_state = self._snapshot_state()
         self._power = True
+        self._coerce_fan_for_current_state()
         if not await self._send_state():
             if not await self._send_first_available(["power_on", "on", "power"]):
+                self._restore_state(old_state)
                 raise HomeAssistantError("ir_command_not_found")
+        self._sync_dynamic_fan_modes()
         self.async_write_ha_state()
 
     async def async_turn_off(self) -> None:
@@ -213,8 +241,10 @@ class ContiIRClimate(ClimateEntity):
             await self.async_turn_off()
             return
 
+        old_state = self._snapshot_state()
         self._power = True
         self._hvac_mode = hvac_mode
+        self._coerce_fan_for_current_state()
         if not await self._send_state():
             mode_actions = [
                 action
@@ -222,7 +252,9 @@ class ContiIRClimate(ClimateEntity):
                 for action in (f"mode_{mode}", mode)
             ]
             if not await self._send_first_available([*mode_actions, "mode"]):
+                self._restore_state(old_state)
                 raise HomeAssistantError("ir_command_not_found")
+        self._sync_dynamic_fan_modes()
         self.async_write_ha_state()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -231,19 +263,30 @@ class ContiIRClimate(ClimateEntity):
         if temp is None:
             return
 
-        new_temp = max(MIN_TEMP, min(MAX_TEMP, int(round(float(temp)))))
-        old_temp = self._target_temp
+        new_temp = max(self.min_temp, min(self.max_temp, int(round(float(temp)))))
+        old_state = self._snapshot_state()
         self._target_temp = new_temp
         self._power = True
+        self._coerce_fan_for_current_state()
         if not await self._send_state():
             if not await self._send_first_available([f"temp_{new_temp}", str(new_temp)]):
-                if not await self._send_temperature_steps(old_temp, new_temp):
+                if not await self._send_temperature_steps(old_state["target_temp"], new_temp):
+                    self._restore_state(old_state)
                     raise HomeAssistantError("ir_command_not_found")
+        self._sync_dynamic_fan_modes()
         self.async_write_ha_state()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set fan mode through full-state or fan fallback commands."""
         normalized = _normalize_ac_fan(fan_mode)
+        if normalized not in self._fan_modes_for_current_state():
+            _LOGGER.debug(
+                "IR climate fan mode unsupported fan=%s supported=%s",
+                normalized,
+                self._fan_modes_for_current_state(),
+            )
+            raise HomeAssistantError("ir_command_not_found")
+        old_state = self._snapshot_state()
         self._fan_mode = normalized if normalized in IR_FAN_MODES else "auto"
         self._power = True
         if not await self._send_state():
@@ -251,32 +294,44 @@ class ContiIRClimate(ClimateEntity):
             if not await self._send_first_available(
                 [f"fan_{fan_code}", f"fan_speed_{fan_code}", "fan_speed", "fan"]
             ):
+                self._restore_state(old_state)
                 raise HomeAssistantError("ir_command_not_found")
+        self._sync_dynamic_fan_modes()
         self.async_write_ha_state()
 
     async def _send_state(self) -> bool:
         """Send a full-state AC command when the raw code pack exposes one."""
-        if await self._send_ac_runtime_state():
-            return True
-
         state_command = self._state_command_name()
         _LOGGER.debug("Generated climate key=%s", state_command)
-        candidates = [state_command]
-        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
-        temp = int(self._target_temp)
-        swing = "on" if self._swing_on else "off"
-        fan_codes = self._fan_code_candidates()
-        if mode != "fan":
-            for fan_code in fan_codes:
-                candidates.append(f"ac_{mode}_{temp}_{fan_code}_swing_{swing}")
-                candidates.append(f"{mode}_{temp}_{fan_code}")
-            candidates.extend([f"{mode}_{temp}", f"temp_{temp}", str(temp)])
-        else:
-            for fan_code in fan_codes:
-                candidates.append(f"ac_fan_{fan_code}_swing_{swing}")
-                candidates.append(f"fan_{fan_code}")
-            candidates.append("fan")
-        return await self._send_first_available(candidates)
+        resolved = self._resolve_state_command()
+        if resolved is None:
+            _LOGGER.debug(
+                "IR climate command unresolved generated=%s available_sample=%s count=%s",
+                state_command,
+                sorted(self._commands)[:12],
+                len(self._commands),
+            )
+            return False
+
+        resolved_key, mode, temp, fan_code, swing = resolved
+        if resolved_key != state_command:
+            _LOGGER.debug(
+                "IR climate resolved fallback generated=%s resolved=%s",
+                state_command,
+                resolved_key,
+            )
+        self._hvac_mode = _hvac_from_ir_mode(mode)
+        self._target_temp = temp
+        self._fan_mode = IR_FAN_MODE_BY_CODE.get(fan_code, self._fan_mode)
+        self._swing_on = swing == "on"
+
+        if await self._send_ac_runtime_state():
+            _LOGGER.debug("IR climate emit transport=ac_runtime key=%s", resolved_key)
+            return True
+
+        _LOGGER.debug("IR climate emit transport=raw_pack key=%s", resolved_key)
+        await self._send_command(resolved_key)
+        return True
 
     async def _send_ac_runtime_state(self) -> bool:
         """Send structured AC state before falling back to raw pack packets."""
@@ -318,14 +373,158 @@ class ContiIRClimate(ClimateEntity):
         return IR_FAN_CODE_BY_MODE.get(fan_mode, "auto")
 
     def _fan_code_candidates(self) -> list[str]:
-        """Return fan token fallbacks for sparse AC raw code packs."""
+        """Return compatible fan token fallbacks for the current state."""
         preferred = self._fan_code()
-        candidates = [preferred, "auto", "f3", "f2", "f1", "f4", "f5"]
+        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
+        temp = int(self._target_temp)
+        swing = "on" if self._swing_on else "off"
+        current_fan_mode = IR_FAN_MODE_BY_CODE.get(preferred, self._fan_mode)
+        compatible = [
+            fan_code
+            for state_mode, state_temp, fan_code, state_swing in self._state_commands
+            if state_mode == mode
+            and state_temp == temp
+            and state_swing == swing
+            and IR_FAN_MODE_BY_CODE.get(fan_code) == current_fan_mode
+        ]
+        candidates = [preferred, *sorted(compatible)]
         deduped: list[str] = []
         for candidate in candidates:
             if candidate not in deduped:
                 deduped.append(candidate)
         return deduped
+
+    def _resolve_state_command(self) -> tuple[str, str, int, str, str] | None:
+        """Resolve the current climate state to a supported full-state key."""
+        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
+        temp = max(self.min_temp, min(self.max_temp, int(self._target_temp)))
+        swing = "on" if self._swing_on else "off"
+        if mode == "fan":
+            for fan_code in self._fan_code_candidates():
+                key = normalize_ir_action(f"ac_fan_{fan_code}_swing_{swing}")
+                if key in self._commands:
+                    return key, mode, temp, fan_code, swing
+            return None
+
+        for fan_code in self._fan_code_candidates():
+            state = (mode, temp, fan_code, swing)
+            key = self._state_key_by_tuple.get(state)
+            if key:
+                return key, mode, temp, fan_code, swing
+        return None
+
+    def _refresh_capabilities_from_commands(self) -> None:
+        """Derive exposed climate capabilities from actual raw pack keys."""
+        self._state_commands.clear()
+        self._state_key_by_tuple.clear()
+        self._available_temps.clear()
+        self._available_fan_codes.clear()
+        self._available_modes.clear()
+
+        has_fan_only = False
+        for key in self._commands:
+            normalized = normalize_ir_action(key)
+            if match := AC_STATE_RE.match(normalized):
+                mode = match.group("mode")
+                temp = int(match.group("temp"))
+                fan_code = match.group("fan")
+                swing = match.group("swing")
+                state = (mode, temp, fan_code, swing)
+                self._state_commands.add(state)
+                self._state_key_by_tuple[state] = normalized
+                self._available_modes.add(mode)
+                self._available_temps.add(temp)
+                self._available_fan_codes.add(fan_code)
+                continue
+            if match := AC_FAN_RE.match(normalized):
+                has_fan_only = True
+                self._available_modes.add("fan")
+                self._available_fan_codes.add(match.group("fan"))
+
+        hvac_modes = [HVACMode.OFF]
+        for hvac_mode, ir_mode in IR_HVAC_MODES.items():
+            if ir_mode in self._available_modes:
+                hvac_modes.append(hvac_mode)
+        self._attr_hvac_modes = hvac_modes
+
+        fan_modes = [
+            fan_mode
+            for fan_mode in IR_FAN_MODES
+            if any(
+                IR_FAN_MODE_BY_CODE.get(code) == fan_mode
+                for code in self._available_fan_codes
+            )
+        ]
+        self._attr_fan_modes = fan_modes or ["auto"]
+
+        if self._available_temps:
+            self._attr_min_temp = min(self._available_temps)
+            self._attr_max_temp = max(self._available_temps)
+            if int(self._target_temp) not in self._available_temps:
+                self._target_temp = min(self._available_temps, key=lambda item: abs(item - DEFAULT_TEMP))
+        else:
+            self._attr_min_temp = MIN_TEMP
+            self._attr_max_temp = MAX_TEMP
+
+        if IR_HVAC_MODES.get(self._hvac_mode, "cool") not in self._available_modes:
+            first_mode = next(
+                (mode for mode in hvac_modes if mode != HVACMode.OFF),
+                HVACMode.COOL,
+            )
+            self._hvac_mode = first_mode
+        if self._fan_mode not in self._attr_fan_modes:
+            self._fan_mode = self._attr_fan_modes[0]
+        if has_fan_only and HVACMode.FAN_ONLY not in self._attr_hvac_modes:
+            self._attr_hvac_modes = [*self._attr_hvac_modes, HVACMode.FAN_ONLY]
+        self._sync_dynamic_fan_modes()
+
+    def _fan_modes_for_current_state(self) -> list[str]:
+        mode = IR_HVAC_MODES.get(self._hvac_mode, "cool")
+        temp = int(self._target_temp)
+        swing = "on" if self._swing_on else "off"
+        fan_modes = sorted(
+            {
+                IR_FAN_MODE_BY_CODE.get(fan_code, fan_code)
+                for state_mode, state_temp, fan_code, state_swing in self._state_commands
+                if state_mode == mode and state_temp == temp and state_swing == swing
+            }
+        )
+        if mode == "fan":
+            fan_modes.extend(
+                sorted(
+                    {
+                        IR_FAN_MODE_BY_CODE.get(fan_code, fan_code)
+                        for state_mode, _temp, fan_code, state_swing in self._state_commands
+                        if state_mode == "fan" and state_swing == swing
+                    }
+                )
+            )
+        ordered = [fan for fan in IR_FAN_MODES if fan in fan_modes]
+        return ordered or list(self._attr_fan_modes or ["auto"])
+
+    def _sync_dynamic_fan_modes(self) -> None:
+        self._attr_fan_modes = self._fan_modes_for_current_state()
+        if self._fan_mode not in self._attr_fan_modes:
+            self._fan_mode = self._attr_fan_modes[0]
+
+    def _coerce_fan_for_current_state(self) -> None:
+        self._sync_dynamic_fan_modes()
+
+    def _snapshot_state(self) -> dict[str, Any]:
+        return {
+            "power": self._power,
+            "target_temp": self._target_temp,
+            "hvac_mode": self._hvac_mode,
+            "fan_mode": self._fan_mode,
+            "swing_on": self._swing_on,
+        }
+
+    def _restore_state(self, state: dict[str, Any]) -> None:
+        self._power = bool(state["power"])
+        self._target_temp = int(state["target_temp"])
+        self._hvac_mode = state["hvac_mode"]
+        self._fan_mode = str(state["fan_mode"])
+        self._swing_on = bool(state["swing_on"])
 
     def _mode_candidates(self) -> list[str]:
         """Return likely IR action fragments for the selected HVAC mode."""
@@ -385,3 +584,10 @@ class ContiIRClimate(ClimateEntity):
 def _normalize_ac_fan(fan_mode: str) -> str:
     normalized = normalize_ir_action(fan_mode)
     return IR_FAN_ALIASES.get(normalized, normalized)
+
+
+def _hvac_from_ir_mode(mode: str) -> HVACMode:
+    for hvac_mode, ir_mode in IR_HVAC_MODES.items():
+        if ir_mode == mode:
+            return hvac_mode
+    return HVACMode.COOL

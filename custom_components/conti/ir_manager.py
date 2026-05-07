@@ -45,6 +45,7 @@ class IRManager:
         self._port = int(port or 6668)
         self._local_support_cache: dict[str, bool] = {}
         self._availability: dict[str, bool] = {}
+        self._last_emit: dict[str, Any] | None = None
 
     def supports_local_ir(self, device_id: str) -> bool:
         """Return whether local IR send should be attempted for this device."""
@@ -66,10 +67,12 @@ class IRManager:
         if not command:
             raw_command = _raw_command_from_action(action)
             if raw_command is not None:
+                self._remember_emit(action, raw_command, "raw")
                 _LOGGER.info(
-                    "IR execution path device=%s action=%s path=raw",
+                    "IR execution path device=%s action=%s path=raw payload_length=%s",
                     device_id,
                     action,
+                    _payload_length(raw_command),
                 )
                 if await self._send_cloud(device_id, raw_command):
                     return True
@@ -83,11 +86,13 @@ class IRManager:
 
         source = str(command.get("source", "")).strip() or "cloud"
         if source in {"cloud", "raw", "code_pack"}:
+            self._remember_emit(action, command, source)
             _LOGGER.info(
-                "IR execution path device=%s action=%s path=%s",
+                "IR execution path device=%s action=%s path=%s payload_length=%s",
                 device_id,
                 action,
                 source,
+                _payload_length(command),
             )
             if await self._send_cloud(device_id, command):
                 return True
@@ -96,20 +101,24 @@ class IRManager:
         if source == "learned":
             if not self.supports_local_ir(device_id):
                 _LOGGER.info(
-                    "IR execution path device=%s action=%s path=cloud local_supported=false",
+                    "IR execution path device=%s action=%s path=cloud "
+                    "local_supported=false payload_length=%s",
                     device_id,
                     action,
+                    _payload_length(command),
                 )
                 if await self._send_cloud(device_id, command):
                     return True
                 raise IRSendError("ir_send_failed")
 
             _LOGGER.info(
-                "IR execution path device=%s action=%s path=local",
+                "IR execution path device=%s action=%s path=local payload_length=%s",
                 device_id,
                 action,
+                _payload_length(command),
             )
             if await self._send_local(device_id, command):
+                self._remember_emit(action, command, "local")
                 return True
 
             _LOGGER.warning(
@@ -118,6 +127,7 @@ class IRManager:
                 action,
             )
             if await self._send_cloud(device_id, command):
+                self._remember_emit(action, command, "cloud")
                 return True
             raise IRSendError("ir_send_failed")
 
@@ -154,6 +164,56 @@ class IRManager:
         if ok:
             _LOGGER.info("IR execution path device=%s path=ac_runtime ok", device_id)
         return ok
+
+    async def test_raw_emit(
+        self,
+        device_id: str,
+        raw_payload: Any,
+        *,
+        transport_mode: str = "cloud",
+        remote_id: str = "",
+    ) -> bool:
+        """Direct raw emit test service entrypoint for transport debugging."""
+        command = {
+            "source": "raw",
+            "payload": raw_payload if isinstance(raw_payload, dict) else {"code": raw_payload},
+        }
+        if remote_id and isinstance(command["payload"], dict):
+            command["payload"]["remote_id"] = remote_id
+        self._remember_emit("test_ir_raw_emit", command, transport_mode)
+        _LOGGER.info(
+            "IR test raw emit device=%s transport=%s payload_length=%s",
+            device_id,
+            transport_mode,
+            _payload_length(command),
+        )
+        if not await self.async_is_device_available(device_id):
+            raise IRSendError("ir_device_unavailable")
+        if transport_mode == "local":
+            return await self._send_local(device_id, command)
+        if transport_mode in {"cloud", "raw_runtime", "tuya"}:
+            if await self._send_cloud(device_id, command):
+                return True
+            raise IRSendError("ir_send_failed")
+        raise IRSendError(f"unsupported_transport:{transport_mode}")
+
+    async def resend_last(self, device_id: str) -> bool:
+        """Replay the last emitted payload through the cloud transport."""
+        if not self._last_emit:
+            raise IRCommandNotConfigured("last_emit_not_available")
+        command = self._last_emit.get("command")
+        if not isinstance(command, dict):
+            raise IRCommandNotConfigured("last_emit_not_available")
+        _LOGGER.info(
+            "IR resend last device=%s action=%s transport=%s payload_length=%s",
+            device_id,
+            self._last_emit.get("action"),
+            self._last_emit.get("transport"),
+            _payload_length(command),
+        )
+        if await self._send_cloud(device_id, command):
+            return True
+        raise IRSendError("ir_send_failed")
 
     async def async_is_device_available(self, device_id: str) -> bool:
         """Probe the actual IR transport and log availability transitions."""
@@ -230,6 +290,19 @@ class IRManager:
             },
         }
 
+    def _remember_emit(
+        self,
+        action: str,
+        command: dict[str, Any],
+        transport: str,
+    ) -> None:
+        self._last_emit = {
+            "action": action,
+            "command": command,
+            "transport": transport,
+            "payload_length": _payload_length(command),
+        }
+
 
 def _raw_command_from_action(action: str) -> dict[str, Any] | None:
     action = str(action).strip()
@@ -239,6 +312,16 @@ def _raw_command_from_action(action: str) -> dict[str, Any] | None:
         "source": "raw",
         "payload": {"code": action.split(":", 1)[1].strip()},
     }
+
+
+def _payload_length(command: dict[str, Any]) -> int:
+    payload = command.get("payload", command)
+    if isinstance(payload, dict):
+        for key in ("code", "base64", "data", "payload"):
+            value = payload.get(key)
+            if value not in (None, "", {}, []):
+                return len(str(value))
+    return len(str(payload))
 
 
 async def _async_probe_tcp(host: str, port: int) -> bool:

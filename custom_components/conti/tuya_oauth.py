@@ -891,14 +891,38 @@ class TuyaOAuthManager:
             )
             return False
         path = f"/v2.0/infrareds/{infrared_id}/remotes/{remote_id}/raw/command"
+        payload_length = _payload_length(payload)
+        if not _looks_like_tuya_key_payload(payload):
+            _LOGGER.warning(
+                "IR raw runtime payload may be incompatible with Tuya key endpoint: "
+                "infrared_id=%s remote_id=%s endpoint=%s payload_keys=%s "
+                "payload_length=%s reason=missing_category_or_key_fields",
+                infrared_id,
+                remote_id,
+                path,
+                sorted(payload),
+                payload_length,
+            )
         _LOGGER.debug(
-            "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s payload=%s",
+            "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s "
+            "payload_length=%s payload=%s",
             infrared_id,
             remote_id,
             path,
+            payload_length,
             payload,
         )
+        started = time.perf_counter()
         result = await self._sharing_api_post(device_id or infrared_id, path, payload)
+        _LOGGER.debug(
+            "IR SEND runtime complete: infrared_id=%s remote_id=%s endpoint=%s "
+            "duration_ms=%.1f response_body=%s",
+            infrared_id,
+            remote_id,
+            path,
+            (time.perf_counter() - started) * 1000,
+            result,
+        )
         return result is not None
 
     async def send_ac_runtime_command(
@@ -920,15 +944,28 @@ class TuyaOAuthManager:
                 state_payload,
             )
             return False
-        path = f"/v2.0/infrareds/{infrared_id}/air-conditioners/{remote_id}/command"
+        path = f"/v2.0/infrareds/{infrared_id}/air-conditioners/{remote_id}/scenes/command"
+        payload = _build_ac_command_payload(state_payload)
         _LOGGER.debug(
-            "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s payload=%s",
+            "IR SEND runtime: infrared_id=%s remote_id=%s endpoint=%s "
+            "payload_length=%s payload=%s",
             infrared_id,
             remote_id,
             path,
-            state_payload,
+            _payload_length(payload),
+            payload,
         )
-        result = await self._sharing_api_post(device_id or infrared_id, path, state_payload)
+        started = time.perf_counter()
+        result = await self._sharing_api_post(device_id or infrared_id, path, payload)
+        _LOGGER.debug(
+            "IR SEND runtime complete: infrared_id=%s remote_id=%s endpoint=%s "
+            "duration_ms=%.1f response_body=%s",
+            infrared_id,
+            remote_id,
+            path,
+            (time.perf_counter() - started) * 1000,
+            result,
+        )
         return result is not None
 
     async def async_start_ir_learning(
@@ -947,16 +984,31 @@ class TuyaOAuthManager:
         if not infrared_id:
             return None
         requests = [
-            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state?state=true"),
+            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state?state=true", {}),
+            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state", {"state": True}),
             ("GET", f"/v1.0/infrareds/{infrared_id}/learning-state?state=true"),
         ]
-        for method, path in requests:
+        for request in requests:
+            method = request[0]
+            path = request[1]
+            body = request[2] if len(request) > 2 else {}
+            _LOGGER.debug(
+                "IR LEARN START request method=%s path=%s payload=%s",
+                method,
+                path,
+                body,
+            )
+            started = time.perf_counter()
             result = (
-                await self._sharing_api_put(device_id, path, {})
+                await self._sharing_api_put(device_id, path, body)
                 if method == "PUT"
                 else await self._sharing_api_get(device_id, path)
             )
-            _LOGGER.debug("IR LEARN START response=%s", result)
+            _LOGGER.debug(
+                "IR LEARN START response duration_ms=%.1f response=%s",
+                (time.perf_counter() - started) * 1000,
+                result,
+            )
             if result is not None:
                 return result
         return None
@@ -981,6 +1033,7 @@ class TuyaOAuthManager:
         paths = [
             f"/v2.0/infrareds/{infrared_id}/learning-codes"
             f"?learning_time={learning_time}",
+            f"/v2.0/infrareds/{infrared_id}/learning-codes",
             f"/v1.0/infrareds/{infrared_id}/learning-codes"
             f"?learning_time={learning_time}",
         ]
@@ -992,7 +1045,11 @@ class TuyaOAuthManager:
                 f"/v1.0/infrareds/{infrared_id}/remotes/{remote_id}/learning-codes"
             )
         result = await self._sharing_api_get_first(device_id, paths)
-        _LOGGER.debug("IR LEARN POLL response=%s", result)
+        _LOGGER.debug(
+            "IR LEARN POLL response learning_time=%s response=%s",
+            learning_time,
+            result,
+        )
         return result
 
     async def async_stop_ir_learning(
@@ -1011,16 +1068,31 @@ class TuyaOAuthManager:
         if not infrared_id:
             return None
         requests = [
-            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state?state=false"),
+            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state?state=false", {}),
+            ("PUT", f"/v2.0/infrareds/{infrared_id}/learning-state", {"state": False}),
             ("GET", f"/v1.0/infrareds/{infrared_id}/learning-state?state=false"),
         ]
-        for method, path in requests:
+        for request in requests:
+            method = request[0]
+            path = request[1]
+            body = request[2] if len(request) > 2 else {}
+            _LOGGER.debug(
+                "IR LEARN STOP request method=%s path=%s payload=%s",
+                method,
+                path,
+                body,
+            )
+            started = time.perf_counter()
             result = (
-                await self._sharing_api_put(device_id, path, {})
+                await self._sharing_api_put(device_id, path, body)
                 if method == "PUT"
                 else await self._sharing_api_get(device_id, path)
             )
-            _LOGGER.debug("IR LEARN STOP response=%s", result)
+            _LOGGER.debug(
+                "IR LEARN STOP response duration_ms=%.1f response=%s",
+                (time.perf_counter() - started) * 1000,
+                result,
+            )
             if result is not None:
                 return result
         return None
@@ -1182,10 +1254,12 @@ class TuyaOAuthManager:
             raise ValueError(f"Unsupported sharing API method {method}")
 
         try:
+            started = time.perf_counter()
             response = await self._hass.async_add_executor_job(_request)
         except Exception as exc:  # noqa: BLE001
             _LOGGER.error(
-                "Tuya OAuth IR API failed: device_id=%s method=%s path=%s status=%s response_body=%s",
+                "Tuya OAuth IR API failed: device_id=%s method=%s path=%s "
+                "status=%s response_body=%s",
                 device_id,
                 method,
                 path,
@@ -1194,35 +1268,42 @@ class TuyaOAuthManager:
             )
             return None
 
+        duration_ms = (time.perf_counter() - started) * 1000
         self._sync_from_sharing_manager(manager)
         if not isinstance(response, dict):
             _LOGGER.error(
-                "Tuya OAuth IR API returned non-dict response: device_id=%s method=%s path=%s status=%s response_body=%s",
+                "Tuya OAuth IR API returned non-dict response: device_id=%s "
+                "method=%s path=%s status=%s duration_ms=%.1f response_body=%s",
                 device_id,
                 method,
                 path,
                 "unknown",
+                duration_ms,
                 response,
             )
             return None
 
         if not response.get("success"):
             _LOGGER.error(
-                "Tuya OAuth IR API returned failure: device_id=%s method=%s path=%s status=%s response_body=%s",
+                "Tuya OAuth IR API returned failure: device_id=%s method=%s "
+                "path=%s status=%s duration_ms=%.1f response_body=%s",
                 device_id,
                 method,
                 path,
                 response.get("status", "unknown"),
+                duration_ms,
                 response,
             )
             return None
 
         _LOGGER.debug(
-            "Tuya OAuth IR API OK: device_id=%s method=%s path=%s status=%s response_body=%s",
+            "Tuya OAuth IR API OK: device_id=%s method=%s path=%s status=%s "
+            "duration_ms=%.1f response_body=%s",
             device_id,
             method,
             path,
             response.get("status", "unknown"),
+            duration_ms,
             response,
         )
         return response.get("result", {})
@@ -1324,3 +1405,63 @@ class TuyaOAuthManager:
         if changed:
             # Fire-and-forget save; don't block the caller.
             self._hass.async_create_task(self.async_save())
+
+
+def _payload_length(payload: Any) -> int:
+    if isinstance(payload, dict):
+        for key in ("code", "base64", "data", "payload"):
+            value = payload.get(key)
+            if value not in (None, "", {}, []):
+                return len(str(value))
+    return len(str(payload))
+
+
+def _looks_like_tuya_key_payload(payload: dict[str, Any]) -> bool:
+    return bool(
+        (payload.get("category_id") or payload.get("category"))
+        and (payload.get("key") or payload.get("key_id") or payload.get("keyId"))
+    )
+
+
+def _build_ac_command_payload(state_payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a Tuya AC command payload while preserving diagnostics fields."""
+    mode_map = {
+        "cold": 0,
+        "cool": 0,
+        "hot": 1,
+        "heat": 1,
+        "auto": 2,
+        "wind": 3,
+        "fan": 3,
+        "wet": 4,
+        "dry": 4,
+    }
+    wind_map = {
+        "auto": 0,
+        "low": 1,
+        "medium": 2,
+        "mid": 2,
+        "high": 3,
+        "f1": 1,
+        "f2": 2,
+        "f3": 2,
+        "f4": 3,
+        "f5": 3,
+    }
+    mode = state_payload.get("mode")
+    wind = state_payload.get("wind")
+    payload = {
+        "power": 1 if bool(state_payload.get("power")) else 0,
+        "mode": mode_map.get(str(mode).lower(), mode),
+        "temp": state_payload.get("temp"),
+        "wind": wind_map.get(str(wind).lower(), wind),
+        "swing": 1 if bool(state_payload.get("swing")) else 0,
+    }
+    for key in ("category_id", "categoryId", "remote_index", "remoteIndex"):
+        if key in state_payload:
+            payload[key] = state_payload[key]
+    return {
+        key: value
+        for key, value in payload.items()
+        if value not in (None, "")
+    }
