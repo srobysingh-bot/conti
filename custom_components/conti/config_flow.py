@@ -1552,25 +1552,25 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return
 
         try:
-            remotes = await cloud.list_device_remotes(device_id)
+            remotes = await cloud.require_device_remotes(device_id)
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.warning(
-                "IR runtime remote discovery failed device=%s infrared_id=%s error=%s",
+            _LOGGER.error(
+                "Unable to resolve Tuya AC remote profile device=%s infrared_id=%s error=%s",
                 device_id,
                 self._infrared_id,
                 exc,
             )
-            return
+            raise RuntimeError("Unable to resolve Tuya AC remote profile") from exc
 
         selected_remote = self._select_runtime_remote(remotes)
         if selected_remote is None:
-            _LOGGER.warning(
+            _LOGGER.error(
                 "IR runtime remote_id unavailable device=%s infrared_id=%s remotes=%s",
                 device_id,
                 self._infrared_id,
                 remotes,
             )
-            return
+            raise RuntimeError("Unable to resolve Tuya AC remote profile")
 
         for remote in [selected_remote]:
             remote_id = str(remote.get("remote_id") or remote.get("id") or "").strip()
@@ -1608,6 +1608,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._infrared_id,
             remotes,
         )
+        raise RuntimeError("Unable to resolve Tuya AC remote profile")
 
     def _select_runtime_remote(
         self,
@@ -1981,10 +1982,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "ir_pack_not_found"
 
         if not manufacturers:
-            _LOGGER.warning(
-                "IR PACK: no bundled packs found, continuing in raw/learning mode"
-            )
-            return await self._async_create_ir_learning_fallback_entry()
+            _LOGGER.error("IR PACK: no bundled packs found")
+            return self.async_abort(reason="ir_pack_not_found")
 
         choices = {item: item.replace("_", " ").title() for item in manufacturers}
         choices["__raw__"] = "Raw / Learning Mode"
@@ -2027,7 +2026,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "IR PACK: loaded commands=%s",
                         len(pack.get("commands", {})),
                     )
-                    return await self._async_create_ir_pack_entry()
+                    try:
+                        return await self._async_create_ir_pack_entry()
+                    except RuntimeError as exc:
+                        if str(exc) == "Unable to resolve Tuya AC remote profile":
+                            errors["base"] = "ir_remote_profile_not_resolved"
+                        else:
+                            raise
             else:
                 errors["base"] = "ir_pack_not_found"
 

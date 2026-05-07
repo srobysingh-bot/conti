@@ -1197,19 +1197,40 @@ class TuyaOAuthManager:
         body: dict[str, Any] | None = None,
     ) -> Any:
         """Call Tuya's encrypted Device Sharing API with the QR session."""
+        endpoint = self._endpoint_url or "https://openapi.tuyaeu.com"
+        _LOGGER.debug(
+            "Tuya OAuth IR API request: device_id=%s method=%s path=%s "
+            "region=%s cloud_base_url=%s endpoint=%s infrared_id_context=%s payload=%s",
+            device_id,
+            method,
+            path,
+            self._region,
+            endpoint,
+            endpoint,
+            _infrared_id_from_path(path),
+            body or {},
+        )
         if not await self.async_ensure_token():
             _LOGGER.error(
-                "Tuya OAuth IR API skipped: token unavailable device_id=%s path=%s",
+                "Tuya OAuth IR API skipped: token unavailable device_id=%s path=%s "
+                "region=%s cloud_base_url=%s infrared_id=%s",
                 device_id,
                 path,
+                self._region,
+                endpoint,
+                _infrared_id_from_path(path),
             )
             return None
         if not self.is_qr_mode or not self._refresh_token or not self._terminal_id:
             _LOGGER.error(
                 "Tuya OAuth IR API skipped: Smart Life QR session incomplete "
-                "device_id=%s path=%s response_body=%s",
+                "device_id=%s path=%s region=%s cloud_base_url=%s infrared_id=%s "
+                "response_body=%s",
                 device_id,
                 path,
+                self._region,
+                endpoint,
+                _infrared_id_from_path(path),
                 {
                     "qr_mode": self.is_qr_mode,
                     "has_refresh_token": bool(self._refresh_token),
@@ -1223,9 +1244,13 @@ class TuyaOAuthManager:
         except ImportError:
             _LOGGER.error(
                 "Tuya OAuth IR API unavailable: tuya-device-sharing-sdk is not installed "
-                "device_id=%s path=%s response_body=%s",
+                "device_id=%s path=%s region=%s cloud_base_url=%s infrared_id=%s "
+                "response_body=%s",
                 device_id,
                 path,
+                self._region,
+                endpoint,
+                _infrared_id_from_path(path),
                 "missing tuya_sharing package",
             )
             return None
@@ -1246,10 +1271,13 @@ class TuyaOAuthManager:
         except Exception as exc:  # noqa: BLE001
             _LOGGER.error(
                 "Tuya OAuth IR API failed: device_id=%s method=%s path=%s "
-                "status=%s response_body=%s",
+                "region=%s cloud_base_url=%s infrared_id=%s status=%s response_body=%s",
                 device_id,
                 method,
                 path,
+                self._region,
+                endpoint,
+                _infrared_id_from_path(path),
                 getattr(exc, "status", "unknown"),
                 exc,
             )
@@ -1260,10 +1288,14 @@ class TuyaOAuthManager:
         if not isinstance(response, dict):
             _LOGGER.error(
                 "Tuya OAuth IR API returned non-dict response: device_id=%s "
-                "method=%s path=%s status=%s duration_ms=%.1f response_body=%s",
+                "method=%s path=%s region=%s cloud_base_url=%s infrared_id=%s "
+                "status=%s duration_ms=%.1f response_body=%s",
                 device_id,
                 method,
                 path,
+                self._region,
+                endpoint,
+                _infrared_id_from_path(path),
                 "unknown",
                 duration_ms,
                 response,
@@ -1273,10 +1305,14 @@ class TuyaOAuthManager:
         if not response.get("success"):
             _LOGGER.error(
                 "Tuya OAuth IR API returned failure: device_id=%s method=%s "
-                "path=%s status=%s duration_ms=%.1f response_body=%s",
+                "path=%s region=%s cloud_base_url=%s infrared_id=%s status=%s "
+                "duration_ms=%.1f response_body=%s",
                 device_id,
                 method,
                 path,
+                self._region,
+                endpoint,
+                _infrared_id_from_path(path),
                 response.get("status", "unknown"),
                 duration_ms,
                 response,
@@ -1284,11 +1320,15 @@ class TuyaOAuthManager:
             return None
 
         _LOGGER.debug(
-            "Tuya OAuth IR API OK: device_id=%s method=%s path=%s status=%s "
-            "duration_ms=%.1f response_body=%s",
+            "Tuya OAuth IR API OK: device_id=%s method=%s path=%s region=%s "
+            "cloud_base_url=%s infrared_id=%s status=%s duration_ms=%.1f "
+            "response_body=%s",
             device_id,
             method,
             path,
+            self._region,
+            endpoint,
+            _infrared_id_from_path(path),
             response.get("status", "unknown"),
             duration_ms,
             response,
@@ -1401,6 +1441,17 @@ def _payload_length(payload: Any) -> int:
             if value not in (None, "", {}, []):
                 return len(str(value))
     return len(str(payload))
+
+
+def _infrared_id_from_path(path: str) -> str:
+    parts = str(path).split("/")
+    try:
+        idx = parts.index("infrareds")
+    except ValueError:
+        return ""
+    if idx + 1 >= len(parts):
+        return ""
+    return parts[idx + 1].split("?", 1)[0]
 
 
 def _looks_like_tuya_key_payload(payload: dict[str, Any]) -> bool:

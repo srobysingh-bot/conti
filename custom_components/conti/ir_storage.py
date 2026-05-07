@@ -63,6 +63,7 @@ class IRStorage:
                     "category_id": "",
                     "brand_id": "",
                     "remote_id": "",
+                    "remote_index": "",
                     "commands": {},
                 }
             data.setdefault("device_id", self._device_id)
@@ -71,6 +72,7 @@ class IRStorage:
             data.setdefault("category_id", "")
             data.setdefault("brand_id", "")
             data.setdefault("remote_id", "")
+            data.setdefault("remote_index", "")
             data.setdefault("commands", {})
             self._data = data
             await self._async_import_default_pack_if_empty()
@@ -110,6 +112,7 @@ class IRStorage:
                 "category_id": category_id,
                 "brand_id": brand_id,
                 "remote_id": remote_id,
+                "remote_index": remote_index,
                 "commands": normalized_commands,
             }
             await self._store.async_save(self._data)
@@ -125,25 +128,31 @@ class IRStorage:
     async def async_update_runtime_metadata(
         self,
         *,
-        infrared_id: str = "",
-        remote_id: str = "",
-        category_id: str = "",
-        brand_id: str = "",
+        infrared_id: str | None = None,
+        remote_id: str | None = None,
+        remote_index: str | int | None = None,
+        category_id: str | None = None,
+        brand_id: str | None = None,
     ) -> None:
         """Persist runtime Tuya IR identifiers without replacing commands."""
         await self.async_load()
         async with self._lock:
             data = self._data or {"device_id": self._device_id, "commands": {}}
-            if infrared_id:
-                data["infrared_id"] = infrared_id
-            if remote_id:
-                data["remote_id"] = remote_id
-            if remote_index:
-                data["remote_index"] = remote_index
-            if category_id:
-                data["category_id"] = category_id
-            if brand_id:
-                data["brand_id"] = brand_id
+            data.setdefault("infrared_id", "")
+            data.setdefault("remote_id", "")
+            data.setdefault("remote_index", "")
+            data.setdefault("category_id", "")
+            data.setdefault("brand_id", "")
+            if infrared_id is not None:
+                data["infrared_id"] = str(infrared_id).strip()
+            if remote_id is not None:
+                data["remote_id"] = str(remote_id).strip()
+            if remote_index is not None:
+                data["remote_index"] = str(remote_index).strip()
+            if category_id is not None:
+                data["category_id"] = str(category_id).strip()
+            if brand_id is not None:
+                data["brand_id"] = str(brand_id).strip()
             self._data = data
             await self._store.async_save(data)
 
@@ -186,6 +195,7 @@ class IRStorage:
                 "category_id": "",
                 "brand_id": "",
                 "remote_id": "",
+                "remote_index": "",
                 "commands": {},
             }
             commands = data.setdefault("commands", {})
@@ -227,6 +237,7 @@ class IRStorage:
                 "category_id": "",
                 "brand_id": "",
                 "remote_id": "",
+                "remote_index": "",
                 "commands": {},
             }
             commands = data.setdefault("commands", {})
