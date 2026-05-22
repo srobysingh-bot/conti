@@ -316,7 +316,7 @@ class ContiFan(CoordinatorEntity[ContiCoordinator], FanEntity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.device_manager.is_online(self._device_id)
+        return self.coordinator.is_device_available()
 
     @property
     def is_on(self) -> bool | None:
@@ -342,6 +342,9 @@ class ContiFan(CoordinatorEntity[ContiCoordinator], FanEntity):
         preset_mode: str | None = None,
         **kwargs: Any,
     ) -> None:
+        if not self._command_available():
+            return
+
         mgr = self.coordinator.device_manager
         dps: dict[int, Any] = {}
         if self._dp_power:
@@ -355,6 +358,9 @@ class ContiFan(CoordinatorEntity[ContiCoordinator], FanEntity):
             await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
+        if not self._command_available():
+            return
+
         if self._dp_power:
             self.coordinator.mark_dp_commanded(self._dp_power)
             await self.coordinator.device_manager.set_dp(
@@ -363,6 +369,9 @@ class ContiFan(CoordinatorEntity[ContiCoordinator], FanEntity):
             await self.coordinator.async_request_refresh()
 
     async def async_set_percentage(self, percentage: int) -> None:
+        if not self._command_available():
+            return
+
         if self._dp_speed:
             self.coordinator.mark_dp_commanded(self._dp_speed)
             await self.coordinator.device_manager.set_dp(
@@ -373,6 +382,9 @@ class ContiFan(CoordinatorEntity[ContiCoordinator], FanEntity):
             await self.coordinator.async_request_refresh()
 
     async def async_set_direction(self, direction: str) -> None:
+        if not self._command_available():
+            return
+
         if self._dp_direction:
             self.coordinator.mark_dp_commanded(self._dp_direction)
             await self.coordinator.device_manager.set_dp(
@@ -382,9 +394,22 @@ class ContiFan(CoordinatorEntity[ContiCoordinator], FanEntity):
 
     async def async_oscillate(self, oscillating: bool) -> None:
         """Turn oscillation on or off."""
+        if not self._command_available():
+            return
+
         if self._dp_oscillation:
             self.coordinator.mark_dp_commanded(self._dp_oscillation)
             await self.coordinator.device_manager.set_dp(
                 self._device_id, int(self._dp_oscillation), oscillating
             )
             await self.coordinator.async_request_refresh()
+
+    def _command_available(self) -> bool:
+        """Return True when it is safe to send a fan command."""
+        if self.coordinator.is_device_available():
+            return True
+        _LOGGER.warning(
+            "Conti fan command ignored because device %s is unavailable",
+            self._device_id,
+        )
+        return False

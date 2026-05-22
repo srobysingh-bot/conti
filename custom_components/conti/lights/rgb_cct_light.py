@@ -45,6 +45,9 @@ class ContiRgbCctLight(BaseContiLight):
     # -- Commands ------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        if not self._command_available():
+            return
+
         power_dps: dict[int, Any] = {}
         dps: dict[int, Any] = {}
         optimistic: dict[str, Any] = {}
@@ -96,6 +99,9 @@ class ContiRgbCctLight(BaseContiLight):
             self._schedule_send(dps)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
+        if not self._command_available():
+            return
+
         if not self._dp_power:
             return
 

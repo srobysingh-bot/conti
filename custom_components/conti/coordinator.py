@@ -53,6 +53,7 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         scan_interval: int = DEFAULT_SCAN_INTERVAL,
         low_power_cloud: Any | None = None,
         cloud_fallback: Any | None = None,
+        cloud_availability: Any | None = None,
     ) -> None:
         super().__init__(
             hass,
@@ -65,6 +66,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._consecutive_failures: int = 0
         self._low_power_cloud = low_power_cloud
         self._cloud_fallback = cloud_fallback
+        self._cloud_availability = cloud_availability
+        self._cloud_online: bool | None = None
+        self._cloud_online_failures: int = 0
 
         # Track DPs commanded via HA so we can label source in activity
         self._commanded_dps: dict[str, float] = {}  # dp_id → monotonic ts
@@ -108,6 +112,10 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         result: dict[str, dict[str, Any]] = {}
 
         if self._low_power_cloud is not None:
+            cloud_online = await self._async_refresh_cloud_availability()
+            if cloud_online is False:
+                return self.data or {}
+
             try:
                 dps = await self._low_power_cloud.async_get_dps()
             except Exception as exc:  # noqa: BLE001
@@ -129,6 +137,10 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             return self.data or {}
 
         if self._cloud_fallback is not None:
+            cloud_online = await self._async_refresh_cloud_availability()
+            if cloud_online is False:
+                return self.data or {}
+
             try:
                 dps = await self._cloud_fallback.async_get_dps()
             except Exception as exc:  # noqa: BLE001
@@ -151,6 +163,8 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
             # Empty cloud status — keep last state.
             return self.data or {}
+
+        await self._async_refresh_cloud_availability()
 
         try:
             dps = await self.device_manager.query_device(self._device_id)
@@ -211,11 +225,56 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     def is_device_available(self) -> bool:
         """Availability helper used by entities."""
-        if self._low_power_cloud is not None:
-            return True
-        if self._cloud_fallback is not None:
-            return True
+        if self._cloud_online is False:
+            return False
+        if self._low_power_cloud is not None or self._cloud_fallback is not None:
+            return self._cloud_online is True or self.last_update_success
         return self.device_manager.is_online(self._device_id)
+
+    def _cloud_availability_runtime(self) -> Any | None:
+        """Return the runtime that can answer Tuya cloud online state."""
+        return (
+            self._cloud_availability
+            or self._cloud_fallback
+            or self._low_power_cloud
+        )
+
+    async def _async_refresh_cloud_availability(self) -> bool | None:
+        """Refresh cloud online state when a runtime can provide it.
+
+        ``None`` means the cloud could not give a definitive answer, so the
+        previous availability decision is kept.
+        """
+        runtime = self._cloud_availability_runtime()
+        getter = getattr(runtime, "async_get_online_state", None)
+        if getter is None:
+            return None
+
+        try:
+            online = await getter()
+        except Exception as exc:  # noqa: BLE001
+            self._cloud_online_failures += 1
+            _LOGGER.debug(
+                "Cloud availability check error for %s: %s",
+                self._device_id,
+                exc,
+            )
+            return None
+
+        if online is None:
+            self._cloud_online_failures += 1
+            return None
+
+        new_online = bool(online)
+        if self._cloud_online is not None and self._cloud_online != new_online:
+            _LOGGER.info(
+                "Conti device %s cloud availability changed: %s",
+                self._device_id,
+                "online" if new_online else "offline",
+            )
+        self._cloud_online = new_online
+        self._cloud_online_failures = 0
+        return new_online
 
     def _detect_lowpower_state_changes(self, new_dps: dict[str, Any]) -> None:
         """Detect state changes in low-power sensors and fire activity events.
@@ -331,4 +390,6 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         """Return diagnostic info for this device."""
         diag = self.device_manager.get_device_diagnostics(self._device_id)
         diag["consecutive_poll_failures"] = self._consecutive_failures
+        diag["cloud_online"] = self._cloud_online
+        diag["cloud_online_failures"] = self._cloud_online_failures
         return diag

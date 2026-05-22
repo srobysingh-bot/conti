@@ -39,6 +39,10 @@ STORAGE_VERSION = 1
 # Re-authenticate margin: refresh when token expires within this window.
 _REFRESH_MARGIN = 120  # seconds
 
+# Cloud online state is account-level data, so cache it briefly to avoid
+# one Tuya API listing call per entity poll when many devices are loaded.
+_ONLINE_CACHE_TTL = 30  # seconds
+
 
 def _storage_key(entry_id: str | None) -> str:
     """Return the storage key for a given config entry (or global fallback).
@@ -93,6 +97,8 @@ class TuyaOAuthManager:
         self._sharing_schema_cache: dict[str, dict[str, Any]] = {}
         # Map Tuya device_id -> infrared_id for /v2.0/infrareds APIs.
         self._infrared_id_cache: dict[str, str] = {}
+        self._online_state_cache: dict[str, bool] = {}
+        self._online_state_cache_ts: float = 0.0
 
     # ── Properties ────────────────────────────────────────────────────
 
@@ -680,28 +686,67 @@ class TuyaOAuthManager:
         self._sync_from_helper(helper)
         return result
 
-    async def async_is_device_online(self, device_id: str) -> bool:
-        """Return current cloud/sharing online state for a device."""
+    async def async_get_device_online_state(
+        self, device_id: str
+    ) -> bool | None:
+        """Return Tuya's explicit online state, or None when unknown."""
         device_id = str(device_id).strip()
         if not device_id:
             return False
 
+        now = time.time()
+        if (
+            device_id in self._online_state_cache
+            and now - self._online_state_cache_ts < _ONLINE_CACHE_TTL
+        ):
+            return self._online_state_cache[device_id]
+
+        devices = await self.async_list_devices()
+        returned_ids = {
+            str(dev.get("id", ""))
+            for dev in devices
+            if isinstance(dev, dict)
+        }
+        online_updates: dict[str, bool] = {}
+        for dev in devices:
+            if not isinstance(dev, dict):
+                continue
+            dev_id = str(dev.get("id", "")).strip()
+            if dev_id and "online" in dev:
+                online_updates[dev_id] = bool(dev.get("online"))
+
+        if online_updates:
+            self._online_state_cache.update(online_updates)
+            self._online_state_cache_ts = now
+            if device_id in online_updates:
+                return online_updates[device_id]
+
+        if self.is_qr_mode and returned_ids and device_id not in returned_ids:
+            return None
+
         if self.is_qr_mode:
-            await self.async_list_devices_sharing()
+            if not devices:
+                return None
             cached = self._sharing_device_cache.get(device_id)
             if not isinstance(cached, dict):
-                return False
+                return None
             if "online" in cached:
                 return bool(cached.get("online"))
             remotes = await self.async_get_ir_device_remotes(device_id)
-            return remotes is not None
+            return True if remotes is not None else None
 
         info = await self.async_get_device_info(device_id)
-        if isinstance(info, dict) and "online" in info:
-            return bool(info.get("online"))
+        if isinstance(info, dict):
+            if "online" in info:
+                return bool(info.get("online"))
+            status = await self.async_get_device_status(device_id)
+            return True if status else None
 
-        status = await self.async_get_device_status(device_id)
-        return bool(status)
+        return None
+
+    async def async_is_device_online(self, device_id: str) -> bool:
+        """Return current cloud/sharing online state for a device."""
+        return bool(await self.async_get_device_online_state(device_id))
 
     async def async_get_ir_categories(self, device_id: str) -> Any:
         """Fetch IR categories through the Smart Life QR sharing session."""

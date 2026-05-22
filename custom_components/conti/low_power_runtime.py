@@ -30,6 +30,7 @@ class LowPowerSensorCloudRuntime:
         self._device_id = device_id
         self._dp_map = dp_map if isinstance(dp_map, dict) else {}
         self._helper = TuyaCloudSchemaHelper(access_id, access_secret, region)
+        self._online: bool | None = None
 
         # Prefer exact code->dp_id matches when available.
         self._code_to_dp: dict[str, str] = {}
@@ -43,6 +44,35 @@ class LowPowerSensorCloudRuntime:
                 self._code_to_dp[code] = str(dp_id)
             if key:
                 self._key_to_dp_ids.setdefault(key, []).append(str(dp_id))
+
+    @property
+    def last_online_state(self) -> bool | None:
+        """Return the last explicit cloud online state, if known."""
+        return self._online
+
+    async def async_get_online_state(self) -> bool | None:
+        """Fetch Tuya's online state without treating API errors as offline."""
+        try:
+            info = await self._helper.get_device_credentials(
+                self._device_id,
+                strict=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "Low-power cloud online check failed for %s: %s",
+                self._device_id,
+                exc,
+            )
+            return None
+
+        if not isinstance(info, dict):
+            return None
+
+        if "online" in info:
+            self._online = bool(info.get("online"))
+            return self._online
+
+        return None
 
     async def async_get_dps(self) -> dict[str, Any]:
         """Fetch cloud status and translate it into a DP dictionary."""

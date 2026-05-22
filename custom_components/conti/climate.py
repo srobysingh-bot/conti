@@ -195,7 +195,7 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.device_manager.is_online(self._device_id)
+        return self.coordinator.is_device_available()
 
     @property
     def hvac_mode(self) -> HVACMode:
@@ -242,6 +242,9 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
     # -- Commands ------------------------------------------------------------
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        if not self._command_available():
+            return
+
         mgr = self.coordinator.device_manager
         if hvac_mode == HVACMode.OFF:
             if self._dp_power:
@@ -260,6 +263,9 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
+        if not self._command_available():
+            return
+
         temp = kwargs.get(ATTR_TEMPERATURE)
         if temp is not None and self._dp_target_temp:
             await self.coordinator.device_manager.set_dp(
@@ -268,8 +274,21 @@ class ContiClimate(CoordinatorEntity[ContiCoordinator], ClimateEntity):
             await self.coordinator.async_request_refresh()
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
+        if not self._command_available():
+            return
+
         if self._dp_fan_mode:
             await self.coordinator.device_manager.set_dp(
                 self._device_id, int(self._dp_fan_mode), fan_mode
             )
             await self.coordinator.async_request_refresh()
+
+    def _command_available(self) -> bool:
+        """Return True when it is safe to send a climate command."""
+        if self.coordinator.is_device_available():
+            return True
+        _LOGGER.warning(
+            "Conti climate command ignored because device %s is unavailable",
+            self._device_id,
+        )
+        return False

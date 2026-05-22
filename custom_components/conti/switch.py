@@ -136,13 +136,7 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     @property
     def available(self) -> bool:
-        # Prefer cached DP or coordinator health so entities don't flap
-        # to "unknown" on transient poll failures.
-        return (
-            self._dp_value() is not None
-            or self.coordinator.last_update_success
-            or self.coordinator.device_manager.is_online(self._device_id)
-        )
+        return self.coordinator.is_device_available()
 
     @property
     def is_on(self) -> bool | None:
@@ -200,10 +194,24 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
     # -- Commands ------------------------------------------------------------
 
     async def async_turn_on(self, **kwargs: Any) -> None:
+        if not self._command_available():
+            return
         self._apply_desired(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
+        if not self._command_available():
+            return
         self._apply_desired(False)
+
+    def _command_available(self) -> bool:
+        """Return True when it is safe to optimistically send a command."""
+        if self.coordinator.is_device_available():
+            return True
+        _LOGGER.warning(
+            "Conti switch command ignored because device %s is unavailable",
+            self._device_id,
+        )
+        return False
 
     def _apply_desired(self, value: bool) -> None:
         """Optimistically update UI and send command immediately."""
@@ -224,6 +232,13 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
 
     async def _async_send_dp(self, value: bool) -> None:
         """Send the DP command to the device immediately (serialised by lock)."""
+        if not self.coordinator.is_device_available():
+            _LOGGER.warning(
+                "Conti switch send skipped because device %s is unavailable",
+                self._device_id,
+            )
+            return
+
         async with self._send_lock:
             try:
                 await self.coordinator.device_manager.set_dp(

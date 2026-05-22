@@ -583,6 +583,11 @@ class TuyaCloudSchemaHelper:
             ),
         }
 
+        for online_key in ("online", "is_online", "isOnline"):
+            if online_key in device_info:
+                result["online"] = bool(device_info.get(online_key))
+                break
+
         local_key = (
             device_info.get("local_key")
             or device_info.get("key")
@@ -1026,15 +1031,18 @@ class TuyaCloudSchemaHelper:
             dev_id = item.get("id") or item.get("device_id")
             if not dev_id:
                 continue
-            devices.append(
-                {
-                    "id": str(dev_id),
-                    "name": item.get("name") or item.get("product_name") or "",
-                    "ip": item.get("ip") or item.get("local_ip") or item.get("lan_ip") or "",
-                    "category": item.get("category") or "",
-                    "product_name": item.get("product_name") or "",
-                }
-            )
+            info = {
+                "id": str(dev_id),
+                "name": item.get("name") or item.get("product_name") or "",
+                "ip": item.get("ip") or item.get("local_ip") or item.get("lan_ip") or "",
+                "category": item.get("category") or "",
+                "product_name": item.get("product_name") or "",
+            }
+            for online_key in ("online", "is_online", "isOnline"):
+                if online_key in item:
+                    info["online"] = bool(item.get(online_key))
+                    break
+            devices.append(info)
         return devices
 
     @staticmethod

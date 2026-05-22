@@ -5,8 +5,9 @@ Used for devices discovered via Smart Life OAuth that do not have a
 uses the global :class:`TuyaOAuthManager` to poll device status from
 the Tuya Cloud API.
 
-This does NOT affect local-runtime devices. Only devices whose config
-entry has ``runtime_channel == "cloud"`` will use this module.
+For cloud-runtime devices it provides DP polling. For local-runtime devices
+with a configured Smart Life account it can also be used as a lightweight
+cloud availability monitor.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class CloudDeviceRuntime:
-    """Poll Tuya Cloud status for a device via the global OAuth manager."""
+    """Poll Tuya Cloud status/availability via the OAuth manager."""
 
     def __init__(
         self,
@@ -32,6 +33,7 @@ class CloudDeviceRuntime:
         self._device_id = device_id
         self._oauth = oauth_manager
         self._dp_map = dp_map if isinstance(dp_map, dict) else {}
+        self._online: bool | None = None
 
         # Build code→dp_id and key→dp_id lookup tables.
         self._code_to_dp: dict[str, str] = {}
@@ -45,6 +47,29 @@ class CloudDeviceRuntime:
                 self._code_to_dp[code] = str(dp_id)
             if key:
                 self._key_to_dp_ids.setdefault(key, []).append(str(dp_id))
+
+    @property
+    def last_online_state(self) -> bool | None:
+        """Return the last explicit cloud online state, if known."""
+        return self._online
+
+    async def async_get_online_state(self) -> bool | None:
+        """Fetch Tuya's online state without treating API errors as offline."""
+        try:
+            online = await self._oauth.async_get_device_online_state(
+                self._device_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "Cloud online check failed for %s: %s",
+                self._device_id,
+                exc,
+            )
+            return None
+
+        if online is not None:
+            self._online = bool(online)
+        return online
 
     async def async_get_dps(self) -> dict[str, Any]:
         """Fetch cloud status and translate into a DP dictionary."""

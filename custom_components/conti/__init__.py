@@ -565,6 +565,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     low_power_runtime = None
     cloud_fallback_runtime = None
+    cloud_availability_runtime = None
 
     if low_power_sensor:
         access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
@@ -675,6 +676,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not low_power_sensor and not cloud_only_device:
         await manager.add_device(device_config)
+        try:
+            from .cloud_device_runtime import CloudDeviceRuntime  # noqa: PLC0415
+            from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+
+            availability_oauth_key = f"{_OAUTH_KEY}_availability"
+            oauth = hass.data[DOMAIN].get(availability_oauth_key)
+            if oauth is None:
+                oauth = TuyaOAuthManager(hass, entry_id=entry.entry_id)
+                await oauth.async_load()
+                if not oauth.is_configured:
+                    oauth_global = TuyaOAuthManager(hass)
+                    await oauth_global.async_load()
+                    oauth = oauth_global
+                if oauth.is_configured:
+                    hass.data[DOMAIN][availability_oauth_key] = oauth
+
+            if oauth.is_configured:
+                cloud_availability_runtime = CloudDeviceRuntime(
+                    device_id=device_id,
+                    oauth_manager=oauth,
+                    dp_map=dp_map,
+                )
+                _LOGGER.info(
+                    "Cloud availability monitor enabled for local device %s",
+                    device_id,
+                )
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug(
+                "Cloud availability monitor unavailable for %s: %s",
+                device_id,
+                exc,
+            )
 
     # ---- Persist auto-detected version back to entry data -----------------
     if (
@@ -706,6 +739,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         device_id,
         low_power_cloud=low_power_runtime,
         cloud_fallback=cloud_fallback_runtime,
+        cloud_availability=cloud_availability_runtime,
     )
 
     hass.data[DOMAIN][entry.entry_id] = {

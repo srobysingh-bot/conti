@@ -232,11 +232,17 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
 
     @property
     def available(self) -> bool:
-        return (
-            self._dp_value(self._dp_power) is not None
-            or self.coordinator.last_update_success
-            or self.coordinator.device_manager.is_online(self._device_id)
+        return self.coordinator.is_device_available()
+
+    def _command_available(self) -> bool:
+        """Return True when it is safe to optimistically send a command."""
+        if self.coordinator.is_device_available():
+            return True
+        _LOGGER.warning(
+            "Conti light command ignored because device %s is unavailable",
+            self._device_id,
         )
+        return False
 
     @property
     def is_on(self) -> bool:
@@ -521,6 +527,12 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
         while self._pending_dps:
             batch = dict(self._pending_dps)
             self._pending_dps.clear()
+            if not self.coordinator.is_device_available():
+                _LOGGER.warning(
+                    "Conti light send skipped because device %s is unavailable",
+                    self._device_id,
+                )
+                return
             async with self._send_lock:
                 try:
                     await self.coordinator.device_manager.set_dps(
@@ -551,6 +563,13 @@ class BaseContiLight(CoordinatorEntity[ContiCoordinator], LightEntity):
 
     async def _send_immediately(self, dps: dict[int, Any]) -> None:
         """Send DPs right now, bypassing debounce."""
+        if not self.coordinator.is_device_available():
+            _LOGGER.warning(
+                "Conti light send skipped because device %s is unavailable",
+                self._device_id,
+            )
+            return
+
         async with self._send_lock:
             try:
                 await self.coordinator.device_manager.set_dps(
