@@ -26,6 +26,7 @@ CONF_MAPPING_SOURCE: Final = "mapping_source"  # "auto" | "cloud" | "learn" | "m
 CONF_MAPPING_CONFIDENCE: Final = "mapping_confidence"  # 0.0–1.0
 CONF_TUYA_CATEGORY: Final = "tuya_category"  # Tuya product category (e.g. "dj")
 CONF_LOW_POWER_DEVICE: Final = "low_power_device"
+CONF_DEFERRED_LOCAL_CONNECT: Final = "deferred_local_connect"
 CONF_RUNTIME_CHANNEL: Final = "runtime_channel"
 CONF_CLOUD_ACCESS_ID: Final = "cloud_access_id"
 CONF_CLOUD_ACCESS_SECRET: Final = "cloud_access_secret"

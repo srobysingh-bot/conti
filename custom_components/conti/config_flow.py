@@ -63,11 +63,11 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 
 from .const import (
-    AUTO_DETECT_ORDER,
     CONF_DAY_BRIGHTNESS,
     CONF_DAY_END,
     CONF_DAY_KELVIN,
     CONF_DAY_START,
+    CONF_DEFERRED_LOCAL_CONNECT,
     CONF_CLOUD_ACCESS_ID,
     CONF_CLOUD_ACCESS_SECRET,
     CONF_CLOUD_REGION,
@@ -186,6 +186,28 @@ def _classify_tcp_connect_error(exc: BaseException) -> tuple[str, str]:
 def _is_lan_tcp_reachability_error(error_key: str) -> bool:
     """Return True if *error_key* is a LAN TCP reachability class failure."""
     return error_key in _LAN_TCP_REACHABILITY_ERRORS
+
+
+def _is_dali_cct_fallback(
+    device_type: str,
+    cloud_dp_map: dict[str, Any],
+    local_error: str,
+) -> bool:
+    """Return True when cloud CCT capabilities can defer local setup."""
+    if (
+        not local_error
+        or device_type != DEVICE_TYPE_LIGHT
+        or not cloud_dp_map
+        or _is_lan_tcp_reachability_error(local_error)
+    ):
+        return False
+
+    roles = {
+        str(spec.get("key", ""))
+        for spec in cloud_dp_map.values()
+        if isinstance(spec, dict)
+    }
+    return {"power", "brightness", "color_temp"}.issubset(roles)
 
 
 async def _async_probe_tcp(
@@ -588,37 +610,68 @@ async def _test_device(
         return False, None, {}, ERR_DEVICE_NOT_RESPONDING
 
     if not ok:
-        await client.close()
-        if version == "auto":
-            _LOGGER.warning(
-                "Config flow: all protocol versions failed for %s "
-                "(%s:%d, tried %s, key=%s)",
-                device_id, ip, port, AUTO_DETECT_ORDER, masked,
-            )
-            return False, None, {}, "wrong_protocol"
-        # Explicit version — likely wrong key or wrong version.
-        _LOGGER.warning(
-            "Config flow: connect with v%s failed for %s (%s:%d, key=%s)",
-            version, device_id, ip, port, masked,
+        failure_reason = str(
+            getattr(client, "last_failure_reason", "") or "no_response"
         )
-        return False, None, {}, "invalid_auth"
+        failure_detail = str(getattr(client, "last_failure_detail", "") or "")
+        confirmed_mismatch = bool(
+            getattr(client, "confirmed_protocol_mismatch", False)
+        )
+        await client.close()
+        _LOGGER.warning(
+            "Config flow: TinyTuya probe failed device=%s host=%s port=%s "
+            "protocol=%s reason=%s confirmed_protocol_mismatch=%s "
+            "detail=%s attempts=%s",
+            device_id,
+            ip,
+            port,
+            version,
+            failure_reason,
+            confirmed_mismatch,
+            failure_detail,
+            getattr(client, "attempt_failures", []),
+        )
+        if confirmed_mismatch:
+            return False, None, {}, "wrong_protocol"
+        if failure_reason in {"invalid_key", "decrypt_error"}:
+            return False, None, {}, "invalid_auth"
+        if failure_reason == "connection_refused":
+            return False, None, {}, ERR_PORT_BLOCKED_LOCAL
+        if failure_reason == "timeout":
+            return False, None, {}, ERR_DEVICE_NOT_RESPONDING
+        return False, None, {}, failure_reason
 
     detected = client.detected_version or client.protocol_version
-    _LOGGER.debug(
-        "Config flow: connected to %s with protocol v%s (key=%s)",
-        device_id, detected, masked,
+    initial_dps = dict(getattr(client, "initial_status_dps", {}) or {})
+    _LOGGER.info(
+        "Config flow: direct status probe device=%s host=%s protocol=%s "
+        "command=status returned_dps=%s",
+        device_id,
+        ip,
+        detected,
+        initial_dps,
     )
 
-    # ------------------------------------------------------------------
-    # Step 3: DP discovery (best-effort — don't fail the flow if empty).
-    # ------------------------------------------------------------------
-    discovered_dps: dict[str, Any] = {}
-    try:
-        discovered_dps = await client.detect_dps()
-    except Exception:  # noqa: BLE001
-        _LOGGER.debug(
-            "Config flow: DP discovery raised for %s — continuing", device_id
+    if not initial_dps:
+        await client.close()
+        _LOGGER.warning(
+            "Config flow: status probe connected but returned empty DPS "
+            "device=%s host=%s protocol=%s classification=empty_status",
+            device_id,
+            ip,
+            detected,
         )
+        return False, detected, {}, "empty_status"
+
+    discovered_dps: dict[str, Any] = initial_dps
+    if version == "auto":
+        try:
+            discovered_dps = await client.detect_dps() or initial_dps
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Config flow: DP discovery raised for %s — using status DPS",
+                device_id,
+            )
 
     await client.close()
 
@@ -675,6 +728,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._onboarding_mode: str = "manual"
         self._host_resolution_note: str = ""
         self._low_power_sensor: bool = False
+        self._deferred_local_connect: bool = False
+        self._local_connect_error: str = ""
         self._ir_categories: list[dict[str, Any]] = []
         self._ir_brands: list[dict[str, Any]] = []
         self._ir_models: list[dict[str, Any]] = []
@@ -2337,8 +2392,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             # ── Form submission: route to cloud or review ──
             proto_override = user_input.get("protocol_override", "auto")
-            if proto_override != "auto" and proto_override != self._detected_version:
-                # Re-test with specific version
+            if proto_override == "3.4" and proto_override != self._detected_version:
+                # Manual v3.4 means one direct v3.4 status probe; do not
+                # precede it with another auto-detection cycle.
                 ok, detected, discovered, err = await _test_device(
                     device_id=self._flow_data[CONF_DEVICE_ID],
                     ip=self._flow_data[CONF_HOST],
@@ -2350,9 +2406,28 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._detected_version = detected
                     if discovered:
                         self._discovered_dps = discovered
+                    self._local_connect_error = ""
+                else:
+                    self._local_connect_error = err
+                    errors["base"] = err or ERR_DEVICE_NOT_RESPONDING
 
             if user_input.get("use_cloud_assist", False):
                 return await self.async_step_cloud_assist()
+
+            if errors:
+                return self.async_show_form(
+                    step_id="detect",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Optional("use_cloud_assist", default=False): bool,
+                            vol.Optional(
+                                "protocol_override",
+                                default="3.4",
+                            ): vol.In(SUPPORTED_VERSIONS),
+                        }
+                    ),
+                    errors=errors,
+                )
 
             return await self.async_step_review()
 
@@ -2367,6 +2442,24 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not ok:
             errors["base"] = err or ERR_DEVICE_NOT_RESPONDING
+            self._local_connect_error = errors["base"]
+
+            if self._onboarding_mode == "cloud_assisted":
+                await self._async_try_silent_cloud_schema_fetch()
+                if self._cloud_dp_map:
+                    self._final_dp_map = dict(self._cloud_dp_map)
+                    self._mapping_source = "cloud"
+                if self._is_dali_cct_fallback_candidate():
+                    self._deferred_local_connect = True
+                    _LOGGER.warning(
+                        "Config flow: local status unavailable for DALI CCT "
+                        "candidate device=%s host=%s error=%s; allowing setup "
+                        "from cloud schema while runtime retries locally",
+                        self._flow_data[CONF_DEVICE_ID],
+                        self._flow_data.get(CONF_HOST, ""),
+                        errors["base"],
+                    )
+                    return await self.async_step_review()
 
             # Low-power battery sensors may be intentionally sleepy and not
             # continuously reachable on local TCP. Keep normal local behavior
@@ -2408,7 +2501,13 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Keep protocol/auth failures in detect step so the user sees the
             # correct error classification and can try protocol override.
-            if errors["base"] in {"wrong_protocol", "invalid_auth"}:
+            if errors["base"] in {
+                "wrong_protocol",
+                "invalid_auth",
+                "empty_status",
+                "no_response",
+                "empty_payload",
+            }:
                 return self.async_show_form(
                     step_id="detect",
                     data_schema=vol.Schema(
@@ -2707,6 +2806,17 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self._cloud_dp_map,
                     )
                     self._mapping_source = "cloud" if self._cloud_dp_map else "auto"
+                    if self._is_dali_cct_fallback_candidate():
+                        self._deferred_local_connect = True
+                        _LOGGER.warning(
+                            "Config flow: enabling deferred local connection "
+                            "for DALI CCT candidate device=%s host=%s "
+                            "local_error=%s cloud_dps=%s",
+                            self._flow_data[CONF_DEVICE_ID],
+                            self._flow_data.get(CONF_HOST, ""),
+                            self._local_connect_error,
+                            sorted(self._cloud_dp_map),
+                        )
                 else:
                     errors["base"] = "cloud_fetch_failed"
 
@@ -3385,6 +3495,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         required = {"power", "brightness", "color_temp"}
         return not required.issubset(roles)
 
+    def _is_dali_cct_fallback_candidate(self) -> bool:
+        """Return True for a cloud-mapped CCT light with deferred local I/O."""
+        return _is_dali_cct_fallback(
+            str(self._flow_data.get(CONF_DEVICE_TYPE, "")),
+            self._cloud_dp_map,
+            self._local_connect_error,
+        )
+
     def _is_strong_low_power_sensor_candidate(self, error_key: str) -> bool:
         """Return True when evidence strongly suggests a sleepy battery sensor."""
         if not _is_lan_tcp_reachability_error(error_key):
@@ -3467,6 +3585,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
                 entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth["access_secret"]
                 entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get("region", "eu")
+        elif self._deferred_local_connect:
+            entry_data[CONF_DEFERRED_LOCAL_CONNECT] = True
+            entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_LOCAL
         elif local_key and host:
             # Full local runtime — standard path.
             entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_LOCAL

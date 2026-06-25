@@ -283,11 +283,21 @@ class DeviceManager:
             else:
                 managed.online = False
                 managed.diag.consecutive_failures += 1
-                if not managed.diag.last_error:
-                    self._classify_error(managed, "initial connect failed")
+                reason = client.last_failure_reason or "unknown"
+                detail = client.last_failure_detail
+                self._classify_error(
+                    managed,
+                    f"initial connect failed: {reason}: {detail}",
+                )
                 _LOGGER.warning(
-                    "Conti device %s initial connect FAILED - will retry",
+                    "Conti device %s initial connect FAILED ip=%s "
+                    "protocol=%s reason=%s detail=%s attempts=%s - will retry",
                     device_id,
+                    client.ip,
+                    config.get("protocol_version", DEFAULT_PROTOCOL_VERSION),
+                    reason,
+                    detail,
+                    client.attempt_failures,
                 )
                 self._schedule_reconnect(device_id)
 
@@ -614,6 +624,9 @@ class DeviceManager:
             "reconnect_delay": managed.reconnect_delay,
             "last_tx_hex": d.last_tx_hex,
             "last_rx_hex": d.last_rx_hex,
+            "last_probe_failure_reason": client.last_failure_reason,
+            "last_probe_failure_detail": client.last_failure_detail,
+            "protocol_attempt_failures": client.attempt_failures,
         }
 
     # -- Internal callbacks --------------------------------------------------
@@ -880,6 +893,12 @@ class DeviceManager:
             managed.diag.last_error_class = ERR_HANDSHAKE
         elif "decrypt" in lower or "wrong key" in lower:
             managed.diag.last_error_class = ERR_DECRYPT
+        elif "invalid_key" in lower:
+            managed.diag.last_error_class = ERR_DECRYPT
+        elif "no_response" in lower:
+            managed.diag.last_error_class = ERR_EOF
+        elif "empty_payload" in lower:
+            managed.diag.last_error_class = ERR_MALFORMED
         elif "empty status" in lower:
             managed.diag.last_error_class = ERR_EMPTY_STATUS
         elif "eof" in lower or "closed" in lower or "disconnect" in lower:

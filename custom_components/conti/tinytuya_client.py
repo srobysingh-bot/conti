@@ -24,7 +24,9 @@ Key design decisions
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
+import socket
 from typing import Any, Callable
 
 import tinytuya
@@ -61,6 +63,11 @@ class TinyTuyaDevice:
         self._detected_version: str | None = None
         self._protocol_version: str = version if version != "auto" else "3.3"
         self._monitored_dp_ids: dict[str, None] | None = None
+        self._initial_status_dps: dict[str, Any] = {}
+        self._last_failure_reason: str = ""
+        self._last_failure_detail: str = ""
+        self._confirmed_protocol_mismatch: bool = False
+        self._attempt_failures: list[dict[str, Any]] = []
 
         # Diagnostics (kept for compatibility; TinyTuya doesn't expose hex)
         self._last_tx_hex: str = ""
@@ -97,6 +104,26 @@ class TinyTuyaDevice:
     @property
     def protocol_version(self) -> str:
         return self._protocol_version
+
+    @property
+    def initial_status_dps(self) -> dict[str, Any]:
+        return dict(self._initial_status_dps)
+
+    @property
+    def last_failure_reason(self) -> str:
+        return self._last_failure_reason
+
+    @property
+    def last_failure_detail(self) -> str:
+        return self._last_failure_detail
+
+    @property
+    def confirmed_protocol_mismatch(self) -> bool:
+        return self._confirmed_protocol_mismatch
+
+    @property
+    def attempt_failures(self) -> list[dict[str, Any]]:
+        return [dict(item) for item in self._attempt_failures]
 
     @property
     def last_tx_hex(self) -> str:
@@ -142,6 +169,12 @@ class TinyTuyaDevice:
         defined by :data:`AUTO_DETECT_ORDER` (3.3 → 3.4 → 3.5 → 3.1).
         The first version that returns a successful ``status()`` wins.
         """
+        self._attempt_failures = []
+        self._last_failure_reason = ""
+        self._last_failure_detail = ""
+        self._confirmed_protocol_mismatch = False
+        self._initial_status_dps = {}
+
         if self._version_str == "auto":
             for ver_str in AUTO_DETECT_ORDER:
                 ver = float(ver_str)
@@ -155,9 +188,12 @@ class TinyTuyaDevice:
                     )
                     return True
             _LOGGER.warning(
-                "Conti auto-detect failed for %s — tried %s",
+                "Conti auto-detect failed device=%s ip=%s tried=%s "
+                "attempt_failures=%s",
                 self._device_id,
+                self._ip,
                 AUTO_DETECT_ORDER,
+                self._attempt_failures,
             )
             self._connected = False
             return False
@@ -166,8 +202,11 @@ class TinyTuyaDevice:
         return await asyncio.to_thread(self._try_connect_version, ver)
 
     def _try_connect_version(self, version: float) -> bool:
-        """Synchronous connection attempt for a single protocol version."""
-        # Close any prior connection
+        """Run one synchronous TinyTuya status probe."""
+        query_command = getattr(tinytuya, "DP_QUERY", 10)
+        if not isinstance(query_command, int):
+            query_command = 10
+        command = f"status/DP_QUERY({query_command})"
         if self._device:
             try:
                 self._device.close()
@@ -175,13 +214,13 @@ class TinyTuyaDevice:
                 pass
             self._device = None
 
-        _LOGGER.debug(
-            "Conti connecting: device=%s ip=%s version=%s key=%s...%s",
+        _LOGGER.info(
+            "Conti status probe starting device=%s ip=%s protocol=%.1f "
+            "command=%s",
             self._device_id,
             self._ip,
             version,
-            self._local_key[:2] if len(self._local_key) > 4 else "****",
-            self._local_key[-2:] if len(self._local_key) > 4 else "",
+            command,
         )
 
         d = tinytuya.Device(
@@ -192,26 +231,36 @@ class TinyTuyaDevice:
             port=self._port,
         )
         d.set_socketPersistent(True)
-        d.set_sendWait(None)  # remove 10ms post-send sleep for faster commands
+        d.set_sendWait(None)
 
-        # Tell TinyTuya which DPs to request so multi-gang devices
-        # report all channels, not just the default subset.
         if self._monitored_dp_ids:
             try:
                 d.set_dpsUsed(self._monitored_dp_ids)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 _LOGGER.debug(
-                    "set_dpsUsed not supported for %s — continuing",
+                    "set_dpsUsed failed device=%s ip=%s protocol=%.1f "
+                    "exception=%r",
                     self._device_id,
+                    self._ip,
+                    version,
+                    exc,
                 )
 
         try:
             result = d.status()
         except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug(
-                "Conti v%.1f connect failed for %s: %s",
-                version,
+            reason = self._classify_status_failure(exc=exc)
+            self._record_attempt_failure(
+                version, command, reason, repr(exc), confirmed=False
+            )
+            _LOGGER.warning(
+                "Conti status probe failed device=%s ip=%s protocol=%.1f "
+                "command=%s reason=%s exception=%r",
                 self._device_id,
+                self._ip,
+                version,
+                command,
+                reason,
                 exc,
             )
             try:
@@ -221,37 +270,146 @@ class TinyTuyaDevice:
             return False
 
         if isinstance(result, dict) and "dps" in result:
+            raw_dps = result.get("dps")
+            dps = (
+                {str(k): v for k, v in raw_dps.items()}
+                if isinstance(raw_dps, dict)
+                else {}
+            )
             self._device = d
             self._protocol_version = str(version)
-            self._cached_dps.update(
-                {str(k): v for k, v in result["dps"].items()}
-            )
+            self._initial_status_dps = dps
+            self._cached_dps.update(dps)
             self._connected = True
-            _LOGGER.debug(
-                "Conti connected to %s with v%.1f — DPS keys: %s",
-                self._device_id,
-                version,
-                sorted(result["dps"].keys()),
-            )
+            if dps:
+                self._last_failure_reason = ""
+                self._last_failure_detail = ""
+                _LOGGER.info(
+                    "Conti status probe succeeded device=%s ip=%s "
+                    "protocol=%.1f command=%s dps=%s",
+                    self._device_id,
+                    self._ip,
+                    version,
+                    command,
+                    dps,
+                )
+            else:
+                self._last_failure_reason = "empty_status"
+                self._last_failure_detail = repr(result)
+                _LOGGER.warning(
+                    "Conti status probe returned empty DPS device=%s ip=%s "
+                    "protocol=%.1f command=%s payload=%r",
+                    self._device_id,
+                    self._ip,
+                    version,
+                    command,
+                    result,
+                )
             return True
 
-        # Connection failed or returned an error payload
-        err_msg = (
-            result.get("Error", str(result))
-            if isinstance(result, dict)
-            else str(result)
-        )
-        _LOGGER.debug(
-            "Conti v%.1f status for %s returned error: %s",
+        reason = self._classify_status_failure(result=result)
+        self._record_attempt_failure(
             version,
+            command,
+            reason,
+            repr(result),
+            confirmed=reason == "protocol_mismatch",
+        )
+        _LOGGER.warning(
+            "Conti status probe rejected device=%s ip=%s protocol=%.1f "
+            "command=%s reason=%s payload=%r",
             self._device_id,
-            err_msg,
+            self._ip,
+            version,
+            command,
+            reason,
+            result,
         )
         try:
             d.close()
         except Exception:  # noqa: BLE001
             pass
         return False
+
+    def _record_attempt_failure(
+        self,
+        version: float,
+        command: str,
+        reason: str,
+        detail: str,
+        *,
+        confirmed: bool,
+    ) -> None:
+        """Store one protocol attempt failure for diagnostics."""
+        self._last_failure_reason = reason
+        self._last_failure_detail = detail
+        if confirmed:
+            self._confirmed_protocol_mismatch = True
+        self._attempt_failures.append(
+            {
+                "ip": self._ip,
+                "protocol": f"{version:.1f}",
+                "command": command,
+                "reason": reason,
+                "detail": detail,
+                "confirmed_protocol_mismatch": confirmed,
+            }
+        )
+
+    @staticmethod
+    def _classify_status_failure(
+        *,
+        exc: Exception | None = None,
+        result: Any = None,
+    ) -> str:
+        """Classify a TinyTuya status exception or error payload."""
+        if exc is not None:
+            text = f"{type(exc).__name__}: {exc}".lower()
+            if isinstance(exc, (TimeoutError, socket.timeout)) or "timed out" in text:
+                return "timeout"
+            if isinstance(exc, ConnectionRefusedError) or (
+                isinstance(exc, OSError)
+                and exc.errno in {errno.ECONNREFUSED, 10061}
+            ):
+                return "connection_refused"
+            if "decrypt" in text or "decode" in text or "padding" in text:
+                return "decrypt_error"
+            if "key" in text or "914" in text:
+                return "invalid_key"
+            if "protocol" in text and (
+                "mismatch" in text or "unsupported" in text
+            ):
+                return "protocol_mismatch"
+            if "empty" in text and "payload" in text:
+                return "empty_payload"
+            return "no_response"
+
+        if result is None:
+            return "no_response"
+        if result in ("", b""):
+            return "empty_payload"
+
+        text = repr(result).lower()
+        if isinstance(result, dict):
+            error = str(result.get("Error", ""))
+            err_code = str(result.get("Err", ""))
+            payload = result.get("Payload")
+            text = f"{error} {err_code} {payload!r}".lower()
+            if "Payload" in result and payload in (None, "", b"") and error:
+                return "empty_payload"
+        if "timeout" in text or "timed out" in text:
+            return "timeout"
+        if "refused" in text:
+            return "connection_refused"
+        if "decrypt" in text or "decode" in text or "padding" in text:
+            return "decrypt_error"
+        if "key" in text or "914" in text:
+            return "invalid_key"
+        if "protocol" in text and ("mismatch" in text or "unsupported" in text):
+            return "protocol_mismatch"
+        if "empty" in text and "payload" in text:
+            return "empty_payload"
+        return "no_response"
 
     async def close(self) -> None:
         """Close the connection and release the socket."""

@@ -35,6 +35,7 @@ from .const import (
     CONF_CLOUD_ACCESS_SECRET,
     CONF_CLOUD_REGION,
     CONF_DETECTED_VERSION,
+    CONF_DEFERRED_LOCAL_CONNECT,
     CONF_DEVICE_ID,
     CONF_LOW_POWER_DEVICE,
     CONF_DEVICE_PROFILE,
@@ -534,6 +535,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "local_key": entry.data.get(CONF_LOCAL_KEY, ""),
         "protocol_version": version,
         "dp_map": dp_map,
+        "deferred_local_connect": bool(
+            entry.data.get(CONF_DEFERRED_LOCAL_CONNECT, False)
+        ),
     }
 
     low_power_sensor = bool(
@@ -675,7 +679,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
     if not low_power_sensor and not cloud_only_device:
-        await manager.add_device(device_config)
+        local_connected = await manager.add_device(device_config)
+        if device_config["deferred_local_connect"] and not local_connected:
+            _LOGGER.warning(
+                "Deferred local mode active for %s: initial TinyTuya status "
+                "failed; setup will continue and DeviceManager will retry "
+                "in the background",
+                device_id,
+            )
         try:
             from .cloud_device_runtime import CloudDeviceRuntime  # noqa: PLC0415
             from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
