@@ -686,6 +686,25 @@ class TuyaOAuthManager:
         self._sync_from_helper(helper)
         return result
 
+    async def async_send_device_commands(
+        self,
+        device_id: str,
+        commands: list[dict[str, Any]],
+    ) -> bool:
+        """Send standard Tuya device commands through the active cloud session."""
+        if not commands or not await self.async_ensure_token():
+            return False
+
+        path = f"/v1.0/devices/{device_id}/commands"
+        body = {"commands": commands}
+        if self.is_qr_mode:
+            result = await self._sharing_api_post(device_id, path, body)
+        else:
+            helper = self._get_helper()
+            result = await helper._api_post(path, body, strict=False)  # noqa: SLF001
+            self._sync_from_helper(helper)
+        return result not in (None, False, {})
+
     async def async_get_device_online_state(
         self, device_id: str
     ) -> bool | None:

@@ -564,10 +564,14 @@ class TinyTuyaDevice:
                 self._cached_dps.update(dps)
                 return dps
             if isinstance(result, dict) and "Error" in result:
+                reason = self._classify_status_failure(result=result)
+                self._last_failure_reason = reason
+                self._last_failure_detail = repr(result)
                 _LOGGER.debug(
-                    "Conti status error for %s: %s",
+                    "Conti status error for %s reason=%s raw_result=%r",
                     self._device_id,
-                    result.get("Error"),
+                    reason,
+                    result,
                 )
                 # Socket may be dead after an error response
                 try:

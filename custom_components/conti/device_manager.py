@@ -93,6 +93,11 @@ class _ManagedDevice:
         "online",
         "lock",
         "diag",
+        "cloud_fallback",
+        "local_status",
+        "control_path",
+        "diagnostic_reason",
+        "cloud_refresh_task",
         "_last_push_warn_time",
     )
 
@@ -105,6 +110,11 @@ class _ManagedDevice:
         self.online: bool = False
         self.lock: asyncio.Lock = asyncio.Lock()
         self.diag: DeviceDiagnostics = DeviceDiagnostics()
+        self.cloud_fallback: Any | None = None
+        self.local_status: str = "unknown"
+        self.control_path: str = "local"
+        self.diagnostic_reason: str = ""
+        self.cloud_refresh_task: Optional[asyncio.Task[None]] = None
         self._last_push_warn_time: float = 0.0
 
 
@@ -137,6 +147,8 @@ class DeviceManager:
                 dev.listener_task.cancel()
             if dev.reconnect_task and not dev.reconnect_task.done():
                 dev.reconnect_task.cancel()
+            if dev.cloud_refresh_task and not dev.cloud_refresh_task.done():
+                dev.cloud_refresh_task.cancel()
             await dev.client.close()
         self._devices.clear()
 
@@ -220,6 +232,7 @@ class DeviceManager:
                 self._classify_error(managed, f"initial connect: {exc!r}")
 
             if ok:
+                self._clear_cloud_fallback(managed)
                 managed.reconnect_delay = RECONNECT_BASE_DELAY
                 managed.diag.consecutive_failures = 0
                 self._update_diag_on_connect(managed)
@@ -312,6 +325,8 @@ class DeviceManager:
             managed.listener_task.cancel()
         if managed.reconnect_task and not managed.reconnect_task.done():
             managed.reconnect_task.cancel()
+        if managed.cloud_refresh_task and not managed.cloud_refresh_task.done():
+            managed.cloud_refresh_task.cancel()
         await managed.client.close()
         self._state_callbacks.pop(device_id, None)
         _LOGGER.info("Removed device %s from manager", device_id)
@@ -321,14 +336,12 @@ class DeviceManager:
     async def set_dp(self, device_id: str, dp_id: int, value: Any) -> bool:
         """Set a single DP on a device.  Returns `False` if offline."""
         managed = self._devices.get(device_id)
-        allow_deferred = bool(
-            managed
-            and managed.config.get("deferred_local_connect")
-            and managed.client.cached_dps
-        )
+        allow_deferred = bool(managed and managed.control_path == "cloud_fallback")
         if not managed or (not managed.online and not allow_deferred):
             return False
         async with managed.lock:
+            if managed.control_path == "cloud_fallback":
+                return await self._set_dp_cloud(managed, dp_id, value)
             try:
                 result = await managed.client.set_dp(dp_id, value)
                 _LOGGER.info(
@@ -341,7 +354,16 @@ class DeviceManager:
                     allow_deferred,
                     result,
                 )
-                return result
+                if result:
+                    return True
+                if managed.client.last_failure_reason in {
+                    "malformed_payload_904",
+                    "empty_payload",
+                }:
+                    self._activate_cloud_fallback(managed)
+                    if managed.control_path == "cloud_fallback":
+                        return await self._set_dp_cloud(managed, dp_id, value)
+                return False
             except Exception as exc:
                 managed.diag.consecutive_failures += 1
                 self._classify_error(managed, f"set_dp failed: {exc!r}")
@@ -351,14 +373,16 @@ class DeviceManager:
     async def set_dps(self, device_id: str, dps: dict[int, Any]) -> bool:
         """Set multiple DPs at once."""
         managed = self._devices.get(device_id)
-        allow_deferred = bool(
-            managed
-            and managed.config.get("deferred_local_connect")
-            and managed.client.cached_dps
-        )
+        allow_deferred = bool(managed and managed.control_path == "cloud_fallback")
         if not managed or (not managed.online and not allow_deferred):
             return False
         async with managed.lock:
+            if managed.control_path == "cloud_fallback":
+                results = [
+                    await self._set_dp_cloud(managed, dp_id, value)
+                    for dp_id, value in dps.items()
+                ]
+                return all(results)
             try:
                 result = await managed.client.set_dps(dps)
                 _LOGGER.info(
@@ -370,7 +394,20 @@ class DeviceManager:
                     allow_deferred,
                     result,
                 )
-                return result
+                if result:
+                    return True
+                if managed.client.last_failure_reason in {
+                    "malformed_payload_904",
+                    "empty_payload",
+                }:
+                    self._activate_cloud_fallback(managed)
+                    if managed.control_path == "cloud_fallback":
+                        results = [
+                            await self._set_dp_cloud(managed, dp_id, value)
+                            for dp_id, value in dps.items()
+                        ]
+                        return all(results)
+                return False
             except Exception as exc:
                 managed.diag.consecutive_failures += 1
                 self._classify_error(managed, f"set_dps failed: {exc!r}")
@@ -428,6 +465,7 @@ class DeviceManager:
                     self._classify_error(managed, f"query connect: {exc!r}")
 
                 if ok:
+                    self._clear_cloud_fallback(managed)
                     self._update_diag_on_connect(managed)
                     managed.online = True
                     managed.reconnect_delay = RECONNECT_BASE_DELAY
@@ -525,6 +563,11 @@ class DeviceManager:
             managed.diag.last_status_ok = time.monotonic()
             managed.diag.consecutive_failures = 0
         else:
+            if managed.client.last_failure_reason in {
+                "malformed_payload_904",
+                "empty_payload",
+            }:
+                self._activate_cloud_fallback(managed)
             # Distinguish between "empty response" and "connection lost"
             if not managed.client.connected:
                 managed.diag.consecutive_failures += 1
@@ -614,7 +657,7 @@ class DeviceManager:
         return bool(
             managed.online
             or (
-                managed.config.get("deferred_local_connect")
+                managed.control_path == "cloud_fallback"
                 and managed.client.cached_dps
             )
         )
@@ -656,6 +699,9 @@ class DeviceManager:
             "local_status_reason": (
                 "" if managed.online else client.last_failure_reason
             ),
+            "local_status": managed.local_status,
+            "control_path": managed.control_path,
+            "diagnostic_reason": managed.diagnostic_reason,
             "protocol_version": d.protocol_version,
             "auto_detected": d.auto_detected,
             "detected_version": client.detected_version,
@@ -671,6 +717,105 @@ class DeviceManager:
             "last_probe_failure_detail": client.last_failure_detail,
             "protocol_attempt_failures": client.attempt_failures,
         }
+
+    def configure_dali_cloud_fallback(
+        self, device_id: str, cloud_runtime: Any
+    ) -> bool:
+        """Attach cloud control only to an exact DALI/CCT device mapping."""
+        managed = self._devices.get(device_id)
+        if (
+            not managed
+            or not managed.config.get("deferred_local_connect")
+            or managed.config.get("device_type") != "light"
+            or not cloud_runtime.supports_dali_cct_fallback()
+        ):
+            return False
+        managed.cloud_fallback = cloud_runtime
+        if managed.client.last_failure_reason in {
+            "malformed_payload_904",
+            "empty_payload",
+        }:
+            self._activate_cloud_fallback(managed)
+        return managed.control_path == "cloud_fallback"
+
+    def _activate_cloud_fallback(self, managed: _ManagedDevice) -> None:
+        if managed.cloud_fallback is None:
+            return
+        managed.local_status = "failed_904"
+        managed.control_path = "cloud_fallback"
+        managed.diagnostic_reason = "local_payload_904_cloud_fallback"
+        _LOGGER.warning(
+            "Conti local Err 904 detected device=%s; cloud fallback activated",
+            managed.config["device_id"],
+        )
+
+    def _clear_cloud_fallback(self, managed: _ManagedDevice) -> None:
+        if managed.control_path == "cloud_fallback":
+            _LOGGER.info(
+                "Conti local status recovered device=%s; disabling cloud fallback",
+                managed.config["device_id"],
+            )
+        managed.local_status = "healthy"
+        managed.control_path = "local"
+        managed.diagnostic_reason = ""
+
+    async def _set_dp_cloud(
+        self, managed: _ManagedDevice, dp_id: int, value: Any
+    ) -> bool:
+        device_id = managed.config["device_id"]
+        _LOGGER.info(
+            "Conti cloud fallback command device=%s dp=%s value=%r",
+            device_id,
+            dp_id,
+            value,
+        )
+        try:
+            ok = bool(await managed.cloud_fallback.async_set_dp(dp_id, value))
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            _LOGGER.warning(
+                "Conti cloud fallback command failed device=%s dp=%s "
+                "value=%r exception=%r",
+                device_id,
+                dp_id,
+                value,
+                exc,
+            )
+        if not ok:
+            _LOGGER.warning(
+                "Conti cloud fallback command failure device=%s dp=%s value=%r",
+                device_id,
+                dp_id,
+                value,
+            )
+            return False
+
+        managed.client._cached_dps[str(dp_id)] = value  # noqa: SLF001
+        self._on_dp_update(device_id, {str(dp_id): value})
+        _LOGGER.info(
+            "Conti cloud fallback command success device=%s dp=%s value=%r",
+            device_id,
+            dp_id,
+            value,
+        )
+        if managed.cloud_refresh_task and not managed.cloud_refresh_task.done():
+            managed.cloud_refresh_task.cancel()
+        managed.cloud_refresh_task = asyncio.create_task(
+            self._refresh_cloud_after_command(managed),
+            name=f"conti-cloud-refresh-{device_id}",
+        )
+        return True
+
+    async def _refresh_cloud_after_command(self, managed: _ManagedDevice) -> None:
+        await asyncio.sleep(1.0)
+        try:
+            dps = await managed.cloud_fallback.async_get_dps()
+        except Exception as exc:  # noqa: BLE001
+            _LOGGER.debug("Cloud refresh failed after command: %s", exc)
+            return
+        if dps:
+            managed.client._cached_dps.update(dps)  # noqa: SLF001
+            self._on_dp_update(managed.config["device_id"], dps)
 
     # -- Internal callbacks --------------------------------------------------
 
@@ -839,6 +984,7 @@ class DeviceManager:
                     self._classify_error(managed, f"reconnect connect: {exc!r}")
 
             if ok:
+                self._clear_cloud_fallback(managed)
                 self._update_diag_on_connect(managed)
                 managed.online = True
                 managed.reconnect_delay = RECONNECT_BASE_DELAY

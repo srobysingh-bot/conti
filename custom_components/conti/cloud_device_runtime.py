@@ -38,6 +38,7 @@ class CloudDeviceRuntime:
         # Build code→dp_id and key→dp_id lookup tables.
         self._code_to_dp: dict[str, str] = {}
         self._key_to_dp_ids: dict[str, list[str]] = {}
+        self._dp_to_code: dict[str, str] = {}
         for dp_id, spec in self._dp_map.items():
             if not isinstance(spec, dict):
                 continue
@@ -45,6 +46,7 @@ class CloudDeviceRuntime:
             key = str(spec.get("key", "")).strip()
             if code:
                 self._code_to_dp[code] = str(dp_id)
+                self._dp_to_code[str(dp_id)] = code
             if key:
                 self._key_to_dp_ids.setdefault(key, []).append(str(dp_id))
 
@@ -108,3 +110,23 @@ class CloudDeviceRuntime:
             )
 
         return mapped
+
+    def supports_dali_cct_fallback(self) -> bool:
+        """Return True only for the exact Tuya DALI/CCT DP code layout."""
+        required = {
+            "20": "switch_led",
+            "21": "work_mode",
+            "22": "bright_value",
+            "23": "temp_value",
+        }
+        return all(self._dp_to_code.get(dp_id) == code for dp_id, code in required.items())
+
+    async def async_set_dp(self, dp_id: int, value: Any) -> bool:
+        """Send one supported DALI/CCT DP through Tuya Cloud."""
+        code = self._dp_to_code.get(str(dp_id))
+        if not self.supports_dali_cct_fallback() or code is None:
+            return False
+        return await self._oauth.async_send_device_commands(
+            self._device_id,
+            [{"code": code, "value": value}],
+        )

@@ -35,6 +35,7 @@ class LowPowerSensorCloudRuntime:
         # Prefer exact code->dp_id matches when available.
         self._code_to_dp: dict[str, str] = {}
         self._key_to_dp_ids: dict[str, list[str]] = {}
+        self._dp_to_code: dict[str, str] = {}
         for dp_id, spec in self._dp_map.items():
             if not isinstance(spec, dict):
                 continue
@@ -42,6 +43,7 @@ class LowPowerSensorCloudRuntime:
             key = str(spec.get("key", "")).strip()
             if code:
                 self._code_to_dp[code] = str(dp_id)
+                self._dp_to_code[str(dp_id)] = code
             if key:
                 self._key_to_dp_ids.setdefault(key, []).append(str(dp_id))
 
@@ -112,3 +114,25 @@ class LowPowerSensorCloudRuntime:
             )
 
         return mapped
+
+    def supports_dali_cct_fallback(self) -> bool:
+        required = {
+            "20": "switch_led",
+            "21": "work_mode",
+            "22": "bright_value",
+            "23": "temp_value",
+        }
+        return all(self._dp_to_code.get(dp_id) == code for dp_id, code in required.items())
+
+    async def async_set_dp(self, dp_id: int, value: Any) -> bool:
+        code = self._dp_to_code.get(str(dp_id))
+        if not self.supports_dali_cct_fallback() or code is None:
+            return False
+        if not await self._helper._ensure_token(strict=False):  # noqa: SLF001
+            return False
+        result = await self._helper._api_post(  # noqa: SLF001
+            f"/v1.0/devices/{self._device_id}/commands",
+            {"commands": [{"code": code, "value": value}]},
+            strict=False,
+        )
+        return result not in (None, False, {})

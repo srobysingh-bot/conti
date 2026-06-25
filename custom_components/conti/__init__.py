@@ -540,6 +540,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "host": entry.data.get(CONF_HOST, ""),
         "port": entry.data.get(CONF_PORT, DEFAULT_PORT),
         "local_key": entry.data.get(CONF_LOCAL_KEY, ""),
+        "device_type": entry.data.get(CONF_DEVICE_TYPE, ""),
         "protocol_version": version,
         "dp_map": dp_map,
         "deferred_local_connect": bool(
@@ -781,6 +782,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "last_probe_failure_reason"
                 ),
                 cloud_seed_dps,
+            )
+
+        if (
+            device_config["deferred_local_connect"]
+            and cloud_availability_runtime is not None
+        ):
+            manager.configure_dali_cloud_fallback(
+                device_id, cloud_availability_runtime
             )
 
     # ---- Persist auto-detected version back to entry data -----------------
