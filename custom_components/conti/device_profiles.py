@@ -79,6 +79,7 @@ TUYA_CODE_TO_CONTI_KEY: Final[dict[str, str]] = {
     "temp_value_v2": DP_KEY_COLOR_TEMP,
     "colour_data": DP_KEY_COLOR_RGB,
     "colour_data_v2": DP_KEY_COLOR_RGB,
+    "color_data": DP_KEY_COLOR_RGB,
     "work_mode": "mode",
     # ── Switches / sockets ──
     "switch_1": DP_KEY_POWER,

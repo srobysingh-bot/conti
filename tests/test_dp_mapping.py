@@ -8,6 +8,7 @@ from custom_components.conti.dp_mapping import (
     auto_map_dps,
     mask_key,
     merge_dp_maps,
+    normalize_dp_map,
 )
 
 
@@ -99,6 +100,41 @@ class TestAutoMapLight:
         result = auto_map_dps("light", dps)
         assert result["2"]["min"] == 10
         assert result["2"]["max"] == 1000
+
+    def test_raw_tuya_cct_aliases_are_normalized(self) -> None:
+        raw = {
+            "20": {"key": "switch_led", "type": "bool"},
+            "21": {"key": "work_mode", "type": "str"},
+            "22": {
+                "key": "bright_value",
+                "type": "int",
+                "min": 10,
+                "max": 1000,
+            },
+            "23": {
+                "key": "temp_value",
+                "type": "int",
+                "min": 10,
+                "max": 1000,
+            },
+        }
+
+        assert normalize_dp_map(raw) == {
+            "20": {"key": "power", "type": "bool"},
+            "21": {"key": "mode", "type": "str"},
+            "22": {
+                "key": "brightness",
+                "type": "int",
+                "min": 10,
+                "max": 1000,
+            },
+            "23": {
+                "key": "color_temp",
+                "type": "int",
+                "min": 10,
+                "max": 1000,
+            },
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ from typing import Any
 import aiohttp
 
 from .device_profiles import TUYA_CODE_TO_CONTI_KEY, TUYA_TYPE_MAP
+from .dp_mapping import normalize_dp_map
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1148,7 +1149,7 @@ class TuyaCloudSchemaHelper:
             device_type_hint,
         )
 
-        return dp_map, category, device_type_hint
+        return normalize_dp_map(dp_map), category, device_type_hint
 
 
 def _category_to_device_type(category: str) -> str | None:

@@ -2767,7 +2767,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors[CONF_DP_MAP] = "invalid_dp_map"
                     # Fall through to re-show form
                 else:
-                    self._final_dp_map = user_map
+                    from .dp_mapping import normalize_dp_map  # noqa: PLC0415
+
+                    self._final_dp_map = normalize_dp_map(user_map)
                     self._mapping_source = "manual"
                     self._confidence = 1.0
 
@@ -3373,9 +3375,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     def _is_incomplete_cct_mapping(dp_map: dict[str, Any]) -> bool:
         """A CCT-capable light needs power + brightness + color_temp roles."""
+        from .dp_mapping import normalize_dp_map  # noqa: PLC0415
+
         roles = {
             str(spec.get("key", ""))
-            for spec in dp_map.values()
+            for spec in normalize_dp_map(dp_map).values()
             if isinstance(spec, dict)
         }
         required = {"power", "brightness", "color_temp"}
@@ -3422,6 +3426,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _create_config_entry(self) -> config_entries.ConfigFlowResult:
         """Build and persist the config entry from accumulated flow data."""
+        from .dp_mapping import normalize_dp_map  # noqa: PLC0415
+
+        self._final_dp_map = normalize_dp_map(self._final_dp_map)
         local_key = self._flow_data.get(CONF_LOCAL_KEY, "")
         host = self._flow_data.get(CONF_HOST, "")
 
@@ -3665,6 +3672,9 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                 errors[CONF_DP_MAP] = "invalid_dp_map"
 
             if not errors:
+                from .dp_mapping import normalize_dp_map  # noqa: PLC0415
+
+                dp_map = normalize_dp_map(dp_map)
                 new_options = dict(self._entry.options)
                 new_options[CONF_VERBOSE_LOGGING] = user_input.get(
                     CONF_VERBOSE_LOGGING, False

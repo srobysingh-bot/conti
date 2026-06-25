@@ -50,6 +50,17 @@ _LOGGER = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _HeuristicRule = tuple[list[str], str, str, bool]
 
+DP_KEY_ALIASES: Final[dict[str, str]] = {
+    "switch_led": DP_KEY_POWER,
+    "switch": DP_KEY_POWER,
+    "bright_value": DP_KEY_BRIGHTNESS,
+    "temp_value": DP_KEY_COLOR_TEMP,
+    "work_mode": "mode",
+    "colour_data": DP_KEY_COLOR_RGB,
+    "colour_data_v2": DP_KEY_COLOR_RGB,
+    "color_data": DP_KEY_COLOR_RGB,
+}
+
 # ---------------------------------------------------------------------------
 # Heuristic tables — one per device type.
 #
@@ -133,6 +144,22 @@ def mask_key(key: str) -> str:
     if len(key) <= 4:
         return "****"
     return key[:2] + "*" * (len(key) - 4) + key[-2:]
+
+
+def normalize_dp_map(dp_map: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *dp_map* with Tuya DP role aliases normalized."""
+    normalized: dict[str, Any] = {}
+    for dp_id, spec in dp_map.items():
+        if not isinstance(spec, dict):
+            normalized[str(dp_id)] = spec
+            continue
+
+        entry = dict(spec)
+        key = entry.get("key")
+        if isinstance(key, str):
+            entry["key"] = DP_KEY_ALIASES.get(key.strip().lower(), key)
+        normalized[str(dp_id)] = entry
+    return normalized
 
 
 # ---------------------------------------------------------------------------

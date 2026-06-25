@@ -18,6 +18,7 @@ from ..const import (
     DP_KEY_POWER,
 )
 from ..coordinator import ContiCoordinator
+from ..dp_mapping import normalize_dp_map
 from .base_light import BaseContiLight, DP_KEY_MODE
 from .dimmer_light import ContiDimmerLight
 from .rgb_cct_light import ContiRgbCctLight
@@ -60,6 +61,7 @@ def create_conti_light(
     5. power + brightness                                → DimmerLight
     6. fallback                                          → DimmerLight
     """
+    dp_map = normalize_dp_map(dp_map)
     has_power = _has_dp(dp_map, DP_KEY_POWER)
     has_brightness = _has_dp(dp_map, DP_KEY_BRIGHTNESS)
     has_color_temp = _has_dp(dp_map, DP_KEY_COLOR_TEMP)
