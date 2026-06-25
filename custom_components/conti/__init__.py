@@ -95,10 +95,17 @@ def _effective_version(entry: ConfigEntry) -> str:
     Prefers a previously auto-detected version, then falls back to what
     the user selected (which may be ``"auto"`` for first-time detection).
     """
-    return (
-        entry.data.get(CONF_DETECTED_VERSION)
-        or entry.data.get(CONF_PROTOCOL_VERSION, DEFAULT_PROTOCOL_VERSION)
+    detected = entry.data.get(CONF_DETECTED_VERSION)
+    configured = entry.data.get(
+        CONF_PROTOCOL_VERSION, DEFAULT_PROTOCOL_VERSION
     )
+    if (
+        entry.data.get(CONF_DEFERRED_LOCAL_CONNECT, False)
+        and not detected
+        and configured == "auto"
+    ):
+        return "3.4"
+    return detected or configured
 
 
 async def _load_dps_cache(hass: HomeAssistant, device_id: str) -> dict[str, Any]:
@@ -570,6 +577,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     low_power_runtime = None
     cloud_fallback_runtime = None
     cloud_availability_runtime = None
+    cloud_seed_dps: dict[str, Any] = {}
 
     if low_power_sensor:
         access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
@@ -713,11 +721,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Cloud availability monitor enabled for local device %s",
                     device_id,
                 )
+                if device_config["deferred_local_connect"]:
+                    try:
+                        cloud_seed_dps = (
+                            await cloud_availability_runtime.async_get_dps()
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "DALI cloud DPS seed failed for %s: %s",
+                            device_id,
+                            exc,
+                        )
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug(
                 "Cloud availability monitor unavailable for %s: %s",
                 device_id,
                 exc,
+            )
+
+        if device_config["deferred_local_connect"] and not cloud_seed_dps:
+            access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
+            access_secret = str(
+                entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")
+            ).strip()
+            region = str(
+                entry.data.get(CONF_CLOUD_REGION, "eu")
+            ).strip() or "eu"
+            if access_id and access_secret:
+                try:
+                    from .low_power_runtime import (  # noqa: PLC0415
+                        LowPowerSensorCloudRuntime,
+                    )
+
+                    seed_runtime = LowPowerSensorCloudRuntime(
+                        device_id=device_id,
+                        access_id=access_id,
+                        access_secret=access_secret,
+                        region=region,
+                        dp_map=dp_map,
+                    )
+                    cloud_seed_dps = await seed_runtime.async_get_dps()
+                    if cloud_availability_runtime is None:
+                        cloud_availability_runtime = seed_runtime
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "DALI cloud DPS seed via entry credentials failed "
+                        "for %s: %s",
+                        device_id,
+                        exc,
+                    )
+
+        if device_config["deferred_local_connect"] and cloud_seed_dps:
+            manager.seed_cached_dps(device_id, cloud_seed_dps)
+            _LOGGER.warning(
+                "DALI local status unavailable for %s reason=%s; seeded "
+                "cloud DPS cache=%s and continuing local probes",
+                device_id,
+                manager.get_device_diagnostics(device_id).get(
+                    "last_probe_failure_reason"
+                ),
+                cloud_seed_dps,
             )
 
     # ---- Persist auto-detected version back to entry data -----------------

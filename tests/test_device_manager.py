@@ -190,6 +190,81 @@ class TestCommands:
         mgr = DeviceManager()
         assert mgr.is_online("unknown") is False
 
+    @pytest.mark.asyncio
+    async def test_deferred_dali_cache_keeps_entity_available(
+        self, device_config: dict
+    ) -> None:
+        config = dict(device_config)
+        config["protocol_version"] = "3.4"
+        config["deferred_local_connect"] = True
+        mgr = DeviceManager()
+        await mgr.start()
+
+        with patch(
+            "custom_components.conti.device_manager.TinyTuyaDevice"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.connect = AsyncMock(return_value=False)
+            instance.close = AsyncMock()
+            instance.set_dp_callback = MagicMock()
+            instance.set_disconnect_callback = MagicMock()
+            instance.cached_dps = {}
+            instance._cached_dps = {}
+            instance.last_failure_reason = "malformed_payload_904"
+            instance.last_failure_detail = "Unexpected Payload from Device"
+            instance.attempt_failures = []
+            instance.ip = config["host"]
+
+            assert await mgr.add_device(config) is False
+            mgr.seed_cached_dps(
+                config["device_id"],
+                {"20": False, "21": "white", "22": 500, "23": 500},
+            )
+            instance.cached_dps = dict(instance._cached_dps)
+
+            assert mgr.is_online(config["device_id"]) is True
+            assert mgr.get_cached_dps(config["device_id"])["20"] is False
+            diagnostics = mgr.get_device_diagnostics(config["device_id"])
+            assert diagnostics["local_status_available"] is False
+            assert (
+                diagnostics["local_status_reason"]
+                == "malformed_payload_904"
+            )
+
+        await mgr.stop()
+
+    @pytest.mark.asyncio
+    async def test_deferred_dali_command_allowed_with_cloud_cache(
+        self, device_config: dict
+    ) -> None:
+        config = dict(device_config)
+        config["protocol_version"] = "3.4"
+        config["deferred_local_connect"] = True
+        mgr = DeviceManager()
+        await mgr.start()
+
+        with patch(
+            "custom_components.conti.device_manager.TinyTuyaDevice"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.connect = AsyncMock(return_value=False)
+            instance.close = AsyncMock()
+            instance.set_dp = AsyncMock(return_value=True)
+            instance.set_dp_callback = MagicMock()
+            instance.set_disconnect_callback = MagicMock()
+            instance.cached_dps = {"20": False}
+            instance.last_failure_reason = "malformed_payload_904"
+            instance.last_failure_detail = "Unexpected Payload from Device"
+            instance.attempt_failures = []
+            instance.protocol_version = "3.4"
+            instance.ip = config["host"]
+
+            assert await mgr.add_device(config) is False
+            assert await mgr.set_dp(config["device_id"], 20, True) is True
+            instance.set_dp.assert_awaited_once_with(20, True)
+
+        await mgr.stop()
+
 
 # ---------------------------------------------------------------------------
 # State callback

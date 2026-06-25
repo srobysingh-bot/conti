@@ -730,6 +730,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._low_power_sensor: bool = False
         self._deferred_local_connect: bool = False
         self._local_connect_error: str = ""
+        self._requested_protocol_version: str = "auto"
         self._ir_categories: list[dict[str, Any]] = []
         self._ir_brands: list[dict[str, Any]] = []
         self._ir_models: list[dict[str, Any]] = []
@@ -2393,6 +2394,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # ── Form submission: route to cloud or review ──
             proto_override = user_input.get("protocol_override", "auto")
             if proto_override == "3.4" and proto_override != self._detected_version:
+                self._requested_protocol_version = "3.4"
                 # Manual v3.4 means one direct v3.4 status probe; do not
                 # precede it with another auto-detection cycle.
                 ok, detected, discovered, err = await _test_device(
@@ -2507,6 +2509,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "empty_status",
                 "no_response",
                 "empty_payload",
+                "malformed_payload_904",
             }:
                 return self.async_show_form(
                     step_id="detect",
@@ -3555,7 +3558,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_HOST: host,
             CONF_PORT: self._flow_data.get(CONF_PORT, DEFAULT_PORT),
             CONF_LOCAL_KEY: local_key,
-            CONF_PROTOCOL_VERSION: "auto",
+            CONF_PROTOCOL_VERSION: self._requested_protocol_version,
             CONF_DEVICE_TYPE: self._flow_data[CONF_DEVICE_TYPE],
             CONF_DP_MAP: json.dumps(self._final_dp_map),
             CONF_MAPPING_SOURCE: self._mapping_source,
@@ -3588,6 +3591,16 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         elif self._deferred_local_connect:
             entry_data[CONF_DEFERRED_LOCAL_CONNECT] = True
             entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_LOCAL
+            if self._cloud_auth.get("access_id") and self._cloud_auth.get(
+                "access_secret"
+            ):
+                entry_data[CONF_CLOUD_ACCESS_ID] = self._cloud_auth["access_id"]
+                entry_data[CONF_CLOUD_ACCESS_SECRET] = self._cloud_auth[
+                    "access_secret"
+                ]
+                entry_data[CONF_CLOUD_REGION] = self._cloud_auth.get(
+                    "region", "eu"
+                )
         elif local_key and host:
             # Full local runtime — standard path.
             entry_data[CONF_RUNTIME_CHANNEL] = RUNTIME_CHANNEL_LOCAL

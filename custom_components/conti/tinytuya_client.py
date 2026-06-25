@@ -269,6 +269,9 @@ class TinyTuyaDevice:
                 pass
             return False
 
+        if version == 3.4 and self._is_err_904(result):
+            result = self._try_v34_dali_status_fallbacks(d, version, result)
+
         if isinstance(result, dict) and "dps" in result:
             raw_dps = result.get("dps")
             dps = (
@@ -325,11 +328,123 @@ class TinyTuyaDevice:
             reason,
             result,
         )
-        try:
-            d.close()
-        except Exception:  # noqa: BLE001
-            pass
+        if reason == "malformed_payload_904":
+            # Keep the configured v3.4 device object so deferred-local DALI
+            # entries can attempt CONTROL commands without a status handshake.
+            self._device = d
+            self._protocol_version = str(version)
+            self._connected = False
+        else:
+            try:
+                d.close()
+            except Exception:  # noqa: BLE001
+                pass
         return False
+
+    @staticmethod
+    def _is_err_904(result: Any) -> bool:
+        return isinstance(result, dict) and str(result.get("Err", "")) == "904"
+
+    def _try_v34_dali_status_fallbacks(
+        self,
+        device: Any,
+        version: float,
+        initial_result: Any,
+    ) -> Any:
+        """Try TinyTuya-supported v3.4 status alternatives after Err 904."""
+        _LOGGER.warning(
+            "Conti DALI probe strategy=normal_status device=%s ip=%s "
+            "protocol=%.1f raw_result=%r",
+            self._device_id,
+            self._ip,
+            version,
+            initial_result,
+        )
+
+        strategies: list[tuple[str, Callable[[], Any]]] = []
+        query_new = getattr(tinytuya, "DP_QUERY_NEW", 0x10)
+        if not isinstance(query_new, int):
+            query_new = 0x10
+        strategies.append(
+            (
+                "dp_query_new_0x10",
+                lambda: device._send_receive(  # noqa: SLF001
+                    device.generate_payload(query_new),
+                    0,
+                ),
+            )
+        )
+
+        if hasattr(device, "updatedps"):
+            dp_ids = (
+                [int(dp_id) for dp_id in self._monitored_dp_ids]
+                if self._monitored_dp_ids
+                else [20, 21, 22, 23]
+            )
+            strategies.append(
+                ("updatedps", lambda: device.updatedps(dp_ids))
+            )
+
+        if hasattr(device, "heartbeat"):
+            def _heartbeat_status() -> Any:
+                heartbeat_result = device.heartbeat(nowait=False)
+                _LOGGER.info(
+                    "Conti DALI probe strategy=heartbeat device=%s ip=%s "
+                    "protocol=%.1f raw_result=%r",
+                    self._device_id,
+                    self._ip,
+                    version,
+                    heartbeat_result,
+                )
+                return device.status()
+
+            strategies.append(("heartbeat_then_status", _heartbeat_status))
+
+        if hasattr(device, "receive"):
+            def _open_status() -> Any:
+                send_result = device.status(nowait=True)
+                _LOGGER.info(
+                    "Conti DALI probe strategy=open_status_send device=%s "
+                    "ip=%s protocol=%.1f raw_result=%r",
+                    self._device_id,
+                    self._ip,
+                    version,
+                    send_result,
+                )
+                return device.receive()
+
+            strategies.append(("open_status_receive", _open_status))
+
+        last_result = initial_result
+        for strategy, probe in strategies:
+            try:
+                last_result = probe()
+                _LOGGER.info(
+                    "Conti DALI probe strategy=%s device=%s ip=%s "
+                    "protocol=%.1f raw_result=%r",
+                    strategy,
+                    self._device_id,
+                    self._ip,
+                    version,
+                    last_result,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_result = exc
+                _LOGGER.warning(
+                    "Conti DALI probe strategy=%s device=%s ip=%s "
+                    "protocol=%.1f exception=%r",
+                    strategy,
+                    self._device_id,
+                    self._ip,
+                    version,
+                    exc,
+                )
+                continue
+
+            if isinstance(last_result, dict) and "dps" in last_result:
+                return last_result
+
+        return initial_result
 
     def _record_attempt_failure(
         self,
@@ -395,6 +510,8 @@ class TinyTuyaDevice:
             err_code = str(result.get("Err", ""))
             payload = result.get("Payload")
             text = f"{error} {err_code} {payload!r}".lower()
+            if err_code == "904":
+                return "malformed_payload_904"
             if "Payload" in result and payload in (None, "", b"") and error:
                 return "empty_payload"
         if "timeout" in text or "timed out" in text:
@@ -505,7 +622,36 @@ class TinyTuyaDevice:
                     self._device_id, dp_id, exc,
                 )
                 self._connected = False
-                # Single reconnect-and-retry (with ACK to verify socket)
+                if self._cached_dps:
+                    try:
+                        payload = self._device.generate_payload(  # type: ignore[union-attr]
+                            tinytuya.CONTROL, {str(dp_id): value}
+                        )
+                        self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
+                            payload, 0, getresponse=False
+                        )
+                        self._cached_dps[str(dp_id)] = value
+                        _LOGGER.info(
+                            "Conti set_dp direct cached fallback device=%s "
+                            "protocol=%s dp=%s value=%r success=True",
+                            self._device_id,
+                            self._protocol_version,
+                            dp_id,
+                            value,
+                        )
+                        return True
+                    except Exception as direct_exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Conti set_dp direct cached fallback device=%s "
+                            "protocol=%s dp=%s success=False exception=%r",
+                            self._device_id,
+                            self._protocol_version,
+                            dp_id,
+                            direct_exc,
+                        )
+                        return False
+
+                # Single reconnect-and-retry for devices without cloud cache.
                 try:
                     self._device.close()  # type: ignore[union-attr]
                     result = self._device.status()  # type: ignore[union-attr]
@@ -553,7 +699,35 @@ class TinyTuyaDevice:
                     self._device_id, exc,
                 )
                 self._connected = False
-                # Single reconnect-and-retry (with ACK to verify socket)
+                if self._cached_dps:
+                    try:
+                        str_dps = {str(k): v for k, v in dps.items()}
+                        payload = self._device.generate_payload(  # type: ignore[union-attr]
+                            tinytuya.CONTROL, str_dps
+                        )
+                        self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
+                            payload, 0, getresponse=False
+                        )
+                        self._cached_dps.update(str_dps)
+                        _LOGGER.info(
+                            "Conti set_dps direct cached fallback device=%s "
+                            "protocol=%s dps=%s success=True",
+                            self._device_id,
+                            self._protocol_version,
+                            str_dps,
+                        )
+                        return True
+                    except Exception as direct_exc:  # noqa: BLE001
+                        _LOGGER.warning(
+                            "Conti set_dps direct cached fallback device=%s "
+                            "protocol=%s success=False exception=%r",
+                            self._device_id,
+                            self._protocol_version,
+                            direct_exc,
+                        )
+                        return False
+
+                # Single reconnect-and-retry for devices without cloud cache.
                 try:
                     self._device.close()  # type: ignore[union-attr]
                     result = self._device.status()  # type: ignore[union-attr]

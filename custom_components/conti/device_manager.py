@@ -321,11 +321,27 @@ class DeviceManager:
     async def set_dp(self, device_id: str, dp_id: int, value: Any) -> bool:
         """Set a single DP on a device.  Returns `False` if offline."""
         managed = self._devices.get(device_id)
-        if not managed or not managed.online:
+        allow_deferred = bool(
+            managed
+            and managed.config.get("deferred_local_connect")
+            and managed.client.cached_dps
+        )
+        if not managed or (not managed.online and not allow_deferred):
             return False
         async with managed.lock:
             try:
-                return await managed.client.set_dp(dp_id, value)
+                result = await managed.client.set_dp(dp_id, value)
+                _LOGGER.info(
+                    "Conti direct command device=%s protocol=%s dp=%s "
+                    "value=%r deferred_local=%s success=%s",
+                    device_id,
+                    managed.client.protocol_version,
+                    dp_id,
+                    value,
+                    allow_deferred,
+                    result,
+                )
+                return result
             except Exception as exc:
                 managed.diag.consecutive_failures += 1
                 self._classify_error(managed, f"set_dp failed: {exc!r}")
@@ -335,11 +351,26 @@ class DeviceManager:
     async def set_dps(self, device_id: str, dps: dict[int, Any]) -> bool:
         """Set multiple DPs at once."""
         managed = self._devices.get(device_id)
-        if not managed or not managed.online:
+        allow_deferred = bool(
+            managed
+            and managed.config.get("deferred_local_connect")
+            and managed.client.cached_dps
+        )
+        if not managed or (not managed.online and not allow_deferred):
             return False
         async with managed.lock:
             try:
-                return await managed.client.set_dps(dps)
+                result = await managed.client.set_dps(dps)
+                _LOGGER.info(
+                    "Conti direct multi-command device=%s protocol=%s "
+                    "dps=%s deferred_local=%s success=%s",
+                    device_id,
+                    managed.client.protocol_version,
+                    dps,
+                    allow_deferred,
+                    result,
+                )
+                return result
             except Exception as exc:
                 managed.diag.consecutive_failures += 1
                 self._classify_error(managed, f"set_dps failed: {exc!r}")
@@ -578,7 +609,15 @@ class DeviceManager:
 
     def is_online(self, device_id: str) -> bool:
         managed = self._devices.get(device_id)
-        return managed.online if managed else False
+        if not managed:
+            return False
+        return bool(
+            managed.online
+            or (
+                managed.config.get("deferred_local_connect")
+                and managed.client.cached_dps
+            )
+        )
 
     def device_ids(self) -> list[str]:
         return list(self._devices)
@@ -613,6 +652,10 @@ class DeviceManager:
             "device_id": device_id,
             "host": client.ip,
             "online": managed.online,
+            "local_status_available": managed.online,
+            "local_status_reason": (
+                "" if managed.online else client.last_failure_reason
+            ),
             "protocol_version": d.protocol_version,
             "auto_detected": d.auto_detected,
             "detected_version": client.detected_version,

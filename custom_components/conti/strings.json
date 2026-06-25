@@ -167,6 +167,7 @@
       "empty_status": "The device answered the local status probe but returned no data points. Cloud-mapped DALI lights can continue setup and retry locally in the background.",
       "no_response": "The TCP port is open, but the device did not return a Tuya status response.",
       "empty_payload": "The device returned an empty Tuya payload.",
+      "malformed_payload_904": "The device returned TinyTuya Err 904 (Unexpected Payload). Conti will try DALI-compatible v3.4 probes and can continue from cloud-cached state.",
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
       "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",
       "cloud_auth_failed": "Tuya cloud authentication failed. Check Access ID, Access Secret, and selected region.",

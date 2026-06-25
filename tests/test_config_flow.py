@@ -137,6 +137,39 @@ class TestDeviceProtocolFail:
         assert err == "wrong_protocol"
 
     @pytest.mark.asyncio
+    async def test_err_904_is_not_wrong_protocol(self) -> None:
+        mock_writer = MagicMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+
+        with patch(
+            "custom_components.conti.config_flow.asyncio.open_connection",
+            return_value=(AsyncMock(), mock_writer),
+        ):
+            mock_client = MagicMock()
+            mock_client.connect = AsyncMock(return_value=False)
+            mock_client.close = AsyncMock()
+            mock_client.last_failure_reason = "malformed_payload_904"
+            mock_client.last_failure_detail = (
+                "{'Error': 'Unexpected Payload from Device', 'Err': '904'}"
+            )
+            mock_client.confirmed_protocol_mismatch = False
+            mock_client.attempt_failures = [
+                {"protocol": "3.4", "reason": "malformed_payload_904"}
+            ]
+
+            with patch(
+                "custom_components.conti.tinytuya_client.TinyTuyaDevice",
+                return_value=mock_client,
+            ):
+                ok, ver, dps, err = await _test_device(
+                    "dev1", "10.0.0.1", "0123456789abcdef", "3.4", 6668
+                )
+
+        assert ok is False
+        assert err == "malformed_payload_904"
+
+    @pytest.mark.asyncio
     async def test_explicit_version_fail_returns_invalid_auth(self) -> None:
         """If user chose explicit version and connect fails → invalid_auth."""
         mock_writer = MagicMock()
