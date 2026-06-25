@@ -126,7 +126,11 @@ class CloudDeviceRuntime:
         code = self._dp_to_code.get(str(dp_id))
         if not self.supports_dali_cct_fallback() or code is None:
             return False
+        commands = []
+        if dp_id in {22, 23}:
+            commands.append({"code": "work_mode", "value": "white"})
+        commands.append({"code": code, "value": value})
         return await self._oauth.async_send_device_commands(
             self._device_id,
-            [{"code": code, "value": value}],
+            commands,
         )

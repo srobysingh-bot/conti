@@ -356,10 +356,7 @@ class DeviceManager:
                 )
                 if result:
                     return True
-                if managed.client.last_failure_reason in {
-                    "malformed_payload_904",
-                    "empty_payload",
-                }:
+                if self._cloud_fallback_failure(managed):
                     self._activate_cloud_fallback(managed)
                     if managed.control_path == "cloud_fallback":
                         return await self._set_dp_cloud(managed, dp_id, value)
@@ -396,10 +393,7 @@ class DeviceManager:
                 )
                 if result:
                     return True
-                if managed.client.last_failure_reason in {
-                    "malformed_payload_904",
-                    "empty_payload",
-                }:
+                if self._cloud_fallback_failure(managed):
                     self._activate_cloud_fallback(managed)
                     if managed.control_path == "cloud_fallback":
                         results = [
@@ -563,10 +557,7 @@ class DeviceManager:
             managed.diag.last_status_ok = time.monotonic()
             managed.diag.consecutive_failures = 0
         else:
-            if managed.client.last_failure_reason in {
-                "malformed_payload_904",
-                "empty_payload",
-            }:
+            if self._cloud_fallback_failure(managed):
                 self._activate_cloud_fallback(managed)
             # Distinguish between "empty response" and "connection lost"
             if not managed.client.connected:
@@ -731,21 +722,40 @@ class DeviceManager:
         ):
             return False
         managed.cloud_fallback = cloud_runtime
-        if managed.client.last_failure_reason in {
-            "malformed_payload_904",
-            "empty_payload",
-        }:
+        if self._cloud_fallback_failure(managed):
             self._activate_cloud_fallback(managed)
         return managed.control_path == "cloud_fallback"
+
+    @staticmethod
+    def _cloud_fallback_failure(managed: _ManagedDevice) -> str:
+        reason = str(managed.client.last_failure_reason or "")
+        detail = str(managed.client.last_failure_detail or "")
+        if reason == "malformed_payload_904" or (
+            reason == "empty_payload" and "904" in detail
+        ):
+            return "904"
+        if reason == "local_key_or_version_914" or (
+            reason == "empty_payload" and "914" in detail
+        ):
+            return "914"
+        return ""
 
     def _activate_cloud_fallback(self, managed: _ManagedDevice) -> None:
         if managed.cloud_fallback is None:
             return
-        managed.local_status = "failed_904"
+        error_code = self._cloud_fallback_failure(managed)
+        if not error_code:
+            return
+        managed.local_status = f"failed_{error_code}"
         managed.control_path = "cloud_fallback"
-        managed.diagnostic_reason = "local_payload_904_cloud_fallback"
+        managed.diagnostic_reason = (
+            "local_key_or_version_914_cloud_fallback"
+            if error_code == "914"
+            else "local_payload_904_cloud_fallback"
+        )
         _LOGGER.warning(
-            "Conti local Err 904 detected device=%s; cloud fallback activated",
+            "Conti local Err %s detected device=%s; cloud fallback activated",
+            error_code,
             managed.config["device_id"],
         )
 
@@ -790,8 +800,11 @@ class DeviceManager:
             )
             return False
 
-        managed.client._cached_dps[str(dp_id)] = value  # noqa: SLF001
-        self._on_dp_update(device_id, {str(dp_id): value})
+        updates = {str(dp_id): value}
+        if dp_id in {22, 23}:
+            updates["21"] = "white"
+        managed.client._cached_dps.update(updates)  # noqa: SLF001
+        self._on_dp_update(device_id, updates)
         _LOGGER.info(
             "Conti cloud fallback command success device=%s dp=%s value=%r",
             device_id,

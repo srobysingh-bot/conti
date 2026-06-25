@@ -195,19 +195,24 @@ def _is_dali_cct_fallback(
 ) -> bool:
     """Return True when cloud CCT capabilities can defer local setup."""
     if (
-        not local_error
+        local_error
+        not in {"malformed_payload_904", "local_key_or_version_914"}
         or device_type != DEVICE_TYPE_LIGHT
         or not cloud_dp_map
-        or _is_lan_tcp_reachability_error(local_error)
     ):
         return False
 
-    roles = {
-        str(spec.get("key", ""))
-        for spec in cloud_dp_map.values()
-        if isinstance(spec, dict)
+    required = {
+        "20": "switch_led",
+        "21": "work_mode",
+        "22": "bright_value",
+        "23": "temp_value",
     }
-    return {"power", "brightness", "color_temp"}.issubset(roles)
+    return all(
+        isinstance(cloud_dp_map.get(dp_id), dict)
+        and str(cloud_dp_map[dp_id].get("code", "")) == code
+        for dp_id, code in required.items()
+    )
 
 
 async def _async_probe_tcp(
@@ -614,6 +619,11 @@ async def _test_device(
             getattr(client, "last_failure_reason", "") or "no_response"
         )
         failure_detail = str(getattr(client, "last_failure_detail", "") or "")
+        if failure_reason == "empty_payload":
+            if "904" in failure_detail:
+                failure_reason = "malformed_payload_904"
+            elif "914" in failure_detail:
+                failure_reason = "local_key_or_version_914"
         confirmed_mismatch = bool(
             getattr(client, "confirmed_protocol_mismatch", False)
         )
@@ -2510,6 +2520,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "no_response",
                 "empty_payload",
                 "malformed_payload_904",
+                "local_key_or_version_914",
             }:
                 return self.async_show_form(
                     step_id="detect",

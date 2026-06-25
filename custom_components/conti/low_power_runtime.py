@@ -130,9 +130,13 @@ class LowPowerSensorCloudRuntime:
             return False
         if not await self._helper._ensure_token(strict=False):  # noqa: SLF001
             return False
+        commands = []
+        if dp_id in {22, 23}:
+            commands.append({"code": "work_mode", "value": "white"})
+        commands.append({"code": code, "value": value})
         result = await self._helper._api_post(  # noqa: SLF001
             f"/v1.0/devices/{self._device_id}/commands",
-            {"commands": [{"code": code, "value": value}]},
+            {"commands": commands},
             strict=False,
         )
         return result not in (None, False, {})

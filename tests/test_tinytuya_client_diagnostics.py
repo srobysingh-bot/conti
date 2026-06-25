@@ -107,6 +107,18 @@ def test_err_904_is_malformed_payload_not_protocol() -> None:
     )
 
 
+def test_err_914_is_cloud_fallback_failure_not_protocol() -> None:
+    result = {
+        "Error": "Check device key or version",
+        "Err": "914",
+        "Payload": None,
+    }
+    assert (
+        TinyTuyaDevice._classify_status_failure(result=result)
+        == "local_key_or_version_914"
+    )
+
+
 @pytest.mark.asyncio
 async def test_manual_v34_only_attempts_v34() -> None:
     client = TinyTuyaDevice(
@@ -175,10 +187,39 @@ async def test_set_dp_attempted_after_initial_err_904_with_cache() -> None:
         )
         assert await client.connect() is False
         client._cached_dps = {"20": False, "22": 500, "23": 500}
+        device._send_receive.return_value = None
         assert await client.set_dp(20, True) is True
 
     assert device._send_receive.call_args.kwargs["getresponse"] is False
     assert client.cached_dps["20"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("err_code", "reason"),
+    [
+        ("904", "malformed_payload_904"),
+        ("914", "local_key_or_version_914"),
+    ],
+)
+async def test_control_error_payload_is_not_reported_as_success(
+    err_code: str, reason: str
+) -> None:
+    device = MagicMock()
+    device.generate_payload.return_value = b"payload"
+    device._send_receive.return_value = {
+        "Error": "Unexpected local control payload",
+        "Err": err_code,
+        "Payload": None,
+    }
+    client = TinyTuyaDevice(
+        "dali1", "192.168.1.20", "0123456789abcdef", "3.4"
+    )
+    client._device = device
+    client._protocol_version = "3.4"
+
+    assert await client.set_dp(20, True) is False
+    assert client.last_failure_reason == reason
 
 
 @pytest.mark.asyncio

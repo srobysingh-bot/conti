@@ -170,6 +170,39 @@ class TestDeviceProtocolFail:
         assert err == "malformed_payload_904"
 
     @pytest.mark.asyncio
+    async def test_err_914_is_not_wrong_protocol(self) -> None:
+        mock_writer = MagicMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+
+        with patch(
+            "custom_components.conti.config_flow.asyncio.open_connection",
+            return_value=(AsyncMock(), mock_writer),
+        ):
+            mock_client = MagicMock()
+            mock_client.connect = AsyncMock(return_value=False)
+            mock_client.close = AsyncMock()
+            mock_client.last_failure_reason = "local_key_or_version_914"
+            mock_client.last_failure_detail = (
+                "{'Error': 'Check device key or version', 'Err': '914'}"
+            )
+            mock_client.confirmed_protocol_mismatch = False
+            mock_client.attempt_failures = [
+                {"protocol": "3.4", "reason": "local_key_or_version_914"}
+            ]
+
+            with patch(
+                "custom_components.conti.tinytuya_client.TinyTuyaDevice",
+                return_value=mock_client,
+            ):
+                ok, ver, dps, err = await _test_device(
+                    "dev1", "10.0.0.1", "0123456789abcdef", "3.4", 6668
+                )
+
+        assert ok is False
+        assert err == "local_key_or_version_914"
+
+    @pytest.mark.asyncio
     async def test_explicit_version_fail_returns_invalid_auth(self) -> None:
         """If user chose explicit version and connect fails → invalid_auth."""
         mock_writer = MagicMock()
@@ -322,25 +355,45 @@ class TestAutoDetectOrder:
 
 
 class TestDaliFallback:
-    def test_cloud_cct_map_with_local_session_error_is_candidate(self) -> None:
-        cloud_map = {
-            "20": {"key": "power", "type": "bool"},
-            "22": {"key": "brightness", "type": "int"},
-            "23": {"key": "color_temp", "type": "int"},
+    @staticmethod
+    def _cloud_map() -> dict:
+        return {
+            "20": {"key": "power", "code": "switch_led"},
+            "21": {"key": "mode", "code": "work_mode"},
+            "22": {"key": "brightness", "code": "bright_value"},
+            "23": {"key": "color_temp", "code": "temp_value"},
         }
 
-        assert _is_dali_cct_fallback("light", cloud_map, "no_response") is True
-
-    def test_tcp_reachability_error_is_not_candidate(self) -> None:
-        cloud_map = {
-            "20": {"key": "power", "type": "bool"},
-            "22": {"key": "brightness", "type": "int"},
-            "23": {"key": "color_temp", "type": "int"},
-        }
-
+    def test_cloud_cct_map_with_904_is_candidate(self) -> None:
         assert (
             _is_dali_cct_fallback(
-                "light", cloud_map, "device_not_responding"
+                "light", self._cloud_map(), "malformed_payload_904"
+            )
+            is True
+        )
+
+    def test_cloud_cct_map_with_914_is_candidate(self) -> None:
+        assert (
+            _is_dali_cct_fallback(
+                "light", self._cloud_map(), "local_key_or_version_914"
+            )
+            is True
+        )
+
+    def test_unrelated_local_session_error_is_not_candidate(self) -> None:
+        cloud_map = {
+            "20": {"key": "power", "code": "switch_led"},
+            "21": {"key": "mode", "code": "work_mode"},
+            "22": {"key": "brightness", "code": "bright_value"},
+            "23": {"key": "color_temp", "code": "temp_value"},
+        }
+
+        assert _is_dali_cct_fallback("light", cloud_map, "no_response") is False
+
+    def test_tcp_reachability_error_is_not_candidate(self) -> None:
+        assert (
+            _is_dali_cct_fallback(
+                "light", self._cloud_map(), "device_not_responding"
             )
             is False
         )

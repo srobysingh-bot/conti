@@ -328,7 +328,7 @@ class TinyTuyaDevice:
             reason,
             result,
         )
-        if reason == "malformed_payload_904":
+        if reason in {"malformed_payload_904", "local_key_or_version_914"}:
             # Keep the configured v3.4 device object so deferred-local DALI
             # entries can attempt CONTROL commands without a status handshake.
             self._device = d
@@ -489,7 +489,9 @@ class TinyTuyaDevice:
                 return "connection_refused"
             if "decrypt" in text or "decode" in text or "padding" in text:
                 return "decrypt_error"
-            if "key" in text or "914" in text:
+            if "914" in text:
+                return "local_key_or_version_914"
+            if "key" in text:
                 return "invalid_key"
             if "protocol" in text and (
                 "mismatch" in text or "unsupported" in text
@@ -512,6 +514,8 @@ class TinyTuyaDevice:
             text = f"{error} {err_code} {payload!r}".lower()
             if err_code == "904":
                 return "malformed_payload_904"
+            if err_code == "914":
+                return "local_key_or_version_914"
             if "Payload" in result and payload in (None, "", b"") and error:
                 return "empty_payload"
         if "timeout" in text or "timed out" in text:
@@ -520,7 +524,9 @@ class TinyTuyaDevice:
             return "connection_refused"
         if "decrypt" in text or "decode" in text or "padding" in text:
             return "decrypt_error"
-        if "key" in text or "914" in text:
+        if "914" in text:
+            return "local_key_or_version_914"
+        if "key" in text:
             return "invalid_key"
         if "protocol" in text and ("mismatch" in text or "unsupported" in text):
             return "protocol_mismatch"
@@ -605,6 +611,23 @@ class TinyTuyaDevice:
 
     # -- DP commands ---------------------------------------------------------
 
+    def _control_failed(self, result: Any) -> bool:
+        """Record a TinyTuya control error payload for fallback routing."""
+        if not (isinstance(result, dict) and "Error" in result):
+            return False
+        self._last_failure_reason = self._classify_status_failure(result=result)
+        self._last_failure_detail = repr(result)
+        _LOGGER.warning(
+            "Conti local control failed device=%s ip=%s protocol=%s "
+            "reason=%s raw_result=%r",
+            self._device_id,
+            self._ip,
+            self._protocol_version,
+            self._last_failure_reason,
+            result,
+        )
+        return True
+
     async def set_dp(self, dp_id: int, value: Any) -> bool:
         """Set a single DP on the device using fire-and-forget CONTROL."""
         if not self._device:
@@ -617,10 +640,16 @@ class TinyTuyaDevice:
                     tinytuya.CONTROL, str_dps
                 )
                 # nowait: send without waiting for ACK to avoid multi-second stalls
-                self._device._send_receive(payload, 0, getresponse=False)  # type: ignore[union-attr]  # noqa: SLF001
+                result = self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
+                    payload, 0, getresponse=False
+                )
+                if self._control_failed(result):
+                    return False
                 self._cached_dps[str(dp_id)] = value
                 return True
             except Exception as exc:  # noqa: BLE001
+                self._last_failure_reason = self._classify_status_failure(exc=exc)
+                self._last_failure_detail = repr(exc)
                 _LOGGER.debug(
                     "Conti set_dp(%s, %s) first attempt failed: %s",
                     self._device_id, dp_id, exc,
@@ -631,9 +660,11 @@ class TinyTuyaDevice:
                         payload = self._device.generate_payload(  # type: ignore[union-attr]
                             tinytuya.CONTROL, {str(dp_id): value}
                         )
-                        self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
+                        result = self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
                             payload, 0, getresponse=False
                         )
+                        if self._control_failed(result):
+                            return False
                         self._cached_dps[str(dp_id)] = value
                         _LOGGER.info(
                             "Conti set_dp direct cached fallback device=%s "
@@ -645,6 +676,10 @@ class TinyTuyaDevice:
                         )
                         return True
                     except Exception as direct_exc:  # noqa: BLE001
+                        self._last_failure_reason = self._classify_status_failure(
+                            exc=direct_exc
+                        )
+                        self._last_failure_detail = repr(direct_exc)
                         _LOGGER.warning(
                             "Conti set_dp direct cached fallback device=%s "
                             "protocol=%s dp=%s success=False exception=%r",
@@ -694,10 +729,16 @@ class TinyTuyaDevice:
                     tinytuya.CONTROL, str_dps
                 )
                 # nowait: send without waiting for ACK to avoid multi-second stalls
-                self._device._send_receive(payload, 0, getresponse=False)  # type: ignore[union-attr]  # noqa: SLF001
+                result = self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
+                    payload, 0, getresponse=False
+                )
+                if self._control_failed(result):
+                    return False
                 self._cached_dps.update(str_dps)
                 return True
             except Exception as exc:  # noqa: BLE001
+                self._last_failure_reason = self._classify_status_failure(exc=exc)
+                self._last_failure_detail = repr(exc)
                 _LOGGER.debug(
                     "Conti set_dps(%s) first attempt failed: %s",
                     self._device_id, exc,
@@ -709,9 +750,11 @@ class TinyTuyaDevice:
                         payload = self._device.generate_payload(  # type: ignore[union-attr]
                             tinytuya.CONTROL, str_dps
                         )
-                        self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
+                        result = self._device._send_receive(  # type: ignore[union-attr]  # noqa: SLF001
                             payload, 0, getresponse=False
                         )
+                        if self._control_failed(result):
+                            return False
                         self._cached_dps.update(str_dps)
                         _LOGGER.info(
                             "Conti set_dps direct cached fallback device=%s "
@@ -722,6 +765,10 @@ class TinyTuyaDevice:
                         )
                         return True
                     except Exception as direct_exc:  # noqa: BLE001
+                        self._last_failure_reason = self._classify_status_failure(
+                            exc=direct_exc
+                        )
+                        self._last_failure_detail = repr(direct_exc)
                         _LOGGER.warning(
                             "Conti set_dps direct cached fallback device=%s "
                             "protocol=%s success=False exception=%r",

@@ -41,15 +41,29 @@ async def test_cloud_properties_seed_dali_cct_dp_ids() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("dp_id", "value", "code"),
+    ("dp_id", "value", "commands"),
     [
-        (20, True, "switch_led"),
-        (22, 700, "bright_value"),
-        (23, 300, "temp_value"),
+        (20, True, [{"code": "switch_led", "value": True}]),
+        (
+            22,
+            700,
+            [
+                {"code": "work_mode", "value": "white"},
+                {"code": "bright_value", "value": 700},
+            ],
+        ),
+        (
+            23,
+            300,
+            [
+                {"code": "work_mode", "value": "white"},
+                {"code": "temp_value", "value": 300},
+            ],
+        ),
     ],
 )
 async def test_dali_cloud_commands_supported(
-    dp_id: int, value: object, code: str
+    dp_id: int, value: object, commands: list[dict[str, object]]
 ) -> None:
     oauth = MagicMock()
     oauth.async_send_device_commands = AsyncMock(return_value=True)
@@ -66,7 +80,7 @@ async def test_dali_cloud_commands_supported(
 
     assert await runtime.async_set_dp(dp_id, value) is True
     oauth.async_send_device_commands.assert_awaited_once_with(
-        "dali1", [{"code": code, "value": value}]
+        "dali1", commands
     )
 
 
