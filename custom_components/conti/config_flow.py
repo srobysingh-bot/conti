@@ -619,11 +619,26 @@ async def _test_device(
             getattr(client, "last_failure_reason", "") or "no_response"
         )
         failure_detail = str(getattr(client, "last_failure_detail", "") or "")
+        attempt_failures = getattr(client, "attempt_failures", [])
         if failure_reason == "empty_payload":
             if "904" in failure_detail:
                 failure_reason = "malformed_payload_904"
             elif "914" in failure_detail:
                 failure_reason = "local_key_or_version_914"
+        for attempt in attempt_failures:
+            if not isinstance(attempt, dict):
+                continue
+            attempt_reason = str(attempt.get("reason", ""))
+            attempt_detail = str(attempt.get("detail", ""))
+            if attempt_reason == "local_key_or_version_914" or (
+                attempt_reason == "empty_payload" and "914" in attempt_detail
+            ):
+                failure_reason = "local_key_or_version_914"
+                break
+            if attempt_reason == "malformed_payload_904" or (
+                attempt_reason == "empty_payload" and "904" in attempt_detail
+            ):
+                failure_reason = "malformed_payload_904"
         confirmed_mismatch = bool(
             getattr(client, "confirmed_protocol_mismatch", False)
         )
@@ -639,9 +654,12 @@ async def _test_device(
             failure_reason,
             confirmed_mismatch,
             failure_detail,
-            getattr(client, "attempt_failures", []),
+            attempt_failures,
         )
-        if confirmed_mismatch:
+        if confirmed_mismatch and failure_reason not in {
+            "malformed_payload_904",
+            "local_key_or_version_914",
+        }:
             return False, None, {}, "wrong_protocol"
         if failure_reason in {"invalid_key", "decrypt_error"}:
             return False, None, {}, "invalid_auth"

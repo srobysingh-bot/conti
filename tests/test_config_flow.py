@@ -203,6 +203,44 @@ class TestDeviceProtocolFail:
         assert err == "local_key_or_version_914"
 
     @pytest.mark.asyncio
+    async def test_earlier_904_attempt_is_not_erased_by_later_no_response(
+        self,
+    ) -> None:
+        mock_writer = MagicMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+
+        with patch(
+            "custom_components.conti.config_flow.asyncio.open_connection",
+            return_value=(AsyncMock(), mock_writer),
+        ):
+            mock_client = MagicMock()
+            mock_client.connect = AsyncMock(return_value=False)
+            mock_client.close = AsyncMock()
+            mock_client.last_failure_reason = "no_response"
+            mock_client.last_failure_detail = "status returned None"
+            mock_client.confirmed_protocol_mismatch = False
+            mock_client.attempt_failures = [
+                {
+                    "protocol": "3.4",
+                    "reason": "malformed_payload_904",
+                    "detail": "Err 904",
+                },
+                {"protocol": "3.1", "reason": "no_response"},
+            ]
+
+            with patch(
+                "custom_components.conti.tinytuya_client.TinyTuyaDevice",
+                return_value=mock_client,
+            ):
+                ok, ver, dps, err = await _test_device(
+                    "dev1", "10.0.0.1", "0123456789abcdef", "auto", 6668
+                )
+
+        assert ok is False
+        assert err == "malformed_payload_904"
+
+    @pytest.mark.asyncio
     async def test_explicit_version_fail_returns_invalid_auth(self) -> None:
         """If user chose explicit version and connect fails → invalid_auth."""
         mock_writer = MagicMock()

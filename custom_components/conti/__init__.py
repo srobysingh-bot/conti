@@ -722,17 +722,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Cloud availability monitor enabled for local device %s",
                     device_id,
                 )
-                if device_config["deferred_local_connect"]:
-                    try:
-                        cloud_seed_dps = (
-                            await cloud_availability_runtime.async_get_dps()
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        _LOGGER.warning(
-                            "DALI cloud DPS seed failed for %s: %s",
-                            device_id,
-                            exc,
-                        )
         except Exception as exc:  # noqa: BLE001
             _LOGGER.debug(
                 "Cloud availability monitor unavailable for %s: %s",
@@ -740,7 +729,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 exc,
             )
 
-        if device_config["deferred_local_connect"] and not cloud_seed_dps:
+        if cloud_availability_runtime is None:
             access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
             access_secret = str(
                 entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")
@@ -761,7 +750,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         region=region,
                         dp_map=dp_map,
                     )
-                    cloud_seed_dps = await seed_runtime.async_get_dps()
                     if cloud_availability_runtime is None:
                         cloud_availability_runtime = seed_runtime
                 except Exception as exc:  # noqa: BLE001
@@ -772,25 +760,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         exc,
                     )
 
-        if device_config["deferred_local_connect"] and cloud_seed_dps:
-            manager.seed_cached_dps(device_id, cloud_seed_dps)
-            _LOGGER.warning(
-                "DALI local status unavailable for %s reason=%s; seeded "
-                "cloud DPS cache=%s and continuing local probes",
-                device_id,
-                manager.get_device_diagnostics(device_id).get(
-                    "last_probe_failure_reason"
-                ),
-                cloud_seed_dps,
-            )
-
-        if (
-            device_config["deferred_local_connect"]
-            and cloud_availability_runtime is not None
-        ):
-            manager.configure_dali_cloud_fallback(
+        if cloud_availability_runtime is not None:
+            fallback_active = manager.configure_dali_cloud_fallback(
                 device_id, cloud_availability_runtime
             )
+            if fallback_active:
+                cloud_fallback_runtime = cloud_availability_runtime
+                device_config["deferred_local_connect"] = True
+                try:
+                    cloud_seed_dps = (
+                        await cloud_fallback_runtime.async_get_dps()
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.warning(
+                        "DALI cloud DPS seed failed for %s: %s",
+                        device_id,
+                        exc,
+                    )
+                if cloud_seed_dps:
+                    manager.seed_cached_dps(
+                        device_id, cloud_seed_dps, overwrite=True
+                    )
+                    _LOGGER.warning(
+                        "DALI local status unavailable for %s reason=%s; "
+                        "seeded cloud DPS cache=%s and continuing local probes",
+                        device_id,
+                        manager.get_device_diagnostics(device_id).get(
+                            "last_probe_failure_reason"
+                        ),
+                        cloud_seed_dps,
+                    )
 
     # ---- Persist auto-detected version back to entry data -----------------
     if (

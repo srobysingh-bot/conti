@@ -168,6 +168,7 @@
       "no_response": "The TCP port is open, but the device did not return a Tuya status response.",
       "empty_payload": "The device returned an empty Tuya payload.",
       "malformed_payload_904": "The device returned TinyTuya Err 904 (Unexpected Payload). Conti will try DALI-compatible v3.4 probes and can continue from cloud-cached state.",
+      "local_key_or_version_914": "The device returned TinyTuya Err 914 (Check device key or version). For an exact DALI CCT cloud schema, Conti can continue through Tuya Cloud fallback.",
       "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
       "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",
       "cloud_auth_failed": "Tuya cloud authentication failed. Check Access ID, Access Secret, and selected region.",

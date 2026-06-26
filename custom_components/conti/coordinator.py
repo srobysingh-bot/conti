@@ -34,6 +34,20 @@ from .device_manager import DeviceManager
 _LOGGER = logging.getLogger(__name__)
 
 
+def _cloud_fallback_is_active(
+    device_manager: DeviceManager,
+    device_id: str,
+    cloud_fallback: Any | None,
+) -> bool:
+    """Return whether a device should currently use its cloud runtime."""
+    if cloud_fallback is None:
+        return False
+    diagnostics = device_manager.get_device_diagnostics(device_id)
+    if diagnostics.get("error") == "not registered":
+        return True
+    return diagnostics.get("control_path") == "cloud_fallback"
+
+
 class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Coordinator that polls a **single** Tuya device.
 
@@ -136,7 +150,7 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             # Empty cloud status is normal for sleepy sensors; keep last state.
             return self.data or {}
 
-        if self._cloud_fallback is not None:
+        if self._cloud_fallback_active():
             cloud_online = await self._async_refresh_cloud_availability()
             if cloud_online is False:
                 return self.data or {}
@@ -227,9 +241,17 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         """Availability helper used by entities."""
         if self._cloud_online is False:
             return False
-        if self._low_power_cloud is not None or self._cloud_fallback is not None:
+        if self._low_power_cloud is not None or self._cloud_fallback_active():
             return self._cloud_online is True or self.last_update_success
         return self.device_manager.is_online(self._device_id)
+
+    def _cloud_fallback_active(self) -> bool:
+        """Return whether this local device is currently using cloud control."""
+        return _cloud_fallback_is_active(
+            self.device_manager,
+            self._device_id,
+            self._cloud_fallback,
+        )
 
     def _cloud_availability_runtime(self) -> Any | None:
         """Return the runtime that can answer Tuya cloud online state."""

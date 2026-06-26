@@ -295,7 +295,6 @@ class TestCommands:
         config.update(
             {
                 "protocol_version": "3.4",
-                "deferred_local_connect": True,
                 "device_type": "light",
             }
         )
@@ -329,6 +328,95 @@ class TestCommands:
             assert diagnostics["control_path"] == "cloud_fallback"
             assert (
                 diagnostics["diagnostic_reason"]
+                == "local_key_or_version_914_cloud_fallback"
+            )
+
+        await mgr.stop()
+
+    @pytest.mark.asyncio
+    async def test_existing_dali_904_entry_without_deferred_flag_activates(
+        self, device_config: dict
+    ) -> None:
+        config = dict(device_config)
+        config.update(
+            {
+                "protocol_version": "3.4",
+                "device_type": "light",
+            }
+        )
+        mgr = DeviceManager()
+        await mgr.start()
+
+        with patch(
+            "custom_components.conti.device_manager.TinyTuyaDevice"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.connect = AsyncMock(return_value=False)
+            instance.close = AsyncMock()
+            instance.set_dp_callback = MagicMock()
+            instance.set_disconnect_callback = MagicMock()
+            instance.cached_dps = {}
+            instance._cached_dps = {}
+            instance.last_failure_reason = "malformed_payload_904"
+            instance.last_failure_detail = "Unexpected Payload Err 904"
+            instance.attempt_failures = []
+            instance.ip = config["host"]
+
+            await mgr.add_device(config)
+            cloud = MagicMock()
+            cloud.supports_dali_cct_fallback.return_value = True
+
+            assert mgr.configure_dali_cloud_fallback(
+                config["device_id"], cloud
+            )
+            diagnostics = mgr.get_device_diagnostics(config["device_id"])
+            assert diagnostics["control_path"] == "cloud_fallback"
+            assert diagnostics["local_status"] == "failed_904"
+
+        await mgr.stop()
+
+    @pytest.mark.asyncio
+    async def test_earlier_914_attempt_activates_after_final_no_response(
+        self, device_config: dict
+    ) -> None:
+        config = dict(device_config)
+        config.update({"protocol_version": "auto", "device_type": "light"})
+        mgr = DeviceManager()
+        await mgr.start()
+
+        with patch(
+            "custom_components.conti.device_manager.TinyTuyaDevice"
+        ) as MockClient:
+            instance = MockClient.return_value
+            instance.connect = AsyncMock(return_value=False)
+            instance.close = AsyncMock()
+            instance.set_dp_callback = MagicMock()
+            instance.set_disconnect_callback = MagicMock()
+            instance.cached_dps = {}
+            instance._cached_dps = {}
+            instance.last_failure_reason = "no_response"
+            instance.last_failure_detail = "status returned None"
+            instance.attempt_failures = [
+                {
+                    "protocol": "3.4",
+                    "reason": "local_key_or_version_914",
+                    "detail": "Err 914",
+                },
+                {"protocol": "3.1", "reason": "no_response"},
+            ]
+            instance.ip = config["host"]
+
+            await mgr.add_device(config)
+            cloud = MagicMock()
+            cloud.supports_dali_cct_fallback.return_value = True
+
+            assert mgr.configure_dali_cloud_fallback(
+                config["device_id"], cloud
+            )
+            assert (
+                mgr.get_device_diagnostics(config["device_id"])[
+                    "diagnostic_reason"
+                ]
                 == "local_key_or_version_914_cloud_fallback"
             )
 

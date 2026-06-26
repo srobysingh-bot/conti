@@ -662,7 +662,11 @@ class DeviceManager:
         return managed.client if managed else None
 
     def seed_cached_dps(
-        self, device_id: str, dps: dict[str, Any]
+        self,
+        device_id: str,
+        dps: dict[str, Any],
+        *,
+        overwrite: bool = False,
     ) -> None:
         """Pre-load cached DPS from persistent storage.
 
@@ -670,7 +674,7 @@ class DeviceManager:
         before the first live poll completes.
         """
         managed = self._devices.get(device_id)
-        if managed and not managed.client.cached_dps:
+        if managed and (overwrite or not managed.client.cached_dps):
             managed.client._cached_dps.update(dps)  # noqa: SLF001
 
     # -- Diagnostics ---------------------------------------------------------
@@ -716,7 +720,6 @@ class DeviceManager:
         managed = self._devices.get(device_id)
         if (
             not managed
-            or not managed.config.get("deferred_local_connect")
             or managed.config.get("device_type") != "light"
             or not cloud_runtime.supports_dali_cct_fallback()
         ):
@@ -730,14 +733,24 @@ class DeviceManager:
     def _cloud_fallback_failure(managed: _ManagedDevice) -> str:
         reason = str(managed.client.last_failure_reason or "")
         detail = str(managed.client.last_failure_detail or "")
-        if reason == "malformed_payload_904" or (
-            reason == "empty_payload" and "904" in detail
-        ):
-            return "904"
-        if reason == "local_key_or_version_914" or (
-            reason == "empty_payload" and "914" in detail
-        ):
-            return "914"
+        failures = [(reason, detail)]
+        failures.extend(
+            (
+                str(item.get("reason", "")),
+                str(item.get("detail", "")),
+            )
+            for item in managed.client.attempt_failures
+            if isinstance(item, dict)
+        )
+        for failure_reason, failure_detail in failures:
+            if failure_reason == "local_key_or_version_914" or (
+                failure_reason == "empty_payload" and "914" in failure_detail
+            ):
+                return "914"
+            if failure_reason == "malformed_payload_904" or (
+                failure_reason == "empty_payload" and "904" in failure_detail
+            ):
+                return "904"
         return ""
 
     def _activate_cloud_fallback(self, managed: _ManagedDevice) -> None:
