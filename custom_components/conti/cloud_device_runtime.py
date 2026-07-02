@@ -55,6 +55,13 @@ class CloudDeviceRuntime:
         """Return the last explicit cloud online state, if known."""
         return self._online
 
+    def get_connection_diagnostics(self) -> dict[str, str]:
+        """Expose the cloud client's last classified API failure."""
+        getter = getattr(self._oauth, "get_connection_diagnostics", None)
+        if getter is None:
+            return {}
+        return getter()
+
     async def async_get_online_state(self) -> bool | None:
         """Fetch Tuya's online state without treating API errors as offline."""
         try:

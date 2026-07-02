@@ -25,14 +25,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import time
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
 from .const import (
+    DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
+    ERROR_LOG_COOLDOWN,
     RECONNECT_BASE_DELAY,
     RECONNECT_MAX_DELAY,
 )
@@ -62,8 +65,8 @@ ERR_UNKNOWN = "unknown"
 # DEBUG.  The window runs from the last WARNING; it is NOT reset on
 # reconnect so flapping devices are suppressed across quick reconnect
 # cycles.  A fresh WARNING fires naturally once the device has been
-# stable for ≥ 300 s since the last WARNING.
-_PUSH_WARN_COOLDOWN: float = 300.0
+# stable for ≥ 600 s since the last WARNING.
+_PUSH_WARN_COOLDOWN: float = ERROR_LOG_COOLDOWN
 
 
 @dataclass
@@ -75,10 +78,13 @@ class DeviceDiagnostics:
     last_handshake_ok: float = 0.0
     last_status_ok: float = 0.0
     last_error: str = ""
+    last_local_error: str = ""
     last_error_class: str = ERR_NONE
     last_tx_hex: str = ""
     last_rx_hex: str = ""
     consecutive_failures: int = 0
+    last_local_update: str | None = None
+    reconnect_attempts: int = 0
 
 
 class _ManagedDevice:
@@ -99,6 +105,11 @@ class _ManagedDevice:
         "diagnostic_reason",
         "cloud_refresh_task",
         "_last_push_warn_time",
+        "next_retry_time",
+        "error_log_times",
+        "cloud_error",
+        "cloud_error_code",
+        "cloud_error_message",
     )
 
     def __init__(self, client: TinyTuyaDevice, config: dict[str, Any]) -> None:
@@ -116,6 +127,11 @@ class _ManagedDevice:
         self.diagnostic_reason: str = ""
         self.cloud_refresh_task: Optional[asyncio.Task[None]] = None
         self._last_push_warn_time: float = 0.0
+        self.next_retry_time: str | None = None
+        self.error_log_times: dict[str, float] = {}
+        self.cloud_error: str = ""
+        self.cloud_error_code: str = ""
+        self.cloud_error_message: str = ""
 
 
 class DeviceManager:
@@ -142,13 +158,20 @@ class DeviceManager:
     async def stop(self) -> None:
         """Close every connection and cancel pending reconnects/listeners."""
         self._running = False
+        cancelled: list[asyncio.Task[None]] = []
         for dev in self._devices.values():
             if dev.listener_task and not dev.listener_task.done():
                 dev.listener_task.cancel()
+                cancelled.append(dev.listener_task)
             if dev.reconnect_task and not dev.reconnect_task.done():
                 dev.reconnect_task.cancel()
+                cancelled.append(dev.reconnect_task)
             if dev.cloud_refresh_task and not dev.cloud_refresh_task.done():
                 dev.cloud_refresh_task.cancel()
+                cancelled.append(dev.cloud_refresh_task)
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
+        for dev in self._devices.values():
             await dev.client.close()
         self._devices.clear()
 
@@ -177,6 +200,36 @@ class DeviceManager:
 
     # -- Device registration -------------------------------------------------
 
+    @staticmethod
+    def _new_client(config: dict[str, Any]) -> TinyTuyaDevice:
+        """Build a completely fresh local client from saved entry config."""
+        client = TinyTuyaDevice(
+            device_id=config["device_id"],
+            ip=config["host"],
+            local_key=config["local_key"],
+            version=config.get("protocol_version", DEFAULT_PROTOCOL_VERSION),
+            port=config.get("port", DEFAULT_PORT),
+        )
+        dp_map = config.get("dp_map")
+        if isinstance(dp_map, dict) and dp_map:
+            client.set_monitored_dp_ids(list(dp_map.keys()))
+        return client
+
+    def _wire_client(self, managed: _ManagedDevice) -> None:
+        """Attach manager callbacks to the currently active client."""
+        device_id = managed.config["device_id"]
+        client = managed.client
+        managed.client.set_dp_callback(
+            lambda dps, _id=device_id, _client=client: self._on_dp_update(
+                _id, dps, source_client=_client
+            )
+        )
+        managed.client.set_disconnect_callback(
+            lambda _id=device_id, _client=client: self._on_disconnect(
+                _id, source_client=_client
+            )
+        )
+
     async def add_device(self, config: dict[str, Any]) -> bool:
         """Add a device and attempt to connect.
 
@@ -190,30 +243,13 @@ class DeviceManager:
             managed.client.ip = config["host"]
             return managed.online
 
-        client = TinyTuyaDevice(
-            device_id=device_id,
-            ip=config["host"],
-            local_key=config["local_key"],
-            version=config.get("protocol_version", DEFAULT_PROTOCOL_VERSION),
-            port=config.get("port", DEFAULT_PORT),
-        )
-
-        # Tell TinyTuya which DPs to request so multi-gang devices
-        # report all channels in status queries.
-        dp_map = config.get("dp_map")
-        if isinstance(dp_map, dict) and dp_map:
-            client.set_monitored_dp_ids(list(dp_map.keys()))
+        client = self._new_client(config)
 
         managed = _ManagedDevice(client, config)
         self._devices[device_id] = managed
 
         # Wire callbacks
-        client.set_dp_callback(
-            lambda dps, _id=device_id: self._on_dp_update(_id, dps)
-        )
-        client.set_disconnect_callback(
-            lambda _id=device_id: self._on_disconnect(_id)
-        )
+        self._wire_client(managed)
 
         _LOGGER.info(
             "Conti add_device: %s at %s:%s (v%s, key=%s)",
@@ -257,6 +293,7 @@ class DeviceManager:
 
                 if st:
                     managed.diag.last_status_ok = time.monotonic()
+                    managed.diag.last_local_update = self._utc_now()
                     _LOGGER.info(
                         "Conti device %s is ONLINE with DPS (v%s): %s",
                         device_id,
@@ -288,6 +325,10 @@ class DeviceManager:
                         device_id,
                     )
                     managed.online = False
+                    self._classify_error(
+                        managed, "connection lost during initial status probing"
+                    )
+                    self._mark_unavailable(managed)
                     self._schedule_reconnect(device_id)
                 else:
                     # TCP alive — start push listener for near-instant
@@ -302,15 +343,22 @@ class DeviceManager:
                     managed,
                     f"initial connect failed: {reason}: {detail}",
                 )
+                self._mark_unavailable(managed)
+                retry_note = (
+                    "automatic retry enabled"
+                    if config.get("enable_auto_reconnect", False)
+                    else "automatic retry disabled; use conti.reconnect_device"
+                )
                 _LOGGER.warning(
                     "Conti device %s initial connect FAILED ip=%s "
-                    "protocol=%s reason=%s detail=%s attempts=%s - will retry",
+                    "protocol=%s reason=%s detail=%s attempts=%s - %s",
                     device_id,
                     client.ip,
                     config.get("protocol_version", DEFAULT_PROTOCOL_VERSION),
                     reason,
                     detail,
                     client.attempt_failures,
+                    retry_note,
                 )
                 self._schedule_reconnect(device_id)
 
@@ -364,7 +412,15 @@ class DeviceManager:
             except Exception as exc:
                 managed.diag.consecutive_failures += 1
                 self._classify_error(managed, f"set_dp failed: {exc!r}")
-                _LOGGER.warning("Conti set_dp(%s, %s) failed: %s", device_id, dp_id, exc)
+                self._log_device_error(
+                    managed,
+                    f"set_dp:{dp_id}:{type(exc).__name__}",
+                    "Conti set_dp(%s, %s) failed: %s",
+                    device_id,
+                    dp_id,
+                    exc,
+                    exc=exc,
+                )
                 return False
 
     async def set_dps(self, device_id: str, dps: dict[int, Any]) -> bool:
@@ -405,7 +461,14 @@ class DeviceManager:
             except Exception as exc:
                 managed.diag.consecutive_failures += 1
                 self._classify_error(managed, f"set_dps failed: {exc!r}")
-                _LOGGER.warning("Conti set_dps(%s) failed: %s", device_id, exc)
+                self._log_device_error(
+                    managed,
+                    f"set_dps:{type(exc).__name__}",
+                    "Conti set_dps(%s) failed: %s",
+                    device_id,
+                    exc,
+                    exc=exc,
+                )
                 return False
 
     async def query_device(self, device_id: str) -> dict[str, Any] | None:
@@ -417,8 +480,8 @@ class DeviceManager:
         a failure" and fall back to cached DPS without incrementing any
         failure counter.
 
-        * If a reconnect task is already running, returns cached DPS.
-        * After a successful connect, uses status_with_fallback().
+        * Offline polling never creates a fresh client by itself.
+        * Optional auto-reconnect is scheduled in the background.
         * Returns cached DPS when status is empty but connection is alive.
         * Only marks offline when the TCP connection is actually lost.
         """
@@ -429,99 +492,10 @@ class DeviceManager:
 
         # ---- Device is currently offline ----
         if not managed.online:
-            if managed.reconnect_task and not managed.reconnect_task.done():
-                _LOGGER.debug(
-                    "Conti device %s offline, reconnect in progress - returning cached",
-                    device_id,
-                )
-                return managed.client.cached_dps
-
-            # Don't start a reconnect attempt while the lock is busy.
-            if managed.lock.locked():
-                _LOGGER.debug(
-                    "Conti device %s: offline but lock busy, "
-                    "skipping reconnect — returning None (poll skipped)",
-                    device_id,
-                )
-                return None
-
-            _LOGGER.info(
-                "Conti device %s offline, attempting connect to %s",
-                device_id,
-                managed.config["host"],
-            )
-            async with managed.lock:
-                managed.client.ip = managed.config["host"]
-                try:
-                    ok = await managed.client.connect()
-                except Exception as exc:
-                    ok = False
-                    self._classify_error(managed, f"query connect: {exc!r}")
-
-                if ok:
-                    self._clear_cloud_fallback(managed)
-                    self._update_diag_on_connect(managed)
-                    managed.online = True
-                    managed.reconnect_delay = RECONNECT_BASE_DELAY
-                    managed.diag.last_handshake_ok = time.monotonic()
-
-                    try:
-                        st = await managed.client.status_with_fallback()
-                    except Exception as exc:
-                        st = {}
-                        _LOGGER.debug(
-                            "Conti query post-connect fallback raised for %s: %s",
-                            device_id, exc,
-                        )
-
-                    managed.diag.last_tx_hex = managed.client.last_tx_hex
-                    managed.diag.last_rx_hex = managed.client.last_rx_hex
-
-                    if st:
-                        managed.diag.consecutive_failures = 0
-                        managed.diag.last_status_ok = time.monotonic()
-                        _LOGGER.info(
-                            "Conti device %s re-connected with DPS (v%s)",
-                            device_id,
-                            managed.diag.protocol_version,
-                        )
-                        self._start_listener(device_id)
-                        return st
-
-                    # Connected but empty — check if connection survived
-                    if managed.client.connected:
-                        _LOGGER.info(
-                            "Conti device %s re-connected but empty DPS — "
-                            "staying online, returning cache (tx=%s rx=%s)",
-                            device_id,
-                            managed.client.last_tx_hex[:32],
-                            managed.client.last_rx_hex[:32],
-                        )
-                        self._start_listener(device_id)
-                        return managed.client.cached_dps
-
-                    # Connection lost during probing
-                    managed.online = False
-                    managed.diag.consecutive_failures += 1
-                    self._classify_error(
-                        managed,
-                        "query: connection lost during status probing "
-                        f"(tx={managed.client.last_tx_hex[:16]} "
-                        f"rx={managed.client.last_rx_hex[:16]})",
-                    )
-                    self._schedule_reconnect(device_id)
-                    return managed.client.cached_dps
-                else:
-                    managed.diag.consecutive_failures += 1
-                    if not managed.diag.last_error:
-                        self._classify_error(managed, "connect failed in query")
-                    _LOGGER.warning(
-                        "Conti device %s connect failed (ip=%s)",
-                        device_id,
-                        managed.client.ip,
-                    )
-                    self._schedule_reconnect(device_id)
-                    return managed.client.cached_dps
+            # Polling must not be a hidden reconnect path. It can only ensure
+            # the explicitly enabled background task exists and serve cache.
+            self._schedule_reconnect(device_id)
+            return managed.client.cached_dps
 
         # ---- Device is online - request fresh status ----
         managed.client.ip = managed.config["host"]
@@ -548,13 +522,21 @@ class DeviceManager:
             except Exception as exc:
                 status = None
                 self._classify_error(managed, f"status failed: {exc!r}")
-                _LOGGER.warning("Conti device %s status exception: %s", device_id, exc)
+                self._log_device_error(
+                    managed,
+                    f"status:{type(exc).__name__}",
+                    "Conti device %s status exception: %s",
+                    device_id,
+                    exc,
+                    exc=exc,
+                )
 
         managed.diag.last_tx_hex = managed.client.last_tx_hex
         managed.diag.last_rx_hex = managed.client.last_rx_hex
 
         if status:
             managed.diag.last_status_ok = time.monotonic()
+            managed.diag.last_local_update = self._utc_now()
             managed.diag.consecutive_failures = 0
         else:
             if self._cloud_fallback_failure(managed):
@@ -569,7 +551,10 @@ class DeviceManager:
                     f"(tx={managed.client.last_tx_hex[:16]} "
                     f"rx={managed.client.last_rx_hex[:16]})",
                 )
-                _LOGGER.warning(
+                self._mark_unavailable(managed)
+                self._log_device_error(
+                    managed,
+                    "poll_connection_lost",
                     "Conti device %s: connection lost during poll "
                     "(failures=%d) — scheduling reconnect",
                     device_id,
@@ -645,13 +630,11 @@ class DeviceManager:
         managed = self._devices.get(device_id)
         if not managed:
             return False
-        return bool(
-            managed.online
-            or (
-                managed.control_path == "cloud_fallback"
-                and managed.client.cached_dps
-            )
-        )
+        if managed.control_path == "unavailable":
+            return False
+        if managed.control_path == "cloud_fallback":
+            return bool(managed.client.cached_dps)
+        return managed.online
 
     def device_ids(self) -> list[str]:
         return list(self._devices)
@@ -686,9 +669,20 @@ class DeviceManager:
             return {"device_id": device_id, "error": "not registered"}
         d = managed.diag
         client = managed.client
+        monitored = getattr(client, "_monitored_dp_ids", None)
+        monitored_dp_ids = (
+            list(monitored)
+            if isinstance(monitored, dict)
+            else list((managed.config.get("dp_map") or {}).keys())
+        )
         return {
             "device_id": device_id,
             "host": client.ip,
+            "device_ip": managed.config.get("host", client.ip),
+            "dp_map_source": managed.config.get("dp_map_source", "discovered"),
+            "monitored_dp_ids": monitored_dp_ids,
+            "ha_host_ip": managed.config.get("ha_host_ip", "unknown"),
+            "ha_host_subnet": managed.config.get("ha_host_subnet", "unknown"),
             "online": managed.online,
             "local_status_available": managed.online,
             "local_status_reason": (
@@ -697,21 +691,43 @@ class DeviceManager:
             "local_status": managed.local_status,
             "control_path": managed.control_path,
             "diagnostic_reason": managed.diagnostic_reason,
+            "cloud_error": managed.cloud_error,
+            "cloud_error_code": managed.cloud_error_code,
+            "cloud_error_message": managed.cloud_error_message,
             "protocol_version": d.protocol_version,
             "auto_detected": d.auto_detected,
             "detected_version": client.detected_version,
             "last_handshake_ok": d.last_handshake_ok,
             "last_status_ok": d.last_status_ok,
+            "last_successful_local_update": d.last_local_update,
             "last_error": d.last_error,
+            "last_local_error": d.last_local_error,
             "last_error_class": d.last_error_class,
             "consecutive_failures": d.consecutive_failures,
             "reconnect_delay": managed.reconnect_delay,
+            "reconnect_attempts": d.reconnect_attempts,
+            "next_retry_time": managed.next_retry_time,
             "last_tx_hex": d.last_tx_hex,
             "last_rx_hex": d.last_rx_hex,
             "last_probe_failure_reason": client.last_failure_reason,
             "last_probe_failure_detail": client.last_failure_detail,
             "protocol_attempt_failures": client.attempt_failures,
         }
+
+    def log_device_error(
+        self,
+        device_id: str,
+        error_key: str,
+        message: str,
+        *args: Any,
+        exc: BaseException | None = None,
+    ) -> None:
+        """Log a rate-limited error for a managed device."""
+        managed = self._devices.get(device_id)
+        if managed:
+            self._log_device_error(
+                managed, error_key, message, *args, exc=exc
+            )
 
     def configure_dali_cloud_fallback(
         self, device_id: str, cloud_runtime: Any
@@ -728,6 +744,35 @@ class DeviceManager:
         if self._cloud_fallback_failure(managed):
             self._activate_cloud_fallback(managed)
         return managed.control_path == "cloud_fallback"
+
+    def record_cloud_fallback_diagnostics(
+        self, device_id: str, cloud_runtime: Any
+    ) -> bool:
+        """Record cloud fallback errors and return True for permission errors."""
+        managed = self._devices.get(device_id)
+        getter = getattr(cloud_runtime, "get_connection_diagnostics", None)
+        if not managed or getter is None:
+            return False
+        diagnostics = getter() or {}
+        managed.cloud_error = str(diagnostics.get("cloud_error", ""))
+        managed.cloud_error_code = str(diagnostics.get("cloud_error_code", ""))
+        managed.cloud_error_message = str(
+            diagnostics.get("cloud_error_message", "")
+        )
+        if managed.cloud_error != "cloud_permission_error":
+            return False
+
+        managed.control_path = "unavailable"
+        managed.diagnostic_reason = "cloud_permission_error"
+        self._log_device_error(
+            managed,
+            "cloud_permission_error",
+            "Conti cloud_permission_error device=%s code=%s message=%s",
+            device_id,
+            managed.cloud_error_code or "none",
+            managed.cloud_error_message or "Tuya cloud permission unavailable",
+        )
+        return True
 
     @staticmethod
     def _cloud_fallback_failure(managed: _ManagedDevice) -> str:
@@ -766,7 +811,9 @@ class DeviceManager:
             if error_code == "914"
             else "local_payload_904_cloud_fallback"
         )
-        _LOGGER.warning(
+        self._log_device_error(
+            managed,
+            f"cloud_fallback_activated:{error_code}",
             "Conti local Err %s detected device=%s; cloud fallback activated",
             error_code,
             managed.config["device_id"],
@@ -796,16 +843,24 @@ class DeviceManager:
             ok = bool(await managed.cloud_fallback.async_set_dp(dp_id, value))
         except Exception as exc:  # noqa: BLE001
             ok = False
-            _LOGGER.warning(
+            self._log_device_error(
+                managed,
+                "cloud_command_exception",
                 "Conti cloud fallback command failed device=%s dp=%s "
                 "value=%r exception=%r",
                 device_id,
                 dp_id,
                 value,
                 exc,
+                exc=exc,
             )
+        self.record_cloud_fallback_diagnostics(
+            device_id, managed.cloud_fallback
+        )
         if not ok:
-            _LOGGER.warning(
+            self._log_device_error(
+                managed,
+                "cloud_command_failure",
                 "Conti cloud fallback command failure device=%s dp=%s value=%r",
                 device_id,
                 dp_id,
@@ -817,7 +872,7 @@ class DeviceManager:
         if dp_id in {22, 23}:
             updates["21"] = "white"
         managed.client._cached_dps.update(updates)  # noqa: SLF001
-        self._on_dp_update(device_id, updates)
+        self._on_dp_update(device_id, updates, local=False)
         _LOGGER.info(
             "Conti cloud fallback command success device=%s dp=%s value=%r",
             device_id,
@@ -841,18 +896,39 @@ class DeviceManager:
             return
         if dps:
             managed.client._cached_dps.update(dps)  # noqa: SLF001
-            self._on_dp_update(managed.config["device_id"], dps)
+            self._on_dp_update(managed.config["device_id"], dps, local=False)
 
     # -- Internal callbacks --------------------------------------------------
 
-    def _on_dp_update(self, device_id: str, dps: dict[str, Any]) -> None:
+    def _on_dp_update(
+        self,
+        device_id: str,
+        dps: dict[str, Any],
+        *,
+        local: bool = True,
+        source_client: TinyTuyaDevice | None = None,
+    ) -> None:
+        managed = self._devices.get(device_id)
+        if managed and source_client is not None and source_client is not managed.client:
+            _LOGGER.debug("Ignoring stale-client DP callback device=%s", device_id)
+            return
+        if managed and local and dps:
+            managed.diag.last_local_update = self._utc_now()
         callbacks = self._state_callbacks.get(device_id)
         if callbacks:
             for cb in list(callbacks):
                 try:
                     cb(device_id, dps)
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("State callback error for %s", device_id)
+                except Exception as exc:  # noqa: BLE001
+                    if managed:
+                        self._log_device_error(
+                            managed,
+                            f"state_callback:{type(exc).__name__}",
+                            "State callback error for %s: %s",
+                            device_id,
+                            exc,
+                            exc=exc,
+                        )
 
     # -- Push listener -------------------------------------------------------
 
@@ -907,6 +983,7 @@ class DeviceManager:
                     self._classify_error(
                         managed, "disconnected during push listen"
                     )
+                    self._mark_unavailable(managed)
                     _now = time.monotonic()
                     if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
                         managed._last_push_warn_time = _now
@@ -938,14 +1015,23 @@ class DeviceManager:
 
         _LOGGER.debug("Push listener stopped for %s", device_id)
 
-    def _on_disconnect(self, device_id: str) -> None:
+    def _on_disconnect(
+        self,
+        device_id: str,
+        *,
+        source_client: TinyTuyaDevice | None = None,
+    ) -> None:
         managed = self._devices.get(device_id)
         if not managed:
+            return
+        if source_client is not None and source_client is not managed.client:
+            _LOGGER.debug("Ignoring stale-client disconnect device=%s", device_id)
             return
         self._stop_listener(device_id)
         was_online = managed.online
         managed.online = False
         self._classify_error(managed, "disconnected")
+        self._mark_unavailable(managed)
         if was_online:
             _now = time.monotonic()
             if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
@@ -968,9 +1054,112 @@ class DeviceManager:
 
     # -- Reconnect -----------------------------------------------------------
 
+    def is_degraded(self, device_id: str) -> bool:
+        """Return whether reconnecting this local device is appropriate."""
+        managed = self._devices.get(device_id)
+        if not managed:
+            return False
+        if self._cloud_fallback_is_healthy(managed):
+            return False
+        return not (
+            managed.online
+            and bool(managed.client.connected)
+            and managed.control_path == "local"
+            and managed.diag.consecutive_failures == 0
+        )
+
+    @staticmethod
+    def _cloud_fallback_is_healthy(managed: _ManagedDevice) -> bool:
+        """Return True when cached cloud fallback is currently usable."""
+        if (
+            managed.control_path != "cloud_fallback"
+            or managed.cloud_fallback is None
+            or not managed.client.cached_dps
+            or managed.cloud_error
+        ):
+            return False
+        return getattr(managed.cloud_fallback, "last_online_state", None) is not False
+
+    @staticmethod
+    def _needs_local_reconnect(managed: _ManagedDevice) -> bool:
+        """Return whether optional background local recovery should continue."""
+        return not (
+            managed.online
+            and bool(managed.client.connected)
+            and managed.control_path == "local"
+            and managed.diag.consecutive_failures == 0
+        )
+
+    def degraded_device_ids(self) -> list[str]:
+        """Return only unavailable/degraded devices, preserving entry order."""
+        return [device_id for device_id in self._devices if self.is_degraded(device_id)]
+
+    async def reconnect_device(self, device_id: str) -> bool:
+        """Immediately replace a stale client and verify the fresh session."""
+        managed = self._devices.get(device_id)
+        if not managed:
+            return False
+
+        current = asyncio.current_task()
+        existing = managed.reconnect_task
+        if existing and existing is not current and not existing.done():
+            existing.cancel()
+            with suppress(asyncio.CancelledError):
+                await existing
+
+        managed.reconnect_task = current
+        try:
+            try:
+                success = await self._attempt_reconnect(managed)
+            except Exception as exc:  # noqa: BLE001
+                success = False
+                managed.online = False
+                self._classify_error(managed, f"reconnect lifecycle: {exc!r}")
+                self._mark_unavailable(managed)
+                self._log_device_error(
+                    managed,
+                    f"reconnect_lifecycle:{type(exc).__name__}",
+                    "Conti reconnect lifecycle failed device=%s error=%s",
+                    device_id,
+                    exc,
+                    exc=exc,
+                )
+        finally:
+            if managed.reconnect_task is current:
+                managed.reconnect_task = None
+
+        if not success:
+            self._schedule_reconnect(device_id)
+        return success
+
+    async def reconnect_all(self) -> dict[str, bool]:
+        """Reconnect degraded devices serially and isolate per-device errors."""
+        results: dict[str, bool] = {}
+        for device_id in self.degraded_device_ids():
+            try:
+                results[device_id] = await self.reconnect_device(device_id)
+            except Exception as exc:  # noqa: BLE001
+                results[device_id] = False
+                managed = self._devices.get(device_id)
+                if managed:
+                    self._classify_error(managed, f"manual reconnect failed: {exc!r}")
+                    self._log_device_error(
+                        managed,
+                        "manual_reconnect_exception",
+                        "Conti reconnect failed device=%s error=%s",
+                        device_id,
+                        exc,
+                        exc=exc,
+                    )
+        return results
+
     def _schedule_reconnect(self, device_id: str) -> None:
         managed = self._devices.get(device_id)
         if not managed or not self._running:
+            return
+        if not managed.config.get(
+            "enable_auto_reconnect", DEFAULT_ENABLE_AUTO_RECONNECT
+        ):
             return
         if managed.reconnect_task and not managed.reconnect_task.done():
             return  # already scheduled
@@ -980,14 +1169,14 @@ class DeviceManager:
         )
 
     async def _reconnect(self, device_id: str) -> None:
-        """Reconnect with exponential back-off + jitter, verifying status."""
+        """Reconnect in the background with capped exponential backoff."""
         managed = self._devices.get(device_id)
         if not managed:
             return
 
-        while self._running and not managed.online:
-            jitter = random.uniform(0, managed.reconnect_delay * 0.3)
-            delay = managed.reconnect_delay + jitter
+        while self._running and self._needs_local_reconnect(managed):
+            delay = managed.reconnect_delay
+            managed.next_retry_time = self._utc_after(delay)
             _LOGGER.info(
                 "Reconnecting to %s in %.1fs (failures=%d, last_error_class=%s)",
                 device_id,
@@ -995,93 +1184,184 @@ class DeviceManager:
                 managed.diag.consecutive_failures,
                 managed.diag.last_error_class,
             )
-            await asyncio.sleep(delay)
-
+            try:
+                await asyncio.sleep(delay)
+            finally:
+                managed.next_retry_time = None
             if not self._running:
                 return
-
-            async with managed.lock:
-                await managed.client.close()
-                managed.client.ip = managed.config["host"]
-                try:
-                    ok = await managed.client.connect()
-                except Exception as exc:
-                    ok = False
-                    self._classify_error(managed, f"reconnect connect: {exc!r}")
-
-            if ok:
-                self._clear_cloud_fallback(managed)
-                self._update_diag_on_connect(managed)
-                managed.online = True
-                managed.reconnect_delay = RECONNECT_BASE_DELAY
-                managed.diag.last_handshake_ok = time.monotonic()
-
-                # Best-effort status — don't require non-empty for "online"
-                async with managed.lock:
-                    try:
-                        st = await managed.client.status_with_fallback()
-                    except Exception as exc:
-                        st = {}
-                        _LOGGER.debug(
-                            "Reconnect status_with_fallback raised for %s: %s",
-                            device_id, exc,
-                        )
-
-                managed.diag.last_tx_hex = managed.client.last_tx_hex
-                managed.diag.last_rx_hex = managed.client.last_rx_hex
-
-                if st:
-                    managed.diag.consecutive_failures = 0
-                    managed.diag.last_status_ok = time.monotonic()
-                    _LOGGER.info(
-                        "Reconnected to %s (v%s) - DPS available: %s",
-                        device_id,
-                        managed.diag.protocol_version,
-                        list(st.keys()),
-                    )
-                    self._start_listener(device_id)
-                    return
-
-                # Connected but empty — check if TCP is alive
-                if managed.client.connected:
-                    managed.diag.consecutive_failures = 0
-                    _LOGGER.info(
-                        "Reconnected to %s (v%s) — empty DPS but "
-                        "connection alive, staying online (tx=%s rx=%s)",
-                        device_id,
-                        managed.diag.protocol_version,
-                        managed.client.last_tx_hex[:32],
-                        managed.client.last_rx_hex[:32],
-                    )
-                    self._start_listener(device_id)
-                    return
-
-                # Connection dropped during probing
+            try:
+                success = await self._attempt_reconnect(managed)
+            except Exception as exc:  # noqa: BLE001
+                success = False
                 managed.online = False
-                managed.diag.consecutive_failures += 1
-                self._classify_error(
+                self._classify_error(managed, f"auto reconnect lifecycle: {exc!r}")
+                self._mark_unavailable(managed)
+                self._log_device_error(
                     managed,
-                    "reconnect: connection lost during status probing "
-                    f"(tx={managed.client.last_tx_hex[:16]} "
-                    f"rx={managed.client.last_rx_hex[:16]})",
-                )
-                _LOGGER.warning(
-                    "Reconnect to %s: connection dropped during status "
-                    "probing - retrying (failures=%d)",
+                    f"auto_reconnect_lifecycle:{type(exc).__name__}",
+                    "Conti auto-reconnect lifecycle failed device=%s error=%s",
                     device_id,
-                    managed.diag.consecutive_failures,
+                    exc,
+                    exc=exc,
                 )
-            else:
-                managed.diag.consecutive_failures += 1
-                if not managed.diag.last_error:
-                    self._classify_error(managed, "reconnect failed")
-
-            # Exponential back-off (capped)
+            if success:
+                return
             managed.reconnect_delay = min(
                 managed.reconnect_delay * 2, RECONNECT_MAX_DELAY
             )
 
+    async def _attempt_reconnect(self, managed: _ManagedDevice) -> bool:
+        """Close the stale client, build a new one, and verify local status."""
+        device_id = managed.config["device_id"]
+        self._stop_listener(device_id)
+        cached = dict(getattr(managed.client, "cached_dps", {}) or {})
+        managed.diag.reconnect_attempts += 1
+
+        async with managed.lock:
+            stale_client = managed.client
+            try:
+                await stale_client.close()
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Closing stale Conti client failed device=%s: %s",
+                    device_id,
+                    exc,
+                    exc_info=exc if _LOGGER.isEnabledFor(logging.DEBUG) else None,
+                )
+
+            fresh_client = self._new_client(managed.config)
+            managed.client = fresh_client
+            self._wire_client(managed)
+            fresh_cache = getattr(fresh_client, "_cached_dps", None)
+            if isinstance(fresh_cache, dict):
+                fresh_cache.update(cached)
+
+            try:
+                connected = bool(await fresh_client.connect())
+            except Exception as exc:  # noqa: BLE001
+                connected = False
+                self._classify_error(managed, f"reconnect connect: {exc!r}")
+                self._log_device_error(
+                    managed,
+                    "reconnect_connect",
+                    "Conti reconnect connect failed device=%s error=%s",
+                    device_id,
+                    exc,
+                    exc=exc,
+                )
+
+            status: dict[str, Any] = {}
+            if connected:
+                try:
+                    raw_status = await fresh_client.status_with_fallback()
+                    status = raw_status if isinstance(raw_status, dict) else {}
+                    if status and isinstance(fresh_cache, dict):
+                        fresh_cache.update(status)
+                except Exception as exc:  # noqa: BLE001
+                    self._classify_error(managed, f"reconnect status: {exc!r}")
+                    self._log_device_error(
+                        managed,
+                        "reconnect_status",
+                        "Conti reconnect status failed device=%s error=%s",
+                        device_id,
+                        exc,
+                        exc=exc,
+                    )
+
+        managed.diag.last_tx_hex = getattr(fresh_client, "last_tx_hex", "")
+        managed.diag.last_rx_hex = getattr(fresh_client, "last_rx_hex", "")
+        if connected and bool(fresh_client.connected) and status:
+            managed.online = True
+            managed.reconnect_delay = RECONNECT_BASE_DELAY
+            managed.next_retry_time = None
+            managed.diag.consecutive_failures = 0
+            self._update_diag_on_connect(managed)
+            self._clear_cloud_fallback(managed)
+            managed.diag.last_status_ok = time.monotonic()
+            managed.diag.last_local_update = self._utc_now()
+            self._on_dp_update(device_id, status)
+            self._start_listener(device_id)
+            _LOGGER.info(
+                "Conti reconnect succeeded device=%s protocol=%s dps=%s",
+                device_id,
+                managed.diag.protocol_version,
+                list(status),
+            )
+            return True
+
+        if connected and bool(fresh_client.connected):
+            managed.online = False
+            managed.diag.consecutive_failures += 1
+            self._classify_error(
+                managed, "empty status after reconnect; local recovery not verified"
+            )
+            managed.diag.last_error_class = ERR_EMPTY_STATUS
+            self._mark_unavailable(managed)
+            self._log_device_error(
+                managed,
+                "reconnect_empty_status",
+                "Conti reconnect device=%s returned empty_status; "
+                "keeping cached state and existing cloud fallback",
+                device_id,
+            )
+            return False
+
+        managed.online = False
+        managed.diag.consecutive_failures += 1
+        reason = str(getattr(fresh_client, "last_failure_reason", "") or "unknown")
+        detail = str(getattr(fresh_client, "last_failure_detail", "") or "")
+        self._classify_error(managed, f"reconnect failed: {reason}: {detail}")
+        self._mark_unavailable(managed)
+        self._log_device_error(
+            managed,
+            f"reconnect_failed:{reason}",
+            "Conti reconnect failed device=%s reason=%s detail=%s",
+            device_id,
+            reason,
+            detail,
+        )
+        return False
+
     # -- Helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _utc_now() -> str:
+        return datetime.now(UTC).isoformat()
+
+    @staticmethod
+    def _utc_after(seconds: float) -> str:
+        return datetime.fromtimestamp(time.time() + seconds, UTC).isoformat()
+
+    @staticmethod
+    def _mark_unavailable(managed: _ManagedDevice) -> None:
+        """Mark the local path down without overriding an active fallback."""
+        managed.local_status = "unavailable"
+        if managed.control_path != "cloud_fallback":
+            managed.control_path = "unavailable"
+            managed.diagnostic_reason = managed.diag.last_error_class
+
+    @staticmethod
+    def _log_device_error(
+        managed: _ManagedDevice,
+        error_key: str,
+        message: str,
+        *args: Any,
+        exc: BaseException | None = None,
+    ) -> None:
+        """Rate-limit a repeated device error; traces are debug-only."""
+        now = time.monotonic()
+        last = managed.error_log_times.get(error_key, 0.0)
+        if now - last < ERROR_LOG_COOLDOWN:
+            _LOGGER.debug(message + " (suppressed by 10-minute cooldown)", *args)
+            return
+        managed.error_log_times[error_key] = now
+        _LOGGER.warning(message, *args)
+        if exc is not None and _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug(
+                "Detailed Conti device exception",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     def _update_diag_on_connect(self, managed: _ManagedDevice) -> None:
         """Refresh diagnostics from the client after a successful connect."""
@@ -1097,6 +1377,7 @@ class DeviceManager:
     def _classify_error(self, managed: _ManagedDevice, msg: str) -> None:
         """Set last_error and auto-classify last_error_class."""
         managed.diag.last_error = msg
+        managed.diag.last_local_error = msg
         lower = msg.lower()
         if "reset by peer" in lower or "connection reset" in lower:
             managed.diag.last_error_class = ERR_RESET

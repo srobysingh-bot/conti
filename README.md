@@ -1,6 +1,6 @@
 # Conti — Local Device Control for Home Assistant
 
-[![CI](https://github.com/conti-addon/conti/actions/workflows/ci.yml/badge.svg)](https://github.com/conti-addon/conti/actions)
+[![CI](https://github.com/srobysingh-bot/conti/actions/workflows/ci.yml/badge.svg)](https://github.com/srobysingh-bot/conti/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Conti** is a Home Assistant custom integration that provides **fully local LAN control** of Tuya-based IoT devices — lights, fans, ACs, switches, and sensors — **without any cloud dependency, Docker container, or external add-on**.
@@ -30,6 +30,7 @@ No REST API, no WebSocket server, no Docker container, no database.
 - **100 % Local** — Direct TCP to each device on your LAN
 - **Push + Poll** — Instant state updates via TCP push, with periodic polling as a safety net
 - **Persistent Connections** — Connection pool with heartbeat and exponential-backoff reconnect
+- **Safe Reconnect Recovery** — Manual reconnect services plus optional, disabled-by-default automatic recovery
 - **Config Flow UI** — Add devices through the standard HA Integrations page; live connection validation
 - **Auto Protocol Detection** — Automatically detects protocol v3.3/3.4/3.5/3.1 and persists the result
 - **Auto DP Discovery** — Discovers device datapoints (DPS) on connect; persists to `.storage/`
@@ -52,6 +53,15 @@ No REST API, no WebSocket server, no Docker container, no database.
 ## Quick Start
 
 ### 1. Install
+
+#### HACS (recommended)
+
+1. In HACS, open **Integrations → ⋮ → Custom repositories**.
+2. Add `https://github.com/srobysingh-bot/conti` with category **Integration**.
+3. Find **Conti**, select **Download**, and restart Home Assistant.
+4. Open **Settings → Devices & services → Add integration → Conti**.
+
+#### Manual installation
 
 Copy the `custom_components/conti/` folder into your Home Assistant `config/custom_components/` directory:
 

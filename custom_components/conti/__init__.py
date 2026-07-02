@@ -17,13 +17,13 @@ Architecture
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, Platform
 from homeassistant.core import HomeAssistant
@@ -34,27 +34,28 @@ from .const import (
     CONF_CLOUD_ACCESS_ID,
     CONF_CLOUD_ACCESS_SECRET,
     CONF_CLOUD_REGION,
-    CONF_DETECTED_VERSION,
     CONF_DEFERRED_LOCAL_CONNECT,
+    CONF_DETECTED_VERSION,
     CONF_DEVICE_ID,
-    CONF_LOW_POWER_DEVICE,
     CONF_DEVICE_PROFILE,
     CONF_DEVICE_TYPE,
-    CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
+    CONF_ENABLE_AUTO_RECONNECT,
     CONF_IR_BRAND,
     CONF_IR_BRAND_ID,
     CONF_IR_CATEGORY_ID,
     CONF_IR_INFRARED_ID,
     CONF_IR_MODEL,
-    CONF_IR_REMOTE_INDEX,
     CONF_IR_REMOTE_ID,
+    CONF_IR_REMOTE_INDEX,
     CONF_LOCAL_KEY,
+    CONF_LOW_POWER_DEVICE,
     CONF_MAPPING_SOURCE,
     CONF_PROTOCOL_VERSION,
     CONF_RUNTIME_CHANNEL,
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
+    DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
     DEVICE_TYPE_SENSOR,
@@ -74,6 +75,98 @@ _REF_COUNT_KEY = "manager_ref_count"
 _OAUTH_KEY = "oauth_manager"
 _IR_MANAGER_KEY = "ir_manager"
 _IR_SERVICES_REGISTERED = "ir_services_registered"
+_RECONNECT_SERVICES_REGISTERED = "reconnect_services_registered"
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload runtime state when reconnect or other options change."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def _async_network_diagnostics(
+    hass: HomeAssistant, device_ip: str
+) -> tuple[str, str]:
+    """Return HA's routed source IP and configured subnet when available."""
+    try:
+        from homeassistant.components.network import (  # noqa: PLC0415
+            async_get_adapters,
+            async_get_source_ip,
+        )
+
+        source_ip = str(await async_get_source_ip(hass, target_ip=device_ip))
+        adapters = await async_get_adapters(hass)
+        if not isinstance(adapters, list):
+            return source_ip, "unknown"
+        for adapter in adapters:
+            if not isinstance(adapter, dict):
+                continue
+            for address in adapter.get("ipv4", []):
+                if not isinstance(address, dict) or address.get("address") != source_ip:
+                    continue
+                prefix = int(address.get("network_prefix", 0))
+                if prefix:
+                    subnet = ipaddress.ip_network(
+                        f"{source_ip}/{prefix}", strict=False
+                    )
+                    return source_ip, str(subnet)
+        return source_ip, "unknown"
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug("Unable to resolve HA network diagnostics: %s", exc)
+        return "unknown", "unknown"
+
+
+def _register_reconnect_services(hass: HomeAssistant) -> None:
+    """Register manager-owned reconnect services exactly once."""
+    if hass.data[DOMAIN].get(_RECONNECT_SERVICES_REGISTERED):
+        return
+
+    async def _refresh(device_ids: set[str]) -> None:
+        for entry_data in hass.data.get(DOMAIN, {}).values():
+            if not isinstance(entry_data, dict):
+                continue
+            if entry_data.get("device_id") not in device_ids:
+                continue
+            coordinator = entry_data.get("coordinator")
+            if coordinator is not None:
+                try:
+                    await coordinator.async_request_refresh()
+                except Exception as exc:  # noqa: BLE001
+                    _LOGGER.debug(
+                        "Post-reconnect coordinator refresh failed device=%s: %s",
+                        entry_data.get("device_id"),
+                        exc,
+                        exc_info=exc,
+                    )
+
+    async def _handle_reconnect_device(call: Any) -> None:
+        device_id = str(call.data["device_id"]).strip()
+        manager = hass.data.get(DOMAIN, {}).get(_MANAGER_KEY)
+        if manager is None or device_id not in manager.device_ids():
+            raise HomeAssistantError("conti_device_not_found")
+        success = await manager.reconnect_device(device_id)
+        if success:
+            await _refresh({device_id})
+
+    async def _handle_reconnect_all(call: Any) -> None:
+        manager = hass.data.get(DOMAIN, {}).get(_MANAGER_KEY)
+        if manager is None:
+            return
+        results = await manager.reconnect_all()
+        await _refresh({device_id for device_id, ok in results.items() if ok})
+
+    hass.services.async_register(
+        DOMAIN,
+        "reconnect_device",
+        _handle_reconnect_device,
+        schema=vol.Schema({vol.Required("device_id"): str}),
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "reconnect_all",
+        _handle_reconnect_all,
+        schema=vol.Schema({}),
+    )
+    hass.data[DOMAIN][_RECONNECT_SERVICES_REGISTERED] = True
 
 
 def _parse_dp_map(entry: ConfigEntry) -> dict[str, Any]:
@@ -87,6 +180,21 @@ def _parse_dp_map(entry: ConfigEntry) -> dict[str, Any]:
     else:
         result = raw
     return result if isinstance(result, dict) else {}
+
+
+def _dp_map_source(entry: ConfigEntry) -> str:
+    """Return the normalized source of the effective saved DP map."""
+    source = str(
+        entry.options.get(CONF_MAPPING_SOURCE)
+        or entry.data.get(CONF_MAPPING_SOURCE, "discovered")
+    )
+    if source == "cloud":
+        return "cloud"
+    if source in {"manual", "learn"} or (
+        CONF_DP_MAP in entry.options and CONF_MAPPING_SOURCE not in entry.options
+    ):
+        return "manual"
+    return "discovered"
 
 
 def _effective_version(entry: ConfigEntry) -> str:
@@ -408,6 +516,7 @@ def _is_raw_ir_action(action: str) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a single Conti device from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
     if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
         from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
@@ -525,6 +634,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][_REF_COUNT_KEY] = 0
         _LOGGER.info("Conti DeviceManager created (singleton)")
 
+    _register_reconnect_services(hass)
+
     manager: DeviceManager = hass.data[DOMAIN][_MANAGER_KEY]
     hass.data[DOMAIN][_REF_COUNT_KEY] = (
         hass.data[DOMAIN].get(_REF_COUNT_KEY, 0) + 1
@@ -534,6 +645,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     device_id: str = entry.data[CONF_DEVICE_ID]
     dp_map = _parse_dp_map(entry)
     version = _effective_version(entry)
+    ha_host_ip, ha_host_subnet = await _async_network_diagnostics(
+        hass, str(entry.data.get(CONF_HOST, ""))
+    )
 
     device_config: dict[str, Any] = {
         "device_id": device_id,
@@ -543,9 +657,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "device_type": entry.data.get(CONF_DEVICE_TYPE, ""),
         "protocol_version": version,
         "dp_map": dp_map,
+        "dp_map_source": _dp_map_source(entry),
         "deferred_local_connect": bool(
             entry.data.get(CONF_DEFERRED_LOCAL_CONNECT, False)
         ),
+        "enable_auto_reconnect": bool(
+            entry.options.get(
+                CONF_ENABLE_AUTO_RECONNECT, DEFAULT_ENABLE_AUTO_RECONNECT
+            )
+        ),
+        "ha_host_ip": ha_host_ip,
+        "ha_host_subnet": ha_host_subnet,
     }
 
     low_power_sensor = bool(

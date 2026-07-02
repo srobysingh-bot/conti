@@ -14,3 +14,18 @@ send_ir_command:
       required: true
       selector:
         text:
+
+reconnect_device:
+  name: Reconnect device
+  description: Replace the stale local client and reconnect one Conti device without changing its config entry.
+  fields:
+    device_id:
+      name: Device ID
+      description: Tuya device ID of the Conti device to reconnect.
+      required: true
+      selector:
+        text:
+
+reconnect_all:
+  name: Reconnect unavailable devices
+  description: Reconnect unavailable or degraded Conti devices one at a time; healthy devices are skipped.

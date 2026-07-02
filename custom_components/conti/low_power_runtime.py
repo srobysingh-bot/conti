@@ -52,6 +52,10 @@ class LowPowerSensorCloudRuntime:
         """Return the last explicit cloud online state, if known."""
         return self._online
 
+    def get_connection_diagnostics(self) -> dict[str, str]:
+        """Expose the cloud client's last classified API failure."""
+        return self._helper.get_connection_diagnostics()
+
     async def async_get_online_state(self) -> bool | None:
         """Fetch Tuya's online state without treating API errors as offline."""
         try:

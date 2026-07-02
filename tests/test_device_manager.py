@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -490,6 +489,7 @@ class TestCommands:
             instance.set_dp_callback = MagicMock()
             instance.set_disconnect_callback = MagicMock()
             instance.cached_dps = {"20": False}
+            instance._cached_dps = instance.cached_dps
             instance.last_failure_reason = "malformed_payload_904"
             instance.last_failure_detail = "Unexpected Payload"
             instance.attempt_failures = []
@@ -505,7 +505,7 @@ class TestCommands:
                 mgr.get_device_diagnostics(config["device_id"])[
                     "control_path"
                 ]
-                == "local"
+                == "unavailable"
             )
 
         await mgr.stop()
@@ -534,6 +534,7 @@ class TestCommands:
             instance.set_dp_callback = MagicMock()
             instance.set_disconnect_callback = MagicMock()
             instance.cached_dps = {"20": False}
+            instance._cached_dps = instance.cached_dps
             instance.last_failure_reason = "malformed_payload_904"
             instance.last_failure_detail = "Unexpected Payload"
             instance.attempt_failures = []
@@ -546,9 +547,6 @@ class TestCommands:
                 config["device_id"], cloud
             )
 
-            managed = mgr._devices[config["device_id"]]
-            managed.reconnect_task.cancel()
-            managed.reconnect_task = None
             instance.connect = AsyncMock(return_value=True)
             instance.status_with_fallback = AsyncMock(
                 return_value={"20": True}
@@ -559,7 +557,8 @@ class TestCommands:
             instance.last_tx_hex = ""
             instance.last_rx_hex = ""
 
-            assert await mgr.query_device(config["device_id"]) == {"20": True}
+            assert await mgr.reconnect_device(config["device_id"])
+            assert mgr.get_cached_dps(config["device_id"]) == {"20": True}
             diagnostics = mgr.get_device_diagnostics(config["device_id"])
             assert diagnostics["control_path"] == "local"
             assert diagnostics["local_status"] == "healthy"

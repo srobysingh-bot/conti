@@ -83,6 +83,7 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._cloud_availability = cloud_availability
         self._cloud_online: bool | None = None
         self._cloud_online_failures: int = 0
+        self._local_managed = self.device_manager.get_client(device_id) is not None
 
         # Track DPs commanded via HA so we can label source in activity
         self._commanded_dps: dict[str, float] = {}  # dp_id → monotonic ts
@@ -91,7 +92,7 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._previous_dps: dict[str, Any] = {}
 
         # Register per-device push callback (only for local-managed devices)
-        if self._low_power_cloud is None and self._cloud_fallback is None:
+        if self._local_managed:
             self.device_manager.register_state_callback(
                 device_id, self._on_device_push
             )
@@ -104,7 +105,7 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
     async def async_shutdown(self) -> None:
         """Unregister push callback when coordinator is stopped/unloaded."""
-        if self._low_power_cloud is None and self._cloud_fallback is None:
+        if self._local_managed:
             self.device_manager.unregister_state_callback(
                 self._device_id, self._on_device_push
             )
@@ -152,6 +153,10 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         if self._cloud_fallback_active():
             cloud_online = await self._async_refresh_cloud_availability()
+            if self.device_manager.record_cloud_fallback_diagnostics(
+                self._device_id, self._cloud_fallback
+            ):
+                return self.data or {}
             if cloud_online is False:
                 return self.data or {}
 
@@ -159,6 +164,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 dps = await self._cloud_fallback.async_get_dps()
             except Exception as exc:  # noqa: BLE001
                 self._consecutive_failures += 1
+                self.device_manager.record_cloud_fallback_diagnostics(
+                    self._device_id, self._cloud_fallback
+                )
                 _LOGGER.debug(
                     "Cloud fallback polling error for %s: %s",
                     self._device_id,
@@ -169,6 +177,11 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         f"Device {self._device_id}: "
                         f"{self._consecutive_failures} consecutive cloud failures"
                     )
+                return self.data or {}
+
+            if self.device_manager.record_cloud_fallback_diagnostics(
+                self._device_id, self._cloud_fallback
+            ):
                 return self.data or {}
 
             if dps:
@@ -201,7 +214,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     diag = self.device_manager.get_device_diagnostics(
                         self._device_id
                     )
-                    _LOGGER.warning(
+                    self.device_manager.log_device_error(
+                        self._device_id,
+                        "empty_status_no_cache",
                         "Conti device %s: empty status, no cache "
                         "(failures=%d, online=%s, last_error_class=%s, "
                         "last_error=%s)",
@@ -222,7 +237,9 @@ class ContiCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         if self._consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
             diag = self.device_manager.get_device_diagnostics(self._device_id)
-            _LOGGER.warning(
+            self.device_manager.log_device_error(
+                self._device_id,
+                "consecutive_poll_failures",
                 "Conti device %s: %d consecutive failures - marking "
                 "unavailable (last_error_class=%s, last_error=%s)",
                 self._device_id,

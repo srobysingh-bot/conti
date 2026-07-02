@@ -21,6 +21,8 @@ CONF_DP_MAP: Final = "dp_map"
 CONF_DETECTED_VERSION: Final = "detected_version"
 CONF_DISCOVERED_DPS: Final = "discovered_dps"
 CONF_VERBOSE_LOGGING: Final = "verbose_logging"
+CONF_ENABLE_AUTO_RECONNECT: Final = "enable_auto_reconnect"
+DEFAULT_ENABLE_AUTO_RECONNECT: Final = False
 CONF_DEVICE_PROFILE: Final = "device_profile"  # profile id from device_profiles.py
 CONF_MAPPING_SOURCE: Final = "mapping_source"  # "auto" | "cloud" | "learn" | "manual"
 CONF_MAPPING_CONFIDENCE: Final = "mapping_confidence"  # 0.0–1.0
@@ -154,8 +156,9 @@ DP_KEY_VOLTAGE: Final = "voltage"
 # ---------------------------------------------------------------------------
 # Reconnect
 # ---------------------------------------------------------------------------
-RECONNECT_BASE_DELAY: Final = 2.0
-RECONNECT_MAX_DELAY: Final = 60.0
+RECONNECT_BASE_DELAY: Final = 15.0
+RECONNECT_MAX_DELAY: Final = 300.0
+ERROR_LOG_COOLDOWN: Final = 600.0
 
 # ---------------------------------------------------------------------------
 # Stability

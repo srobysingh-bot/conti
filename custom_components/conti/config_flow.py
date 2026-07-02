@@ -77,6 +77,7 @@ from .const import (
     CONF_DEVICE_PROFILE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
+    CONF_ENABLE_AUTO_RECONNECT,
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
     CONF_LOCAL_KEY,
@@ -107,6 +108,7 @@ from .const import (
     CONF_RUNTIME_CHANNEL,
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
+    DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
     DEVICE_TYPE_LIGHT,
@@ -3804,6 +3806,22 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 # =========================================================================
 
 
+def _options_with_manual_dp_map(
+    current_options: dict[str, Any],
+    dp_map: dict[str, Any],
+    *,
+    verbose_logging: bool,
+    enable_auto_reconnect: bool,
+) -> dict[str, Any]:
+    """Return persisted options for a user-edited DP map."""
+    new_options = dict(current_options)
+    new_options[CONF_VERBOSE_LOGGING] = verbose_logging
+    new_options[CONF_ENABLE_AUTO_RECONNECT] = enable_auto_reconnect
+    new_options[CONF_DP_MAP] = json.dumps(dp_map)
+    new_options[CONF_MAPPING_SOURCE] = "manual"
+    return new_options
+
+
 class ContiOptionsFlow(config_entries.OptionsFlow):
     """Options flow for Conti — device settings + external-ON profile."""
 
@@ -3838,11 +3856,15 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                 from .dp_mapping import normalize_dp_map  # noqa: PLC0415
 
                 dp_map = normalize_dp_map(dp_map)
-                new_options = dict(self._entry.options)
-                new_options[CONF_VERBOSE_LOGGING] = user_input.get(
-                    CONF_VERBOSE_LOGGING, False
+                new_options = _options_with_manual_dp_map(
+                    self._entry.options,
+                    dp_map,
+                    verbose_logging=user_input.get(CONF_VERBOSE_LOGGING, False),
+                    enable_auto_reconnect=user_input.get(
+                        CONF_ENABLE_AUTO_RECONNECT,
+                        DEFAULT_ENABLE_AUTO_RECONNECT,
+                    ),
                 )
-                new_options[CONF_DP_MAP] = json.dumps(dp_map)
 
                 if user_input.get("rediscover_dps", False):
                     ok, _, discovered, _ = await _test_device(
@@ -3868,6 +3890,7 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                             merge_dp_maps(dp_map, auto)
                         )
                         new_options[CONF_DISCOVERED_DPS] = json.dumps(discovered)
+                        new_options[CONF_MAPPING_SOURCE] = "discovered"
 
                 # If user checked "configure external-ON", go to that step
                 if user_input.get("configure_external_on", False):
@@ -3881,6 +3904,9 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
             or self._entry.data.get(CONF_DP_MAP, "{}")
         )
         current_verbose = self._entry.options.get(CONF_VERBOSE_LOGGING, False)
+        current_auto_reconnect = self._entry.options.get(
+            CONF_ENABLE_AUTO_RECONNECT, DEFAULT_ENABLE_AUTO_RECONNECT
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -3889,6 +3915,10 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(CONF_DP_MAP, default=current_dp_map): str,
                     vol.Optional(
                         CONF_VERBOSE_LOGGING, default=current_verbose
+                    ): bool,
+                    vol.Optional(
+                        CONF_ENABLE_AUTO_RECONNECT,
+                        default=current_auto_reconnect,
                     ): bool,
                     vol.Optional("rediscover_dps", default=False): bool,
                     vol.Optional("configure_external_on", default=False): bool,

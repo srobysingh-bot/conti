@@ -206,10 +206,11 @@
     "step": {
       "init": {
         "title": "Conti Device Options",
-        "description": "Edit the DP mapping, toggle debug logging, re-discover DPs, or open external-ON profile settings.",
+        "description": "Edit the DP mapping, configure reconnect behavior, toggle debug logging, re-discover DPs, or open external-ON profile settings.",
         "data": {
           "dp_map": "DP Mapping (JSON)",
           "verbose_logging": "Enable verbose / debug logging",
+          "enable_auto_reconnect": "Enable automatic reconnect",
           "rediscover_dps": "Re-discover DPs from device",
           "configure_external_on": "Configure External-ON Correction Profile"
         }

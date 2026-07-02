@@ -8,7 +8,7 @@ include = ["custom_components*"]
 
 [project]
 name = "conti"
-version = "0.2.0"
+version = "0.3.7"
 description = "Pure local LAN control of Tuya-based IoT devices as a Home Assistant custom integration"
 readme = "README.md"
 license = {text = "MIT"}

@@ -1172,6 +1172,16 @@ class TuyaOAuthManager:
         """Return the underlying TuyaCloudSchemaHelper (for schema_to_dp_map)."""
         return self._get_helper()
 
+    def get_connection_diagnostics(self) -> dict[str, str]:
+        """Expose classified OpenAPI errors to runtime consumers."""
+        if self._helper is None:
+            return {
+                "cloud_error": "",
+                "cloud_error_code": "",
+                "cloud_error_message": "",
+            }
+        return self._helper.get_connection_diagnostics()
+
     # ── Internal ──────────────────────────────────────────────────────
 
     @staticmethod

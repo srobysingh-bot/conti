@@ -31,6 +31,7 @@ from typing import Any
 
 import aiohttp
 
+from .const import ERROR_LOG_COOLDOWN
 from .device_profiles import TUYA_CODE_TO_CONTI_KEY, TUYA_TYPE_MAP
 from .dp_mapping import normalize_dp_map
 
@@ -59,6 +60,15 @@ _QR_CONTENT_FMT = "tuyaSmart--qrLogin?token={token}"
 
 # Default timeout for cloud API calls (seconds)
 _API_TIMEOUT = 10
+_CLOUD_ERROR_LOG_TIMES: dict[tuple[str, str], float] = {}
+_PERMISSION_MARKERS = (
+    "data center suspended",
+    "data centre suspended",
+    "no permission",
+    "permission denied",
+    "permission deny",
+    "permission is denied",
+)
 
 
 class TuyaCloudOnboardingError(Exception):
@@ -116,6 +126,55 @@ class TuyaCloudSchemaHelper:
         self._refresh_token: str | None = None
         self._token_expiry: float = 0.0
         self._uid: str | None = None
+        self._last_cloud_error: str = ""
+        self._last_cloud_error_code: str = ""
+        self._last_cloud_error_message: str = ""
+
+    def get_connection_diagnostics(self) -> dict[str, str]:
+        """Return the last classified cloud API failure."""
+        return {
+            "cloud_error": self._last_cloud_error,
+            "cloud_error_code": self._last_cloud_error_code,
+            "cloud_error_message": self._last_cloud_error_message,
+        }
+
+    def _record_cloud_error(self, path: str, code: str, msg: str) -> None:
+        msg_lower = msg.lower()
+        permission_error = code == "28841002" or any(
+            marker in msg_lower for marker in _PERMISSION_MARKERS
+        )
+        self._last_cloud_error = (
+            "cloud_permission_error" if permission_error else "cloud_api_error"
+        )
+        self._last_cloud_error_code = code
+        self._last_cloud_error_message = msg
+
+        key = (path, f"{self._last_cloud_error}:{code}:{msg}")
+        now = time.monotonic()
+        if now - _CLOUD_ERROR_LOG_TIMES.get(key, 0.0) < ERROR_LOG_COOLDOWN:
+            _LOGGER.debug(
+                "Tuya cloud error suppressed by 10-minute cooldown: "
+                "path=%s error=%s code=%s msg=%s",
+                path,
+                self._last_cloud_error,
+                code or "none",
+                msg,
+            )
+            return
+        _CLOUD_ERROR_LOG_TIMES[key] = now
+        log_method = _LOGGER.debug if permission_error else _LOGGER.warning
+        log_method(
+            "Tuya cloud %s: path=%s code=%s msg=%s",
+            self._last_cloud_error,
+            path,
+            code or "none",
+            msg,
+        )
+
+    def _clear_cloud_error(self) -> None:
+        self._last_cloud_error = ""
+        self._last_cloud_error_code = ""
+        self._last_cloud_error_message = ""
 
     # ── Token management ──────────────────────────────────────────────
 
@@ -128,12 +187,10 @@ class TuyaCloudSchemaHelper:
         # In QR-login mode (no access_id/secret) this path must not be taken —
         # use the tuya_sharing SDK instead.
         if not self._access_id or not self._access_secret:
-            _LOGGER.error(
-                "Tuya OpenAPI token fetch requires credentials but "
-                "access_id=%r is empty.  HMAC signing will fail with "
-                "code=1004.  QR-login accounts must use the "
-                "tuya-device-sharing-sdk path.",
-                (self._access_id[:4] + "…") if self._access_id else "<empty>",
+            self._record_cloud_error(
+                "/v1.0/token?grant_type=1",
+                "credentials_missing",
+                "Tuya OpenAPI credentials are not configured",
             )
             if strict:
                 raise TuyaCloudAuthError(
@@ -163,13 +220,23 @@ class TuyaCloudSchemaHelper:
                     except Exception as exc:  # noqa: BLE001
                         if strict:
                             raise TuyaCloudParseError("Non-JSON token response") from exc
-                        _LOGGER.warning("Tuya cloud token parse error: %s", exc)
+                        self._record_cloud_error(
+                            "/v1.0/token?grant_type=1", "parse_error", str(exc)
+                        )
+                        _LOGGER.debug(
+                            "Tuya cloud token parse traceback",
+                            exc_info=(type(exc), exc, exc.__traceback__),
+                        )
                         return False
 
             if not isinstance(data, dict):
                 if strict:
                     raise TuyaCloudParseError("Unexpected token response shape")
-                _LOGGER.warning("Tuya cloud token request returned non-dict payload")
+                self._record_cloud_error(
+                    "/v1.0/token?grant_type=1",
+                    "parse_error",
+                    "token request returned non-dict payload",
+                )
                 return False
 
             if data.get("success"):
@@ -179,18 +246,14 @@ class TuyaCloudSchemaHelper:
                 # Expire 60s early to avoid edge cases
                 self._token_expiry = time.time() + result.get("expire_time", 7200) - 60
                 _LOGGER.debug("Tuya cloud token obtained (expires in %ds)", result.get("expire_time", 0))
+                self._clear_cloud_error()
                 return True
 
             code = str(data.get("code", "")).strip()
             msg = str(data.get("msg", "unknown"))
             body_preview = str(data)[:1000]
-            _LOGGER.error(
-                "Tuya token request failed: status=%s code=%s msg=%s body=%s",
-                resp.status,
-                code or "none",
-                msg,
-                body_preview,
-            )
+            self._record_cloud_error("/v1.0/token?grant_type=1", code, msg)
+            _LOGGER.debug("Tuya token failure response body=%s", body_preview)
 
             if strict:
                 self._raise_cloud_error_from_response(
@@ -206,7 +269,13 @@ class TuyaCloudSchemaHelper:
                 raise
             if strict:
                 raise TuyaCloudAPIError(f"Token request failed: {exc}") from exc
-            _LOGGER.warning("Tuya cloud token request error: %s", exc)
+            self._record_cloud_error(
+                "/v1.0/token?grant_type=1", type(exc).__name__, str(exc)
+            )
+            _LOGGER.debug(
+                "Tuya cloud token request traceback",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             return False
 
     async def _try_refresh_token(self, strict: bool = False) -> bool:
@@ -650,11 +719,10 @@ class TuyaCloudSchemaHelper:
     ) -> dict[str, Any] | None:
         """Make an authenticated GET request to the Tuya Cloud API."""
         if not self._access_id or not self._access_secret:
-            _LOGGER.error(
-                "Tuya OpenAPI GET %s skipped: access_id/access_secret are "
-                "empty.  Requests would fail with code=1004 (sign invalid).  "
-                "Use the tuya-device-sharing-sdk path for QR-login accounts.",
+            self._record_cloud_error(
                 path,
+                "credentials_missing",
+                "Tuya OpenAPI credentials are not configured",
             )
             if strict:
                 raise TuyaCloudAuthError(
@@ -684,11 +752,11 @@ class TuyaCloudSchemaHelper:
                             raise TuyaCloudParseError(
                                 f"Non-JSON response for {path}"
                             ) from exc
-                        _LOGGER.error(
-                            "Tuya cloud API parse error: path=%s status=%s error=%s",
+                        self._record_cloud_error(path, "parse_error", str(exc))
+                        _LOGGER.debug(
+                            "Tuya cloud API parse traceback path=%s",
                             path,
-                            resp.status,
-                            exc,
+                            exc_info=(type(exc), exc, exc.__traceback__),
                         )
                         return None
 
@@ -706,20 +774,15 @@ class TuyaCloudSchemaHelper:
                 return None
 
             if data.get("success"):
+                self._clear_cloud_error()
                 return data.get("result", {})
 
             code = str(data.get("code", "")).strip()
             msg = data.get("msg", "unknown")
             body_preview = str(data)[:1000]
 
-            _LOGGER.error(
-                "Tuya cloud API failed: path=%s status=%s code=%s msg=%s body=%s",
-                path,
-                resp.status,
-                code or "none",
-                msg,
-                body_preview,
-            )
+            self._record_cloud_error(path, code, str(msg))
+            _LOGGER.debug("Tuya cloud failure response body=%s", body_preview)
 
             if strict:
                 self._raise_cloud_error_from_response(
@@ -754,10 +817,10 @@ class TuyaCloudSchemaHelper:
         import json as _json  # noqa: PLC0415
 
         if not self._access_id or not self._access_secret:
-            _LOGGER.error(
-                "Tuya OpenAPI POST %s skipped: access_id/access_secret are "
-                "empty.  Requests would fail with code=1004 (sign invalid).",
+            self._record_cloud_error(
                 path,
+                "credentials_missing",
+                "Tuya OpenAPI credentials are not configured",
             )
             if strict:
                 raise TuyaCloudAuthError(
@@ -791,9 +854,11 @@ class TuyaCloudSchemaHelper:
                             raise TuyaCloudParseError(
                                 f"Non-JSON response for POST {path}"
                             ) from exc
-                        _LOGGER.error(
-                            "Tuya cloud POST parse error: path=%s status=%s",
-                            path, resp.status,
+                        self._record_cloud_error(path, "parse_error", str(exc))
+                        _LOGGER.debug(
+                            "Tuya cloud POST parse traceback path=%s",
+                            path,
+                            exc_info=(type(exc), exc, exc.__traceback__),
                         )
                         return None
 
@@ -805,14 +870,12 @@ class TuyaCloudSchemaHelper:
                 return None
 
             if data.get("success"):
+                self._clear_cloud_error()
                 return data.get("result", {})
 
             code = str(data.get("code", "")).strip()
             msg = str(data.get("msg", "unknown"))
-            _LOGGER.error(
-                "Tuya cloud POST failed: path=%s code=%s msg=%s",
-                path, code, msg,
-            )
+            self._record_cloud_error(path, code, msg)
             if strict:
                 self._raise_cloud_error_from_response(
                     status=resp.status, path=path, code=code, msg=msg,
@@ -971,7 +1034,7 @@ class TuyaCloudSchemaHelper:
         """Map Tuya HTTP/code/message into specific onboarding exceptions."""
         msg_l = msg.lower()
 
-        if code == "28841002":
+        if code == "28841002" or any(marker in msg_l for marker in _PERMISSION_MARKERS):
             _LOGGER.error(
                 "Tuya cloud permission expired: path=%s status=%s code=%s msg=%s",
                 path,
