@@ -68,6 +68,7 @@ class TinyTuyaDevice:
         self._last_failure_detail: str = ""
         self._confirmed_protocol_mismatch: bool = False
         self._attempt_failures: list[dict[str, Any]] = []
+        self._last_status_was_live: bool = False
 
         # Diagnostics (kept for compatibility; TinyTuya doesn't expose hex)
         self._last_tx_hex: str = ""
@@ -124,6 +125,11 @@ class TinyTuyaDevice:
     @property
     def attempt_failures(self) -> list[dict[str, Any]]:
         return [dict(item) for item in self._attempt_failures]
+
+    @property
+    def last_status_was_live(self) -> bool:
+        """Whether the most recent status request returned non-empty DPS."""
+        return self._last_status_was_live
 
     @property
     def last_tx_hex(self) -> str:
@@ -203,10 +209,8 @@ class TinyTuyaDevice:
 
     def _try_connect_version(self, version: float) -> bool:
         """Run one synchronous TinyTuya status probe."""
-        query_command = getattr(tinytuya, "DP_QUERY", 10)
-        if not isinstance(query_command, int):
-            query_command = 10
-        command = f"status/DP_QUERY({query_command})"
+        query_command, query_name = self._primary_status_command(version)
+        command = f"status/{query_name}({query_command})"
         if self._device:
             try:
                 self._device.close()
@@ -247,7 +251,7 @@ class TinyTuyaDevice:
                 )
 
         try:
-            result = d.status()
+            result = self._send_status_query(d, version)
         except Exception as exc:  # noqa: BLE001
             reason = self._classify_status_failure(exc=exc)
             self._record_attempt_failure(
@@ -269,9 +273,6 @@ class TinyTuyaDevice:
                 pass
             return False
 
-        if version == 3.4 and self._is_err_904(result):
-            result = self._try_v34_dali_status_fallbacks(d, version, result)
-
         if isinstance(result, dict) and "dps" in result:
             raw_dps = result.get("dps")
             dps = (
@@ -284,6 +285,7 @@ class TinyTuyaDevice:
             self._initial_status_dps = dps
             self._cached_dps.update(dps)
             self._connected = True
+            self._last_status_was_live = bool(dps)
             if dps:
                 self._last_failure_reason = ""
                 self._last_failure_detail = ""
@@ -345,106 +347,52 @@ class TinyTuyaDevice:
     def _is_err_904(result: Any) -> bool:
         return isinstance(result, dict) and str(result.get("Err", "")) == "904"
 
-    def _try_v34_dali_status_fallbacks(
-        self,
-        device: Any,
-        version: float,
-        initial_result: Any,
-    ) -> Any:
-        """Try TinyTuya-supported v3.4 status alternatives after Err 904."""
-        _LOGGER.warning(
-            "Conti DALI probe strategy=normal_status device=%s ip=%s "
-            "protocol=%.1f raw_result=%r",
+    @staticmethod
+    def _primary_status_command(version: float) -> tuple[int, str]:
+        """Return the protocol-correct primary status command."""
+        if version >= 3.4:
+            command = getattr(tinytuya, "DP_QUERY_NEW", 0x10)
+            return (command if isinstance(command, int) else 0x10), "DP_QUERY_NEW"
+        command = getattr(tinytuya, "DP_QUERY", 0x0A)
+        return (command if isinstance(command, int) else 0x0A), "DP_QUERY"
+
+    def _send_status_query(self, device: Any, version: float) -> Any:
+        """Send one status query, with a narrow legacy-command fallback.
+
+        Protocols 3.4 and 3.5 always try ``DP_QUERY_NEW`` first.  A legacy
+        ``DP_QUERY`` is attempted only after an explicit malformed-payload
+        rejection; timeouts, socket failures, and key/version errors are not
+        reasons to send the old command on the same session.
+        """
+        command, _ = self._primary_status_command(version)
+        if version < 3.4:
+            return device.status()
+
+        result = device._send_receive(  # noqa: SLF001
+            device.generate_payload(command),
+            0,
+        )
+        if not self._is_err_904(result):
+            return result
+
+        legacy = getattr(tinytuya, "DP_QUERY", 0x0A)
+        if not isinstance(legacy, int):
+            legacy = 0x0A
+        _LOGGER.info(
+            "Conti status query rejected device=%s protocol=%.1f; "
+            "trying controlled DP_QUERY(0x0A) fallback",
             self._device_id,
-            self._ip,
             version,
-            initial_result,
         )
-
-        strategies: list[tuple[str, Callable[[], Any]]] = []
-        query_new = getattr(tinytuya, "DP_QUERY_NEW", 0x10)
-        if not isinstance(query_new, int):
-            query_new = 0x10
-        strategies.append(
-            (
-                "dp_query_new_0x10",
-                lambda: device._send_receive(  # noqa: SLF001
-                    device.generate_payload(query_new),
-                    0,
-                ),
-            )
+        legacy_result = device._send_receive(  # noqa: SLF001
+            device.generate_payload(legacy),
+            0,
         )
-
-        if hasattr(device, "updatedps"):
-            dp_ids = (
-                [int(dp_id) for dp_id in self._monitored_dp_ids]
-                if self._monitored_dp_ids
-                else [20, 21, 22, 23]
-            )
-            strategies.append(
-                ("updatedps", lambda: device.updatedps(dp_ids))
-            )
-
-        if hasattr(device, "heartbeat"):
-            def _heartbeat_status() -> Any:
-                heartbeat_result = device.heartbeat(nowait=False)
-                _LOGGER.info(
-                    "Conti DALI probe strategy=heartbeat device=%s ip=%s "
-                    "protocol=%.1f raw_result=%r",
-                    self._device_id,
-                    self._ip,
-                    version,
-                    heartbeat_result,
-                )
-                return device.status()
-
-            strategies.append(("heartbeat_then_status", _heartbeat_status))
-
-        if hasattr(device, "receive"):
-            def _open_status() -> Any:
-                send_result = device.status(nowait=True)
-                _LOGGER.info(
-                    "Conti DALI probe strategy=open_status_send device=%s "
-                    "ip=%s protocol=%.1f raw_result=%r",
-                    self._device_id,
-                    self._ip,
-                    version,
-                    send_result,
-                )
-                return device.receive()
-
-            strategies.append(("open_status_receive", _open_status))
-
-        last_result = initial_result
-        for strategy, probe in strategies:
-            try:
-                last_result = probe()
-                _LOGGER.info(
-                    "Conti DALI probe strategy=%s device=%s ip=%s "
-                    "protocol=%.1f raw_result=%r",
-                    strategy,
-                    self._device_id,
-                    self._ip,
-                    version,
-                    last_result,
-                )
-            except Exception as exc:  # noqa: BLE001
-                last_result = exc
-                _LOGGER.warning(
-                    "Conti DALI probe strategy=%s device=%s ip=%s "
-                    "protocol=%.1f exception=%r",
-                    strategy,
-                    self._device_id,
-                    self._ip,
-                    version,
-                    exc,
-                )
-                continue
-
-            if isinstance(last_result, dict) and "dps" in last_result:
-                return last_result
-
-        return initial_result
+        if isinstance(legacy_result, dict) and "dps" in legacy_result:
+            return legacy_result
+        # Preserve the result of the correct command for classification.  In
+        # particular, a rejected legacy query must not turn into a key error.
+        return result
 
     def _record_attempt_failure(
         self,
@@ -559,18 +507,29 @@ class TinyTuyaDevice:
         """
         if not self._device:
             return {}
+        self._last_status_was_live = False
+        was_working = self._connected or bool(self._cached_dps)
         saved_timeout: float | None = None
         if timeout is not None:
             saved_timeout = getattr(self._device, "connection_timeout", None)
             self._device.connection_timeout = timeout
         try:
-            result = self._device.status()
+            result = self._send_status_query(
+                self._device, float(self._protocol_version)
+            )
             if isinstance(result, dict) and "dps" in result:
                 dps = {str(k): v for k, v in result["dps"].items()}
                 self._cached_dps.update(dps)
+                self._last_status_was_live = bool(dps)
+                if dps:
+                    self._connected = True
+                    self._last_failure_reason = ""
+                    self._last_failure_detail = ""
                 return dps
             if isinstance(result, dict) and "Error" in result:
                 reason = self._classify_status_failure(result=result)
+                if reason == "local_key_or_version_914" and was_working:
+                    reason = "session_or_query_rejected"
                 self._last_failure_reason = reason
                 self._last_failure_detail = repr(result)
                 _LOGGER.debug(
@@ -918,6 +877,9 @@ class TinyTuyaDevice:
         try:
             sock.settimeout(0.05)
             data = self._device.receive()
+        except TimeoutError:
+            # No unsolicited frame arrived during this short listener window.
+            return None
         except Exception:  # noqa: BLE001
             # Socket error — caller should check ``connected``
             self._connected = False
@@ -929,6 +891,8 @@ class TinyTuyaDevice:
             except Exception:  # noqa: BLE001
                 pass
 
+        if getattr(self._device, "socket", None) is None:
+            self._connected = False
         if isinstance(data, dict) and "dps" in data:
             dps = {str(k): v for k, v in data["dps"].items()}
             self._cached_dps.update(dps)

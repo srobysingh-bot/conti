@@ -27,6 +27,7 @@ from custom_components.conti.const import (
 )
 from custom_components.conti.device_manager import DeviceManager
 from custom_components.conti.diagnostics import async_get_config_entry_diagnostics
+from custom_components.conti.tinytuya_client import TinyTuyaDevice
 
 
 def _client(*, connected: bool, dps: dict[str, object] | None = None) -> MagicMock:
@@ -53,6 +54,56 @@ def _client(*, connected: bool, dps: dict[str, object] | None = None) -> MagicMo
     return client
 
 
+@pytest.mark.parametrize("version", ["3.4", "3.5"])
+def test_modern_protocol_status_uses_dp_query_new_first(version: str) -> None:
+    client = TinyTuyaDevice(
+        "device-1", "192.168.20.10", "0123456789abcdef", version
+    )
+    device = MagicMock()
+    device.generate_payload.side_effect = lambda command: command
+    device._send_receive.return_value = {"dps": {"1": True}}
+
+    assert client._send_status_query(device, float(version)) == {
+        "dps": {"1": True}
+    }
+    assert device.generate_payload.call_args_list[0] == call(0x10)
+    assert call(0x0A) not in device.generate_payload.call_args_list
+
+
+def test_rejected_legacy_fallback_does_not_override_correct_query_error() -> None:
+    client = TinyTuyaDevice(
+        "device-1", "192.168.20.10", "0123456789abcdef", "3.4"
+    )
+    device = MagicMock()
+    device.generate_payload.side_effect = lambda command: command
+    correct_error = {"Error": "Unexpected Payload", "Err": "904"}
+    device._send_receive.side_effect = [
+        correct_error,
+        {"Error": "Check device key or version", "Err": "914"},
+    ]
+
+    assert client._send_status_query(device, 3.4) == correct_error
+    assert device.generate_payload.call_args_list == [call(0x10), call(0x0A)]
+
+
+def test_working_session_914_is_initially_query_rejected() -> None:
+    client = TinyTuyaDevice(
+        "device-1", "192.168.20.10", "0123456789abcdef", "3.4"
+    )
+    device = MagicMock()
+    device.generate_payload.side_effect = lambda command: command
+    device._send_receive.return_value = {
+        "Error": "Check device key or version",
+        "Err": "914",
+    }
+    client._device = device
+    client._connected = True
+    client._protocol_version = "3.4"
+
+    assert client._status_sync() == {}
+    assert client.last_failure_reason == "session_or_query_rejected"
+
+
 @pytest.mark.asyncio
 async def test_manual_reconnect_replaces_stale_client(device_config: dict) -> None:
     stale = _client(connected=False)
@@ -63,12 +114,19 @@ async def test_manual_reconnect_replaces_stale_client(device_config: dict) -> No
     with patch(
         "custom_components.conti.device_manager.TinyTuyaDevice",
         side_effect=[stale, fresh],
-    ):
+    ) as client_factory:
         assert not await manager.add_device(device_config)
         assert manager._devices[device_config["device_id"]].reconnect_task is None
 
         assert await manager.reconnect_device(device_config["device_id"])
 
+    assert client_factory.call_args_list[-1] == call(
+        device_id=device_config["device_id"],
+        ip=device_config["host"],
+        local_key=device_config["local_key"],
+        version=device_config["protocol_version"],
+        port=device_config["port"],
+    )
     assert manager.get_client(device_config["device_id"]) is fresh
     stale.close.assert_awaited()
     assert manager.get_cached_dps(device_config["device_id"]) == {"1": True}
@@ -76,6 +134,134 @@ async def test_manual_reconnect_replaces_stale_client(device_config: dict) -> No
     assert diagnostics["control_path"] == "local"
     assert diagnostics["reconnect_attempts"] == 1
     assert diagnostics["last_successful_local_update"] is not None
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_push_disconnect_closes_stale_client_without_immediate_unavailable(
+    device_config: dict,
+) -> None:
+    stale = _client(connected=True, dps={"1": True})
+    dropped = asyncio.Event()
+
+    async def _drop_socket() -> None:
+        stale.connected = False
+        dropped.set()
+        return None
+
+    stale.receive_nowait.side_effect = _drop_socket
+    manager = DeviceManager()
+    await manager.start()
+    with patch(
+        "custom_components.conti.device_manager.TinyTuyaDevice",
+        return_value=stale,
+    ):
+        assert await manager.add_device(device_config)
+        await asyncio.wait_for(dropped.wait(), timeout=1)
+        for _ in range(10):
+            if stale.close.await_count:
+                break
+            await asyncio.sleep(0)
+
+    stale.close.assert_awaited()
+    assert manager.is_online(device_config["device_id"])
+    diagnostics = manager.get_device_diagnostics(device_config["device_id"])
+    assert diagnostics["local_status"] == "reconnecting"
+    assert diagnostics["control_path"] == "local"
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_listener_and_status_query_never_read_concurrently(
+    device_config: dict,
+) -> None:
+    client = _client(connected=True, dps={"1": True})
+    read_started = asyncio.Event()
+    release_read = asyncio.Event()
+    listener_reading = False
+
+    async def _receive() -> None:
+        nonlocal listener_reading
+        listener_reading = True
+        read_started.set()
+        await release_read.wait()
+        listener_reading = False
+        return None
+
+    client.receive_nowait.side_effect = _receive
+    manager = DeviceManager()
+    await manager.start()
+    with patch(
+        "custom_components.conti.device_manager.TinyTuyaDevice",
+        return_value=client,
+    ):
+        assert await manager.add_device(device_config)
+        await asyncio.wait_for(read_started.wait(), timeout=1)
+
+        async def _status(*, timeout: float | None = None) -> dict[str, bool]:
+            assert timeout == 2.0
+            assert listener_reading is False
+            return {"1": True}
+
+        client.status_with_fallback = AsyncMock(side_effect=_status)
+        query = asyncio.create_task(manager.query_device(device_config["device_id"]))
+        await asyncio.sleep(0)
+        client.status_with_fallback.assert_not_awaited()
+        release_read.set()
+        assert await asyncio.wait_for(query, timeout=1) == {"1": True}
+
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_valid_dps_after_push_reconnect_restores_availability(
+    device_config: dict,
+) -> None:
+    stale = _client(connected=True, dps={"1": False})
+    fresh = _client(connected=True, dps={"1": True})
+    manager = DeviceManager()
+    await manager.start()
+    with patch(
+        "custom_components.conti.device_manager.TinyTuyaDevice",
+        side_effect=[stale, fresh],
+    ):
+        assert await manager.add_device(device_config)
+        manager._on_disconnect(device_config["device_id"], source_client=stale)
+        assert manager.is_online(device_config["device_id"])
+        assert await manager.reconnect_device(device_config["device_id"])
+
+    assert manager.is_online(device_config["device_id"])
+    diagnostics = manager.get_device_diagnostics(device_config["device_id"])
+    assert diagnostics["local_status"] == "healthy"
+    assert diagnostics["control_path"] == "local"
+    assert diagnostics["consecutive_failures"] == 0
+    assert manager.get_cached_dps(device_config["device_id"])["1"] is True
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_grace_expires_after_three_verified_failures(
+    device_config: dict,
+) -> None:
+    stale = _client(connected=True, dps={"1": True})
+    failures = [_client(connected=False) for _ in range(3)]
+    manager = DeviceManager()
+    await manager.start()
+    with patch(
+        "custom_components.conti.device_manager.TinyTuyaDevice",
+        side_effect=[stale, *failures],
+    ):
+        assert await manager.add_device(device_config)
+        manager._on_disconnect(device_config["device_id"], source_client=stale)
+        for attempt in range(2):
+            assert not await manager.reconnect_device(device_config["device_id"])
+            assert manager.is_online(device_config["device_id"]), attempt
+        assert not await manager.reconnect_device(device_config["device_id"])
+
+    assert not manager.is_online(device_config["device_id"])
+    assert manager.get_device_diagnostics(device_config["device_id"])[
+        "consecutive_failures"
+    ] == 3
     await manager.stop()
 
 

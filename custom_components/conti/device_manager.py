@@ -67,6 +67,7 @@ ERR_UNKNOWN = "unknown"
 # cycles.  A fresh WARNING fires naturally once the device has been
 # stable for ≥ 600 s since the last WARNING.
 _PUSH_WARN_COOLDOWN: float = ERROR_LOG_COOLDOWN
+_RECONNECT_FAILURE_THRESHOLD = 3
 
 
 @dataclass
@@ -96,6 +97,7 @@ class _ManagedDevice:
         "reconnect_delay",
         "reconnect_task",
         "listener_task",
+        "listener_stop",
         "online",
         "lock",
         "diag",
@@ -118,6 +120,7 @@ class _ManagedDevice:
         self.reconnect_delay: float = RECONNECT_BASE_DELAY
         self.reconnect_task: Optional[asyncio.Task[None]] = None
         self.listener_task: Optional[asyncio.Task[None]] = None
+        self.listener_stop = asyncio.Event()
         self.online: bool = False
         self.lock: asyncio.Lock = asyncio.Lock()
         self.diag: DeviceDiagnostics = DeviceDiagnostics()
@@ -159,10 +162,11 @@ class DeviceManager:
         """Close every connection and cancel pending reconnects/listeners."""
         self._running = False
         cancelled: list[asyncio.Task[None]] = []
+        listeners: list[asyncio.Task[None]] = []
         for dev in self._devices.values():
             if dev.listener_task and not dev.listener_task.done():
-                dev.listener_task.cancel()
-                cancelled.append(dev.listener_task)
+                dev.listener_stop.set()
+                listeners.append(dev.listener_task)
             if dev.reconnect_task and not dev.reconnect_task.done():
                 dev.reconnect_task.cancel()
                 cancelled.append(dev.reconnect_task)
@@ -171,6 +175,8 @@ class DeviceManager:
                 cancelled.append(dev.cloud_refresh_task)
         if cancelled:
             await asyncio.gather(*cancelled, return_exceptions=True)
+        if listeners:
+            await asyncio.gather(*listeners, return_exceptions=True)
         for dev in self._devices.values():
             await dev.client.close()
         self._devices.clear()
@@ -370,7 +376,8 @@ class DeviceManager:
         if managed is None:
             return
         if managed.listener_task and not managed.listener_task.done():
-            managed.listener_task.cancel()
+            managed.listener_stop.set()
+            await asyncio.gather(managed.listener_task, return_exceptions=True)
         if managed.reconnect_task and not managed.reconnect_task.done():
             managed.reconnect_task.cancel()
         if managed.cloud_refresh_task and not managed.cloud_refresh_task.done():
@@ -500,44 +507,56 @@ class DeviceManager:
         # ---- Device is online - request fresh status ----
         managed.client.ip = managed.config["host"]
 
-        # If the lock is already held (command in-flight), skip this poll
-        # so user commands are never blocked behind polling I/O.
+        # Stop and join the listener first.  If the lock remains held after
+        # that, it belongs to a command and this poll should still be skipped.
+        listener_was_running = await self._stop_listener(device_id)
         if managed.lock.locked():
             _LOGGER.debug(
                 "Conti device %s: lock busy (command in-flight), "
                 "skipping poll — returning None (poll skipped)",
                 device_id,
             )
+            if listener_was_running and managed.online and managed.client.connected:
+                self._start_listener(device_id)
             return None
 
-        async with managed.lock:
-            try:
+        try:
+            async with managed.lock:
                 # Short timeout (2 s) for routine polls on an already-
                 # connected persistent socket so the lock is released
-                # quickly and the push listener is not starved when the
-                # device is slow to answer a DP_QUERY.
+                # quickly.  The listener is fully stopped before this read,
+                # so there is exactly one socket reader.
                 status = await managed.client.status_with_fallback(
                     timeout=2.0
                 )
-            except Exception as exc:
-                status = None
-                self._classify_error(managed, f"status failed: {exc!r}")
-                self._log_device_error(
-                    managed,
-                    f"status:{type(exc).__name__}",
-                    "Conti device %s status exception: %s",
-                    device_id,
-                    exc,
-                    exc=exc,
-                )
+        except Exception as exc:
+            status = None
+            self._classify_error(managed, f"status failed: {exc!r}")
+            self._log_device_error(
+                managed,
+                f"status:{type(exc).__name__}",
+                "Conti device %s status exception: %s",
+                device_id,
+                exc,
+                exc=exc,
+            )
+        finally:
+            if listener_was_running and managed.online and managed.client.connected:
+                self._start_listener(device_id)
 
         managed.diag.last_tx_hex = managed.client.last_tx_hex
         managed.diag.last_rx_hex = managed.client.last_rx_hex
 
-        if status:
+        live_marker = getattr(managed.client, "last_status_was_live", None)
+        live_status = bool(status) and (
+            live_marker if isinstance(live_marker, bool) else True
+        )
+        if live_status:
+            managed.online = True
             managed.diag.last_status_ok = time.monotonic()
             managed.diag.last_local_update = self._utc_now()
             managed.diag.consecutive_failures = 0
+            self._clear_cloud_fallback(managed)
         else:
             if self._cloud_fallback_failure(managed):
                 self._activate_cloud_fallback(managed)
@@ -939,17 +958,33 @@ class DeviceManager:
             return
         if managed.listener_task and not managed.listener_task.done():
             return  # already running
+        managed.listener_stop.clear()
         managed.listener_task = asyncio.create_task(
             self._listen_loop(device_id),
             name=f"conti-listener-{device_id}",
         )
 
-    def _stop_listener(self, device_id: str) -> None:
-        """Cancel the listener task for *device_id* if running."""
+    async def _stop_listener(self, device_id: str) -> bool:
+        """Stop and join the listener so its socket read has completed."""
         managed = self._devices.get(device_id)
-        if managed and managed.listener_task and not managed.listener_task.done():
-            managed.listener_task.cancel()
-            managed.listener_task = None
+        if not managed or not managed.listener_task:
+            return False
+        task = managed.listener_task
+        if task.done():
+            if managed.listener_task is task:
+                managed.listener_task = None
+            return False
+        managed.listener_stop.set()
+        if task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+            if managed.listener_task is task:
+                managed.listener_task = None
+        return True
+
+    @staticmethod
+    def _request_listener_stop(managed: _ManagedDevice) -> None:
+        """Signal listener shutdown from a synchronous callback."""
+        managed.listener_stop.set()
 
     async def _listen_loop(self, device_id: str) -> None:
         """Background: poll the persistent socket for unsolicited pushes.
@@ -965,7 +1000,11 @@ class DeviceManager:
 
         _LOGGER.debug("Push listener started for %s", device_id)
         try:
-            while self._running and managed.online:
+            while (
+                self._running
+                and managed.online
+                and not managed.listener_stop.is_set()
+            ):
                 # Yield to commands / polls that hold the lock
                 if managed.lock.locked():
                     await asyncio.sleep(0.05)
@@ -979,11 +1018,21 @@ class DeviceManager:
 
                 # Socket died during receive?
                 if not managed.client.connected:
-                    managed.online = False
                     self._classify_error(
                         managed, "disconnected during push listen"
                     )
-                    self._mark_unavailable(managed)
+                    managed.local_status = "reconnecting"
+                    if managed.control_path != "cloud_fallback":
+                        managed.control_path = "local"
+                        managed.diagnostic_reason = "session_or_query_rejected"
+                    try:
+                        await managed.client.close()
+                    except Exception as exc:  # noqa: BLE001
+                        _LOGGER.debug(
+                            "Closing disconnected push client failed device=%s: %s",
+                            device_id,
+                            exc,
+                        )
                     _now = time.monotonic()
                     if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
                         managed._last_push_warn_time = _now
@@ -1013,6 +1062,8 @@ class DeviceManager:
         except asyncio.CancelledError:
             pass
 
+        if managed.listener_task is asyncio.current_task():
+            managed.listener_task = None
         _LOGGER.debug("Push listener stopped for %s", device_id)
 
     def _on_disconnect(
@@ -1027,11 +1078,13 @@ class DeviceManager:
         if source_client is not None and source_client is not managed.client:
             _LOGGER.debug("Ignoring stale-client disconnect device=%s", device_id)
             return
-        self._stop_listener(device_id)
+        self._request_listener_stop(managed)
         was_online = managed.online
-        managed.online = False
         self._classify_error(managed, "disconnected")
-        self._mark_unavailable(managed)
+        managed.local_status = "reconnecting"
+        if managed.control_path != "cloud_fallback":
+            managed.control_path = "local"
+            managed.diagnostic_reason = "session_or_query_rejected"
         if was_online:
             _now = time.monotonic()
             if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
@@ -1113,9 +1166,8 @@ class DeviceManager:
                 success = await self._attempt_reconnect(managed)
             except Exception as exc:  # noqa: BLE001
                 success = False
-                managed.online = False
                 self._classify_error(managed, f"reconnect lifecycle: {exc!r}")
-                self._mark_unavailable(managed)
+                self._record_reconnect_failure(managed)
                 self._log_device_error(
                     managed,
                     f"reconnect_lifecycle:{type(exc).__name__}",
@@ -1194,9 +1246,8 @@ class DeviceManager:
                 success = await self._attempt_reconnect(managed)
             except Exception as exc:  # noqa: BLE001
                 success = False
-                managed.online = False
                 self._classify_error(managed, f"auto reconnect lifecycle: {exc!r}")
-                self._mark_unavailable(managed)
+                self._record_reconnect_failure(managed)
                 self._log_device_error(
                     managed,
                     f"auto_reconnect_lifecycle:{type(exc).__name__}",
@@ -1214,7 +1265,7 @@ class DeviceManager:
     async def _attempt_reconnect(self, managed: _ManagedDevice) -> bool:
         """Close the stale client, build a new one, and verify local status."""
         device_id = managed.config["device_id"]
-        self._stop_listener(device_id)
+        await self._stop_listener(device_id)
         cached = dict(getattr(managed.client, "cached_dps", {}) or {})
         managed.diag.reconnect_attempts += 1
 
@@ -1234,8 +1285,6 @@ class DeviceManager:
             managed.client = fresh_client
             self._wire_client(managed)
             fresh_cache = getattr(fresh_client, "_cached_dps", None)
-            if isinstance(fresh_cache, dict):
-                fresh_cache.update(cached)
 
             try:
                 connected = bool(await fresh_client.connect())
@@ -1256,8 +1305,6 @@ class DeviceManager:
                 try:
                     raw_status = await fresh_client.status_with_fallback()
                     status = raw_status if isinstance(raw_status, dict) else {}
-                    if status and isinstance(fresh_cache, dict):
-                        fresh_cache.update(status)
                 except Exception as exc:  # noqa: BLE001
                     self._classify_error(managed, f"reconnect status: {exc!r}")
                     self._log_device_error(
@@ -1268,6 +1315,14 @@ class DeviceManager:
                         exc,
                         exc=exc,
                     )
+
+            # Preserve entity state only after the live verification.  If the
+            # old cache is copied first, status_with_fallback can mistake it
+            # for a successful response from the fresh session.
+            if isinstance(fresh_cache, dict):
+                fresh_cache.update(cached)
+                if status:
+                    fresh_cache.update(status)
 
         managed.diag.last_tx_hex = getattr(fresh_client, "last_tx_hex", "")
         managed.diag.last_rx_hex = getattr(fresh_client, "last_rx_hex", "")
@@ -1291,13 +1346,11 @@ class DeviceManager:
             return True
 
         if connected and bool(fresh_client.connected):
-            managed.online = False
-            managed.diag.consecutive_failures += 1
             self._classify_error(
                 managed, "empty status after reconnect; local recovery not verified"
             )
             managed.diag.last_error_class = ERR_EMPTY_STATUS
-            self._mark_unavailable(managed)
+            self._record_reconnect_failure(managed)
             self._log_device_error(
                 managed,
                 "reconnect_empty_status",
@@ -1307,12 +1360,10 @@ class DeviceManager:
             )
             return False
 
-        managed.online = False
-        managed.diag.consecutive_failures += 1
         reason = str(getattr(fresh_client, "last_failure_reason", "") or "unknown")
         detail = str(getattr(fresh_client, "last_failure_detail", "") or "")
         self._classify_error(managed, f"reconnect failed: {reason}: {detail}")
-        self._mark_unavailable(managed)
+        self._record_reconnect_failure(managed)
         self._log_device_error(
             managed,
             f"reconnect_failed:{reason}",
@@ -1340,6 +1391,21 @@ class DeviceManager:
         if managed.control_path != "cloud_fallback":
             managed.control_path = "unavailable"
             managed.diagnostic_reason = managed.diag.last_error_class
+
+    @staticmethod
+    def _record_reconnect_failure(managed: _ManagedDevice) -> None:
+        """Count a verified fresh-session failure and apply availability grace."""
+        managed.diag.consecutive_failures += 1
+        if (
+            managed.online
+            and managed.diag.consecutive_failures < _RECONNECT_FAILURE_THRESHOLD
+        ):
+            managed.local_status = "reconnecting"
+            if managed.control_path != "cloud_fallback":
+                managed.control_path = "local"
+            return
+        managed.online = False
+        DeviceManager._mark_unavailable(managed)
 
     @staticmethod
     def _log_device_error(

@@ -33,6 +33,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "-p no:homeassistant"
 testpaths = ["tests"]
 pythonpath = ["."]
 
