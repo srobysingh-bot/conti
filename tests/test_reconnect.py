@@ -315,6 +315,55 @@ async def test_reconnect_preserves_saved_manual_four_channel_map(
 
 
 @pytest.mark.asyncio
+async def test_reconnect_preserves_manual_curtain_map_without_discovery(
+    device_config: dict,
+) -> None:
+    manual_map = {
+        "15": {"key": "control", "type": "str", "values": ["open", "stop", "close"]},
+        "44": {"key": "position", "type": "int", "min": 0, "max": 100},
+        "45": {
+            "key": "current_position",
+            "type": "int",
+            "min": 0,
+            "max": 100,
+            "read_only": True,
+        },
+    }
+    config = {
+        **device_config,
+        "device_type": "curtain",
+        "dp_map": manual_map,
+        "dp_map_source": "manual",
+        "discovered_dps": {"15": "stop"},
+    }
+    stale = _client(connected=False)
+    fresh = _client(connected=True, dps={"15": "stop", "45": 50})
+    manager = DeviceManager()
+    await manager.start()
+
+    with (
+        patch(
+            "custom_components.conti.device_manager.TinyTuyaDevice",
+            side_effect=[stale, fresh],
+        ),
+        patch.object(manager, "detect_dps", AsyncMock()) as detect_dps,
+    ):
+        await manager.add_device(config)
+        assert await manager.reconnect_device(config["device_id"])
+
+    assert manager._devices[config["device_id"]].config["dp_map"] == manual_map
+    fresh.set_monitored_dp_ids.assert_called_once_with(["15", "44", "45"])
+    stale.detect_dps.assert_not_awaited()
+    fresh.detect_dps.assert_not_awaited()
+    detect_dps.assert_not_awaited()
+    assert (
+        manager.get_device_diagnostics(config["device_id"])["dp_map_source"]
+        == "manual"
+    )
+    await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_manual_dp_option_persists_reloads_and_becomes_effective() -> None:
     manual_map = {
         str(dp_id): {"key": f"switch_{dp_id}", "type": "bool"}

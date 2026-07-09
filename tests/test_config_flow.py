@@ -10,9 +10,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from custom_components.conti.config_flow import (
-    ContiConfigFlow,
+    _device_type_choices,
+    _device_type_from_cloud_category,
     _is_dali_cct_fallback,
     _test_device,
+)
+from custom_components.conti.const import (
+    DEVICE_TYPE_CURTAIN,
 )
 
 
@@ -392,6 +396,10 @@ class TestAutoDetectOrder:
             assert fv > 3.0
 
 
+def test_curtain_appears_in_config_flow_device_type_choices() -> None:
+    assert _device_type_choices()["curtain"] == "Curtain"
+
+
 class TestDaliFallback:
     @staticmethod
     def _cloud_map() -> dict:
@@ -435,3 +443,11 @@ class TestDaliFallback:
             )
             is False
         )
+
+
+class TestCurtainCloudCategory:
+    @pytest.mark.parametrize("category", ["cl", "clkg"])
+    def test_curtain_categories_select_curtain_device_type(
+        self, category: str
+    ) -> None:
+        assert _device_type_from_cloud_category(category) == DEVICE_TYPE_CURTAIN

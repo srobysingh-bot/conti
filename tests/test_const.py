@@ -33,9 +33,10 @@ class TestConstants:
         assert len(PLATFORMS) >= 1
         for p in PLATFORMS:
             assert isinstance(p, str)
+        assert "cover" in PLATFORMS
 
     def test_device_types(self) -> None:
-        expected = {"light", "fan", "climate", "switch", "sensor"}
+        expected = {"light", "fan", "climate", "switch", "sensor", "curtain"}
         assert set(SUPPORTED_DEVICE_TYPES) == expected
 
     def test_scan_interval_positive(self) -> None:

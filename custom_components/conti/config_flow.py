@@ -80,6 +80,7 @@ from .const import (
     CONF_ENABLE_AUTO_RECONNECT,
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
+    CONF_INVERT_POSITION,
     CONF_LOCAL_KEY,
     CONF_IR_BRAND,
     CONF_IR_BRAND_ID,
@@ -109,8 +110,10 @@ from .const import (
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_ENABLE_AUTO_RECONNECT,
+    DEFAULT_INVERT_POSITION,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
+    DEVICE_TYPE_CURTAIN,
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_IR,
     DEVICE_TYPE_SENSOR,
@@ -277,6 +280,23 @@ _LOW_POWER_SENSOR_PROFILE_IDS = {
     "sensor_motion",
     "sensor_temp_humidity",
 }
+
+_CURTAIN_CATEGORIES = {"cl", "clkg"}
+
+
+def _device_type_from_cloud_category(category: str) -> str | None:
+    """Return a Conti device type hint for high-confidence cloud categories."""
+    if category.strip().lower() in _CURTAIN_CATEGORIES:
+        return DEVICE_TYPE_CURTAIN
+    return None
+
+
+def _device_type_choices() -> dict[str, str]:
+    """Return user-facing labels for supported device types."""
+    return {
+        device_type: "Curtain" if device_type == DEVICE_TYPE_CURTAIN else device_type.title()
+        for device_type in SUPPORTED_DEVICE_TYPES
+    }
 
 IR_CATEGORIES = {
     "infrared",
@@ -462,7 +482,7 @@ def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Required(
                 CONF_DEVICE_TYPE,
                 default=d.get(CONF_DEVICE_TYPE, DEVICE_TYPE_LIGHT),
-            ): vol.In(SUPPORTED_DEVICE_TYPES),
+            ): vol.In(_device_type_choices()),
             vol.Required(
                 "onboarding_mode",
                 default=d.get("onboarding_mode", "smart_life"),
@@ -1486,6 +1506,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         category = str(candidate.get("category", "")).strip()
         if category:
             self._tuya_category = category
+            if type_hint := _device_type_from_cloud_category(category):
+                self._flow_data[CONF_DEVICE_TYPE] = type_hint
 
     @staticmethod
     def _is_ir_category(category: str) -> bool:
@@ -2723,6 +2745,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return
 
             cloud_map, category, _hint = TuyaCloudSchemaHelper.schema_to_dp_map(schema)
+            if _hint == DEVICE_TYPE_CURTAIN:
+                self._flow_data[CONF_DEVICE_TYPE] = DEVICE_TYPE_CURTAIN
             if cloud_map:
                 self._cloud_dp_map = cloud_map
                 self._mapping_source = "cloud"
@@ -2794,6 +2818,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     cloud_map, category, type_hint = helper.schema_to_dp_map(schema)
                     if category:
                         self._tuya_category = category
+                    if type_hint == DEVICE_TYPE_CURTAIN:
+                        self._flow_data[CONF_DEVICE_TYPE] = DEVICE_TYPE_CURTAIN
 
                     if cloud_map:
                         self._cloud_dp_map = cloud_map
@@ -3812,11 +3838,13 @@ def _options_with_manual_dp_map(
     *,
     verbose_logging: bool,
     enable_auto_reconnect: bool,
+    invert_position: bool = DEFAULT_INVERT_POSITION,
 ) -> dict[str, Any]:
     """Return persisted options for a user-edited DP map."""
     new_options = dict(current_options)
     new_options[CONF_VERBOSE_LOGGING] = verbose_logging
     new_options[CONF_ENABLE_AUTO_RECONNECT] = enable_auto_reconnect
+    new_options[CONF_INVERT_POSITION] = invert_position
     new_options[CONF_DP_MAP] = json.dumps(dp_map)
     new_options[CONF_MAPPING_SOURCE] = "manual"
     return new_options
@@ -3864,6 +3892,10 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         CONF_ENABLE_AUTO_RECONNECT,
                         DEFAULT_ENABLE_AUTO_RECONNECT,
                     ),
+                    invert_position=user_input.get(
+                        CONF_INVERT_POSITION,
+                        DEFAULT_INVERT_POSITION,
+                    ),
                 )
 
                 if user_input.get("rediscover_dps", False):
@@ -3907,6 +3939,9 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         current_auto_reconnect = self._entry.options.get(
             CONF_ENABLE_AUTO_RECONNECT, DEFAULT_ENABLE_AUTO_RECONNECT
         )
+        current_invert_position = self._entry.options.get(
+            CONF_INVERT_POSITION, DEFAULT_INVERT_POSITION
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -3919,6 +3954,10 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_ENABLE_AUTO_RECONNECT,
                         default=current_auto_reconnect,
+                    ): bool,
+                    vol.Optional(
+                        CONF_INVERT_POSITION,
+                        default=current_invert_position,
                     ): bool,
                     vol.Optional("rediscover_dps", default=False): bool,
                     vol.Optional("configure_external_on", default=False): bool,

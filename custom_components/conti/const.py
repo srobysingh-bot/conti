@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from homeassistant.const import Platform
+
 # ---------------------------------------------------------------------------
 # Integration identifiers
 # ---------------------------------------------------------------------------
@@ -23,6 +25,8 @@ CONF_DISCOVERED_DPS: Final = "discovered_dps"
 CONF_VERBOSE_LOGGING: Final = "verbose_logging"
 CONF_ENABLE_AUTO_RECONNECT: Final = "enable_auto_reconnect"
 DEFAULT_ENABLE_AUTO_RECONNECT: Final = False
+CONF_INVERT_POSITION: Final = "invert_position"
+DEFAULT_INVERT_POSITION: Final = False
 CONF_DEVICE_PROFILE: Final = "device_profile"  # profile id from device_profiles.py
 CONF_MAPPING_SOURCE: Final = "mapping_source"  # "auto" | "cloud" | "learn" | "manual"
 CONF_MAPPING_CONFIDENCE: Final = "mapping_confidence"  # 0.0–1.0
@@ -84,6 +88,7 @@ DEVICE_TYPE_FAN: Final = "fan"
 DEVICE_TYPE_CLIMATE: Final = "climate"
 DEVICE_TYPE_SWITCH: Final = "switch"
 DEVICE_TYPE_SENSOR: Final = "sensor"
+DEVICE_TYPE_CURTAIN: Final = "curtain"
 DEVICE_TYPE_IR: Final = "ir"
 
 SUPPORTED_DEVICE_TYPES: Final = [
@@ -92,6 +97,7 @@ SUPPORTED_DEVICE_TYPES: Final = [
     DEVICE_TYPE_CLIMATE,
     DEVICE_TYPE_SWITCH,
     DEVICE_TYPE_SENSOR,
+    DEVICE_TYPE_CURTAIN,
 ]
 
 # ---------------------------------------------------------------------------
@@ -114,7 +120,15 @@ DEFAULT_SCAN_INTERVAL: Final = 10  # seconds
 # ---------------------------------------------------------------------------
 # Platforms to forward
 # ---------------------------------------------------------------------------
-PLATFORMS: Final = ["light", "switch", "sensor", "fan", "climate", "remote"]
+PLATFORMS: Final = [
+    Platform.LIGHT,
+    Platform.SWITCH,
+    Platform.SENSOR,
+    Platform.FAN,
+    Platform.CLIMATE,
+    Platform.REMOTE,
+    Platform.COVER,
+]
 
 # ---------------------------------------------------------------------------
 # Storage
@@ -152,6 +166,16 @@ DP_KEY_DOOR_STATE: Final = "door_state"
 DP_KEY_ENERGY_TOTAL: Final = "energy_total"
 DP_KEY_CURRENT: Final = "current"
 DP_KEY_VOLTAGE: Final = "voltage"
+
+# Cover / curtain
+DP_KEY_CURTAIN_CONTROL: Final = "control"
+DP_KEY_CURTAIN_CONTROL_2: Final = "control_2"
+DP_KEY_CURTAIN_POSITION: Final = "position"
+DP_KEY_CURTAIN_CURRENT_POSITION: Final = "current_position"
+DP_KEY_CURTAIN_WORK_STATE: Final = "work_state"
+DP_KEY_CURTAIN_REVERSE: Final = "reverse"
+DP_KEY_CURTAIN_REVERSE_MODE: Final = "reverse_mode"
+DP_KEY_CURTAIN_CALIBRATION: Final = "calibration"
 
 # ---------------------------------------------------------------------------
 # Reconnect

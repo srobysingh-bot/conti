@@ -15,6 +15,7 @@ from typing import Any, Final
 
 from .const import (
     DEVICE_TYPE_CLIMATE,
+    DEVICE_TYPE_CURTAIN,
     DEVICE_TYPE_FAN,
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_SENSOR,
@@ -25,6 +26,14 @@ from .const import (
     DP_KEY_COLOR_TEMP,
     DP_KEY_CONTACT,
     DP_KEY_CURRENT,
+    DP_KEY_CURTAIN_CALIBRATION,
+    DP_KEY_CURTAIN_CONTROL,
+    DP_KEY_CURTAIN_CONTROL_2,
+    DP_KEY_CURTAIN_CURRENT_POSITION,
+    DP_KEY_CURTAIN_POSITION,
+    DP_KEY_CURTAIN_REVERSE,
+    DP_KEY_CURTAIN_REVERSE_MODE,
+    DP_KEY_CURTAIN_WORK_STATE,
     DP_KEY_DOOR_STATE,
     DP_KEY_CURRENT_TEMP,
     DP_KEY_ENERGY_TOTAL,
@@ -59,6 +68,14 @@ DP_KEY_ALIASES: Final[dict[str, str]] = {
     "colour_data": DP_KEY_COLOR_RGB,
     "colour_data_v2": DP_KEY_COLOR_RGB,
     "color_data": DP_KEY_COLOR_RGB,
+    "percent_control": DP_KEY_CURTAIN_POSITION,
+    "percent_state": DP_KEY_CURTAIN_CURRENT_POSITION,
+    "control": DP_KEY_CURTAIN_CONTROL,
+    "control_2": DP_KEY_CURTAIN_CONTROL_2,
+    "work_state": DP_KEY_CURTAIN_WORK_STATE,
+    "control_back": DP_KEY_CURTAIN_REVERSE,
+    "control_back_mode": DP_KEY_CURTAIN_REVERSE_MODE,
+    "cur_calibration": DP_KEY_CURTAIN_CALIBRATION,
 }
 
 # ---------------------------------------------------------------------------
@@ -116,12 +133,22 @@ SENSOR_HEURISTICS: Final[list[_HeuristicRule]] = [
     (["101", "102"],      DP_KEY_CONTACT,       "bool", False),
 ]
 
+CURTAIN_HEURISTICS: Final[list[_HeuristicRule]] = [
+    (["1", "101"], DP_KEY_CURTAIN_CONTROL, "str", False),
+    (["2", "3"], DP_KEY_CURTAIN_POSITION, "int", False),
+    (["3", "2"], DP_KEY_CURTAIN_CURRENT_POSITION, "int", False),
+    (["7", "102"], DP_KEY_CURTAIN_WORK_STATE, "str", False),
+    (["5", "103"], DP_KEY_CURTAIN_REVERSE, "bool", False),
+    (["6", "104"], DP_KEY_CURTAIN_REVERSE_MODE, "str", False),
+]
+
 _HEURISTIC_MAP: Final[dict[str, list[_HeuristicRule]]] = {
     DEVICE_TYPE_LIGHT:   LIGHT_HEURISTICS,
     DEVICE_TYPE_SWITCH:  SWITCH_HEURISTICS,
     DEVICE_TYPE_FAN:     FAN_HEURISTICS,
     DEVICE_TYPE_CLIMATE: CLIMATE_HEURISTICS,
     DEVICE_TYPE_SENSOR:  SENSOR_HEURISTICS,
+    DEVICE_TYPE_CURTAIN: CURTAIN_HEURISTICS,
 }
 
 
@@ -222,6 +249,12 @@ def auto_map_dps(
                     entry["min"] = 0
                     entry["max"] = 50
                     entry["scale"] = 1
+                elif role in (
+                    DP_KEY_CURTAIN_POSITION,
+                    DP_KEY_CURTAIN_CURRENT_POSITION,
+                ):
+                    entry["min"] = 0
+                    entry["max"] = 100
 
             result[dp_id] = entry
             if not multi:

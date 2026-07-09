@@ -43,3 +43,75 @@ def test_optional_light_dps_are_ignored_without_protocol_error() -> None:
         "color_temp",
     }
     assert set(dp_map) == {"20", "21", "22", "23"}
+
+
+def test_curtain_schema_maps_category_and_standard_codes() -> None:
+    schema = {
+        "category": "cl",
+        "functions": [
+            {
+                "dp_id": 15,
+                "code": "control",
+                "type": "Enum",
+                "values": '{"range": ["open", "stop", "close"]}',
+            },
+            {
+                "dp_id": 44,
+                "code": "percent_control",
+                "type": "Integer",
+                "values": '{"min": 0, "max": 100}',
+            },
+        ],
+        "status": [
+            {
+                "dp_id": 45,
+                "code": "percent_state",
+                "type": "Integer",
+                "values": '{"min": 0, "max": 100}',
+            },
+            {"dp_id": 46, "code": "work_state", "type": "Enum"},
+        ],
+    }
+
+    dp_map, category, device_type = TuyaCloudSchemaHelper.schema_to_dp_map(schema)
+
+    assert category == "cl"
+    assert device_type == "curtain"
+    assert dp_map == {
+        "15": {
+            "key": "control",
+            "type": "str",
+            "code": "control",
+            "values": ["open", "stop", "close"],
+        },
+        "44": {
+            "key": "position",
+            "type": "int",
+            "code": "percent_control",
+            "min": 0,
+            "max": 100,
+        },
+        "45": {
+            "key": "current_position",
+            "type": "int",
+            "code": "percent_state",
+            "read_only": True,
+            "min": 0,
+            "max": 100,
+        },
+        "46": {
+            "key": "work_state",
+            "type": "str",
+            "code": "work_state",
+            "read_only": True,
+        },
+    }
+
+
+def test_curtain_switch_category_maps_to_curtain() -> None:
+    _, category, device_type = TuyaCloudSchemaHelper.schema_to_dp_map(
+        {"category": "clkg", "functions": [], "status": []}
+    )
+
+    assert category == "clkg"
+    assert device_type == "curtain"

@@ -1150,14 +1150,14 @@ class TuyaCloudSchemaHelper:
 
         dp_map: dict[str, dict[str, Any]] = {}
 
-        # Process both functions and status DPs
-        all_dps: list[dict[str, Any]] = []
-        all_dps.extend(schema.get("functions", []))
-        all_dps.extend(schema.get("status", []))
+        # Process both function (writable) and status (reported/read-only) DPs.
+        all_dps: list[tuple[dict[str, Any], bool]] = []
+        all_dps.extend((dp_def, False) for dp_def in schema.get("functions", []))
+        all_dps.extend((dp_def, True) for dp_def in schema.get("status", []))
 
         seen_dp_ids: set[str] = set()
 
-        for dp_def in all_dps:
+        for dp_def, read_only in all_dps:
             code = dp_def.get("code", "")
             dp_id = str(dp_def.get("dp_id", ""))
 
@@ -1183,6 +1183,8 @@ class TuyaCloudSchemaHelper:
                 "type": conti_type,
                 "code": code,
             }
+            if read_only:
+                entry["read_only"] = True
 
             # Extract range constraints from values JSON
             values = dp_def.get("values", "")
@@ -1239,5 +1241,7 @@ def _category_to_device_type(category: str) -> str | None:
         "ywbj": "sensor",   # Smoke sensor
         "rqbj": "sensor",   # Gas sensor
         "sj": "sensor",     # Water leak sensor
+        "cl": "curtain",    # Curtain motor
+        "clkg": "curtain",  # Curtain switch
     }
     return _CAT_MAP.get(cat)

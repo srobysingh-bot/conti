@@ -19,6 +19,7 @@ from typing import Any, Final
 
 from .const import (
     DEVICE_TYPE_CLIMATE,
+    DEVICE_TYPE_CURTAIN,
     DEVICE_TYPE_FAN,
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_SENSOR,
@@ -29,6 +30,14 @@ from .const import (
     DP_KEY_COLOR_TEMP,
     DP_KEY_CONTACT,
     DP_KEY_CURRENT,
+    DP_KEY_CURTAIN_CALIBRATION,
+    DP_KEY_CURTAIN_CONTROL,
+    DP_KEY_CURTAIN_CONTROL_2,
+    DP_KEY_CURTAIN_CURRENT_POSITION,
+    DP_KEY_CURTAIN_POSITION,
+    DP_KEY_CURTAIN_REVERSE,
+    DP_KEY_CURTAIN_REVERSE_MODE,
+    DP_KEY_CURTAIN_WORK_STATE,
     DP_KEY_DOOR_STATE,
     DP_KEY_CURRENT_TEMP,
     DP_KEY_ENERGY_TOTAL,
@@ -135,6 +144,15 @@ TUYA_CODE_TO_CONTI_KEY: Final[dict[str, str]] = {
     "delay_alarm": "delay_alarm",
     "time_alarm": "time_alarm",
     "alarm_volume_value": "alarm_volume",
+    # Curtains / covers
+    "control": DP_KEY_CURTAIN_CONTROL,
+    "control_2": DP_KEY_CURTAIN_CONTROL_2,
+    "percent_control": DP_KEY_CURTAIN_POSITION,
+    "percent_state": DP_KEY_CURTAIN_CURRENT_POSITION,
+    "work_state": DP_KEY_CURTAIN_WORK_STATE,
+    "control_back": DP_KEY_CURTAIN_REVERSE,
+    "control_back_mode": DP_KEY_CURTAIN_REVERSE_MODE,
+    "cur_calibration": DP_KEY_CURTAIN_CALIBRATION,
 }
 
 # Type that maps Tuya code → expected Python type string
@@ -342,6 +360,28 @@ DEVICE_PROFILES: Final[list[dict[str, Any]]] = [
         },
     },
     # ── Temperature + Humidity Sensor ──
+    {
+        "id": "curtain_motor",
+        "name": "Curtain Motor",
+        "device_type": DEVICE_TYPE_CURTAIN,
+        "tuya_categories": ["cl", "clkg"],
+        "dp_template": {
+            "1": {
+                "key": DP_KEY_CURTAIN_CONTROL,
+                "type": "str",
+                "values": ["open", "stop", "close"],
+            },
+            "2": {"key": DP_KEY_CURTAIN_POSITION, "type": "int", "min": 0, "max": 100},
+            "3": {
+                "key": DP_KEY_CURTAIN_CURRENT_POSITION,
+                "type": "int",
+                "min": 0,
+                "max": 100,
+                "read_only": True,
+            },
+            "7": {"key": DP_KEY_CURTAIN_WORK_STATE, "type": "str"},
+        },
+    },
     {
         "id": "sensor_temp_humidity",
         "name": "Temperature & Humidity Sensor",

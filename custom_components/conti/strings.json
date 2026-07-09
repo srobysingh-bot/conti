@@ -211,6 +211,7 @@
           "dp_map": "DP Mapping (JSON)",
           "verbose_logging": "Enable verbose / debug logging",
           "enable_auto_reconnect": "Enable automatic reconnect",
+          "invert_position": "Invert curtain position",
           "rediscover_dps": "Re-discover DPs from device",
           "configure_external_on": "Configure External-ON Correction Profile"
         }

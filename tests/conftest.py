@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from enum import Enum, IntFlag
 import sys
+import types
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,6 +31,7 @@ _HA_MODULES = [
     "homeassistant.components",
     "homeassistant.components.remote",
     "homeassistant.components.climate",
+    "homeassistant.components.cover",
     "homeassistant.components.fan",
     "homeassistant.components.light",
     "homeassistant.components.sensor",
@@ -42,6 +45,63 @@ _HA_MODULES = [
 for _mod_name in _HA_MODULES:
     if _mod_name not in sys.modules:
         sys.modules[_mod_name] = MagicMock()
+
+
+class _Platform(str, Enum):
+    LIGHT = "light"
+    SWITCH = "switch"
+    SENSOR = "sensor"
+    FAN = "fan"
+    CLIMATE = "climate"
+    REMOTE = "remote"
+    COVER = "cover"
+
+
+class _CoverEntityFeature(IntFlag):
+    OPEN = 1
+    CLOSE = 2
+    SET_POSITION = 4
+    STOP = 8
+
+
+class _CoverDeviceClass(str, Enum):
+    CURTAIN = "curtain"
+
+
+class _CoverState(str, Enum):
+    CLOSED = "closed"
+    CLOSING = "closing"
+    OPEN = "open"
+    OPENING = "opening"
+
+
+class _CoverEntity:
+    pass
+
+
+class _CoordinatorEntity:
+    def __init__(self, coordinator=None) -> None:
+        self.coordinator = coordinator
+        self.hass = getattr(coordinator, "hass", MagicMock())
+
+    def async_write_ha_state(self) -> None:
+        return None
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        return cls
+
+
+sys.modules["homeassistant.const"].Platform = _Platform
+sys.modules[
+    "homeassistant.helpers.update_coordinator"
+].CoordinatorEntity = _CoordinatorEntity
+cover_mod = types.ModuleType("homeassistant.components.cover")
+cover_mod.CoverDeviceClass = _CoverDeviceClass
+cover_mod.CoverEntity = _CoverEntity
+cover_mod.CoverEntityFeature = _CoverEntityFeature
+cover_mod.CoverState = _CoverState
+sys.modules["homeassistant.components.cover"] = cover_mod
 
 # ---------------------------------------------------------------------------
 # Stub 'tinytuya' so the TinyTuyaDevice wrapper can be imported even
