@@ -27,6 +27,12 @@ _CONNECTION_FIELDS = (
     "online",
     "local_status",
     "protocol_version",
+    "offline_alert_enabled",
+    "offline_alert_sent",
+    "offline_since",
+    "offline_alert_reason",
+    "offline_alert_last_sent",
+    "developer_alert_notify_service",
 )
 
 

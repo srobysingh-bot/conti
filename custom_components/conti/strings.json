@@ -206,11 +206,16 @@
     "step": {
       "init": {
         "title": "Conti Device Options",
-        "description": "Edit the DP mapping, configure reconnect behavior, toggle debug logging, re-discover DPs, or open external-ON profile settings.",
+        "description": "Edit the DP mapping, reconnect behavior, optional developer offline alerts, debug logging, DP discovery, or external-ON profile settings.",
         "data": {
           "dp_map": "DP Mapping (JSON)",
           "verbose_logging": "Enable verbose / debug logging",
           "enable_auto_reconnect": "Enable automatic reconnect",
+          "enable_developer_offline_alerts": "Enable developer offline alerts",
+          "developer_alert_email": "Developer email address",
+          "developer_alert_notify_service": "Home Assistant notify service",
+          "offline_alert_delay_minutes": "Offline alert delay (minutes)",
+          "send_recovery_email": "Send a recovery email",
           "invert_position": "Invert curtain position",
           "rediscover_dps": "Re-discover DPs from device",
           "configure_external_on": "Configure External-ON Correction Profile"
@@ -262,6 +267,7 @@
     },
     "error": {
       "invalid_dp_map": "The DP mapping JSON is not valid.",
+      "developer_alert_destination_required": "Enter a developer email address or a Home Assistant notify service.",
       "ir_learning_failed": "IR learning failed. Make sure the captured payload is not empty or too short.",
       "ir_command_exists": "That IR command already exists. Enable overwrite to replace it."
     }

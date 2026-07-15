@@ -72,12 +72,15 @@ from .const import (
     CONF_CLOUD_ACCESS_SECRET,
     CONF_CLOUD_REGION,
     CONF_DETECTED_VERSION,
+    CONF_DEVELOPER_ALERT_EMAIL,
+    CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
     CONF_DEVICE_PROFILE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
     CONF_ENABLE_AUTO_RECONNECT,
+    CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
     CONF_INVERT_POSITION,
@@ -105,19 +108,27 @@ from .const import (
     CONF_NIGHT_END,
     CONF_NIGHT_KELVIN,
     CONF_NIGHT_START,
+    CONF_OFFLINE_ALERT_DELAY_MINUTES,
     CONF_PROTOCOL_VERSION,
     CONF_RUNTIME_CHANNEL,
+    CONF_SEND_RECOVERY_EMAIL,
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_ENABLE_AUTO_RECONNECT,
+    DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     DEFAULT_INVERT_POSITION,
+    DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
+    DEFAULT_SEND_RECOVERY_EMAIL,
     DEVICE_TYPE_CURTAIN,
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_IR,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
+    MAX_OFFLINE_ALERT_DELAY_MINUTES,
+    MIN_OFFLINE_ALERT_DELAY_MINUTES,
     RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
     RUNTIME_CHANNEL_IR,
@@ -3880,6 +3891,15 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
             except (json.JSONDecodeError, ValueError):
                 errors[CONF_DP_MAP] = "invalid_dp_map"
 
+            if (
+                user_input.get(CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS, False)
+                and not str(user_input.get(CONF_DEVELOPER_ALERT_EMAIL, "")).strip()
+                and not str(
+                    user_input.get(CONF_DEVELOPER_ALERT_NOTIFY_SERVICE, "")
+                ).strip()
+            ):
+                errors["base"] = "developer_alert_destination_required"
+
             if not errors:
                 from .dp_mapping import normalize_dp_map  # noqa: PLC0415
 
@@ -3896,6 +3916,38 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         CONF_INVERT_POSITION,
                         DEFAULT_INVERT_POSITION,
                     ),
+                )
+                new_options.update(
+                    {
+                        CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS: bool(
+                            user_input.get(
+                                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                                DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                            )
+                        ),
+                        CONF_DEVELOPER_ALERT_EMAIL: str(
+                            user_input.get(CONF_DEVELOPER_ALERT_EMAIL, "") or ""
+                        ).strip(),
+                        CONF_DEVELOPER_ALERT_NOTIFY_SERVICE: str(
+                            user_input.get(
+                                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                                DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                            )
+                            or ""
+                        ).strip(),
+                        CONF_OFFLINE_ALERT_DELAY_MINUTES: int(
+                            user_input.get(
+                                CONF_OFFLINE_ALERT_DELAY_MINUTES,
+                                DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+                            )
+                        ),
+                        CONF_SEND_RECOVERY_EMAIL: bool(
+                            user_input.get(
+                                CONF_SEND_RECOVERY_EMAIL,
+                                DEFAULT_SEND_RECOVERY_EMAIL,
+                            )
+                        ),
+                    }
                 )
 
                 if user_input.get("rediscover_dps", False):
@@ -3942,6 +3994,24 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         current_invert_position = self._entry.options.get(
             CONF_INVERT_POSITION, DEFAULT_INVERT_POSITION
         )
+        current_alerts_enabled = self._entry.options.get(
+            CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+            DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+        )
+        current_alert_email = self._entry.options.get(
+            CONF_DEVELOPER_ALERT_EMAIL, ""
+        )
+        current_notify_service = self._entry.options.get(
+            CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+            DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+        )
+        current_alert_delay = self._entry.options.get(
+            CONF_OFFLINE_ALERT_DELAY_MINUTES,
+            DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+        )
+        current_recovery_email = self._entry.options.get(
+            CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -3958,6 +4028,32 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_INVERT_POSITION,
                         default=current_invert_position,
+                    ): bool,
+                    vol.Optional(
+                        CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                        default=current_alerts_enabled,
+                    ): bool,
+                    vol.Optional(
+                        CONF_DEVELOPER_ALERT_EMAIL,
+                        default=current_alert_email,
+                    ): str,
+                    vol.Optional(
+                        CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                        default=current_notify_service,
+                    ): str,
+                    vol.Optional(
+                        CONF_OFFLINE_ALERT_DELAY_MINUTES,
+                        default=current_alert_delay,
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(
+                            min=MIN_OFFLINE_ALERT_DELAY_MINUTES,
+                            max=MAX_OFFLINE_ALERT_DELAY_MINUTES,
+                        ),
+                    ),
+                    vol.Optional(
+                        CONF_SEND_RECOVERY_EMAIL,
+                        default=current_recovery_email,
                     ): bool,
                     vol.Optional("rediscover_dps", default=False): bool,
                     vol.Optional("configure_external_on", default=False): bool,

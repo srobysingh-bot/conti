@@ -29,7 +29,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .const import (
     DEFAULT_ENABLE_AUTO_RECONNECT,
@@ -41,6 +41,9 @@ from .const import (
 )
 from .dp_mapping import mask_key
 from .tinytuya_client import TinyTuyaDevice
+
+if TYPE_CHECKING:
+    from .offline_alerts import OfflineAlertManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -144,13 +147,14 @@ class DeviceManager:
     Each device independently selects and locks its protocol version.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, alert_manager: OfflineAlertManager | None = None) -> None:
         self._devices: dict[str, _ManagedDevice] = {}
         # Per-device: *set* of callbacks so multiple listeners can register.
         self._state_callbacks: dict[
             str, set[Callable[[str, dict[str, Any]], None]]
         ] = {}
         self._running = False
+        self._alert_manager = alert_manager
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -179,6 +183,8 @@ class DeviceManager:
             await asyncio.gather(*listeners, return_exceptions=True)
         for dev in self._devices.values():
             await dev.client.close()
+        if self._alert_manager is not None:
+            await self._alert_manager.async_shutdown()
         self._devices.clear()
 
     # -- State callbacks (per-device, supports multiple listeners) -----------
@@ -242,6 +248,8 @@ class DeviceManager:
         Returns `True` if the initial connection **and** status succeeded.
         """
         device_id: str = config["device_id"]
+        if self._alert_manager is not None:
+            self._alert_manager.configure_device(device_id, config)
         if device_id in self._devices:
             _LOGGER.info("Device %s already managed - updating config", device_id)
             managed = self._devices[device_id]
@@ -335,11 +343,13 @@ class DeviceManager:
                         managed, "connection lost during initial status probing"
                     )
                     self._mark_unavailable(managed)
+                    self._device_offline(managed)
                     self._schedule_reconnect(device_id)
                 else:
                     # TCP alive — start push listener for near-instant
                     # RF / physical-button state updates.
                     self._start_listener(device_id)
+                    self._device_online(managed)
             else:
                 managed.online = False
                 managed.diag.consecutive_failures += 1
@@ -350,6 +360,7 @@ class DeviceManager:
                     f"initial connect failed: {reason}: {detail}",
                 )
                 self._mark_unavailable(managed)
+                self._device_offline(managed)
                 retry_note = (
                     "automatic retry enabled"
                     if config.get("enable_auto_reconnect", False)
@@ -383,6 +394,8 @@ class DeviceManager:
         if managed.cloud_refresh_task and not managed.cloud_refresh_task.done():
             managed.cloud_refresh_task.cancel()
         await managed.client.close()
+        if self._alert_manager is not None:
+            await self._alert_manager.remove_device(device_id)
         self._state_callbacks.pop(device_id, None)
         _LOGGER.info("Removed device %s from manager", device_id)
 
@@ -557,6 +570,7 @@ class DeviceManager:
             managed.diag.last_local_update = self._utc_now()
             managed.diag.consecutive_failures = 0
             self._clear_cloud_fallback(managed)
+            self._device_online(managed)
         else:
             if self._cloud_fallback_failure(managed):
                 self._activate_cloud_fallback(managed)
@@ -571,6 +585,7 @@ class DeviceManager:
                     f"rx={managed.client.last_rx_hex[:16]})",
                 )
                 self._mark_unavailable(managed)
+                self._device_offline(managed)
                 self._log_device_error(
                     managed,
                     "poll_connection_lost",
@@ -694,7 +709,7 @@ class DeviceManager:
             if isinstance(monitored, dict)
             else list((managed.config.get("dp_map") or {}).keys())
         )
-        return {
+        diagnostics = {
             "device_id": device_id,
             "host": client.ip,
             "device_ip": managed.config.get("host", client.ip),
@@ -732,6 +747,20 @@ class DeviceManager:
             "last_probe_failure_detail": client.last_failure_detail,
             "protocol_attempt_failures": client.attempt_failures,
         }
+        if self._alert_manager is not None:
+            diagnostics.update(self._alert_manager.get_diagnostics(device_id))
+        else:
+            diagnostics.update(
+                {
+                    "offline_alert_enabled": False,
+                    "offline_alert_sent": False,
+                    "offline_since": None,
+                    "offline_alert_reason": "",
+                    "offline_alert_last_sent": None,
+                    "developer_alert_notify_service": "notify.email",
+                }
+            )
+        return diagnostics
 
     def log_device_error(
         self,
@@ -791,6 +820,7 @@ class DeviceManager:
             managed.cloud_error_code or "none",
             managed.cloud_error_message or "Tuya cloud permission unavailable",
         )
+        self._device_offline(managed)
         return True
 
     @staticmethod
@@ -837,6 +867,7 @@ class DeviceManager:
             error_code,
             managed.config["device_id"],
         )
+        self._device_offline(managed)
 
     def _clear_cloud_fallback(self, managed: _ManagedDevice) -> None:
         if managed.control_path == "cloud_fallback":
@@ -933,6 +964,7 @@ class DeviceManager:
             return
         if managed and local and dps:
             managed.diag.last_local_update = self._utc_now()
+            self._device_online(managed)
         callbacks = self._state_callbacks.get(device_id)
         if callbacks:
             for cb in list(callbacks):
@@ -1025,6 +1057,7 @@ class DeviceManager:
                     if managed.control_path != "cloud_fallback":
                         managed.control_path = "local"
                         managed.diagnostic_reason = "session_or_query_rejected"
+                    self._device_offline(managed)
                     try:
                         await managed.client.close()
                     except Exception as exc:  # noqa: BLE001
@@ -1085,6 +1118,7 @@ class DeviceManager:
         if managed.control_path != "cloud_fallback":
             managed.control_path = "local"
             managed.diagnostic_reason = "session_or_query_rejected"
+        self._device_offline(managed)
         if was_online:
             _now = time.monotonic()
             if _now - managed._last_push_warn_time >= _PUSH_WARN_COOLDOWN:
@@ -1337,6 +1371,7 @@ class DeviceManager:
             managed.diag.last_local_update = self._utc_now()
             self._on_dp_update(device_id, status)
             self._start_listener(device_id)
+            self._device_online(managed)
             _LOGGER.info(
                 "Conti reconnect succeeded device=%s protocol=%s dps=%s",
                 device_id,
@@ -1392,8 +1427,7 @@ class DeviceManager:
             managed.control_path = "unavailable"
             managed.diagnostic_reason = managed.diag.last_error_class
 
-    @staticmethod
-    def _record_reconnect_failure(managed: _ManagedDevice) -> None:
+    def _record_reconnect_failure(self, managed: _ManagedDevice) -> None:
         """Count a verified fresh-session failure and apply availability grace."""
         managed.diag.consecutive_failures += 1
         if (
@@ -1403,9 +1437,27 @@ class DeviceManager:
             managed.local_status = "reconnecting"
             if managed.control_path != "cloud_fallback":
                 managed.control_path = "local"
+            self._device_offline(managed)
             return
         managed.online = False
         DeviceManager._mark_unavailable(managed)
+        self._device_offline(managed)
+
+    def _device_offline(self, managed: _ManagedDevice) -> None:
+        """Report a degraded/offline transition without touching reconnect flow."""
+        if self._alert_manager is not None:
+            self._alert_manager.device_offline(
+                managed.config["device_id"],
+                self.get_device_diagnostics(managed.config["device_id"]),
+            )
+
+    def _device_online(self, managed: _ManagedDevice) -> None:
+        """Cancel an offline episode after a verified local response."""
+        if self._alert_manager is not None:
+            self._alert_manager.device_online(
+                managed.config["device_id"],
+                self.get_device_diagnostics(managed.config["device_id"]),
+            )
 
     @staticmethod
     def _log_device_error(

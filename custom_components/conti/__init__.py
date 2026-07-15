@@ -36,11 +36,14 @@ from .const import (
     CONF_CLOUD_REGION,
     CONF_DEFERRED_LOCAL_CONNECT,
     CONF_DETECTED_VERSION,
+    CONF_DEVELOPER_ALERT_EMAIL,
+    CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
     CONF_DEVICE_ID,
     CONF_DEVICE_PROFILE,
     CONF_DEVICE_TYPE,
     CONF_DP_MAP,
     CONF_ENABLE_AUTO_RECONNECT,
+    CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     CONF_IR_BRAND,
     CONF_IR_BRAND_ID,
     CONF_IR_CATEGORY_ID,
@@ -52,12 +55,18 @@ from .const import (
     CONF_LOW_POWER_DEVICE,
     CONF_MAPPING_SOURCE,
     CONF_PROTOCOL_VERSION,
+    CONF_OFFLINE_ALERT_DELAY_MINUTES,
     CONF_RUNTIME_CHANNEL,
+    CONF_SEND_RECOVERY_EMAIL,
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_ENABLE_AUTO_RECONNECT,
+    DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+    DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
+    DEFAULT_SEND_RECOVERY_EMAIL,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     PLATFORMS,
@@ -214,6 +223,27 @@ def _effective_version(entry: ConfigEntry) -> str:
     ):
         return "3.4"
     return detected or configured
+
+
+def _device_area_name(
+    hass: HomeAssistant, entry: ConfigEntry, device_id: str
+) -> str:
+    """Return an existing HA area name when the device registry has one."""
+    try:
+        from homeassistant.helpers import area_registry as ar  # noqa: PLC0415
+        from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+        device = dr.async_get(hass).async_get_device(
+            identifiers={(DOMAIN, device_id)}
+        )
+        area_id = getattr(device, "area_id", None) if device else None
+        if area_id:
+            area = ar.async_get(hass).async_get_area(area_id)
+            if area:
+                return str(area.name)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.debug("Unable to resolve area for Conti device %s: %s", device_id, exc)
+    return str(getattr(entry, "area_id", "") or "")
 
 
 async def _load_dps_cache(hass: HomeAssistant, device_id: str) -> dict[str, Any]:
@@ -620,6 +650,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Lazy imports to avoid cascading import errors during config-flow loading.
     from .coordinator import ContiCoordinator  # noqa: PLC0415
     from .device_manager import DeviceManager  # noqa: PLC0415
+    from .offline_alerts import OfflineAlertManager  # noqa: PLC0415
 
     # --- Apply verbose logging from options --------------------------------
     if entry.options.get(CONF_VERBOSE_LOGGING, False):
@@ -628,7 +659,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # ---- Singleton DeviceManager ------------------------------------------
     if _MANAGER_KEY not in hass.data[DOMAIN]:
-        manager = DeviceManager()
+        manager = DeviceManager(OfflineAlertManager(hass))
         await manager.start()
         hass.data[DOMAIN][_MANAGER_KEY] = manager
         hass.data[DOMAIN][_REF_COUNT_KEY] = 0
@@ -666,6 +697,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_ENABLE_AUTO_RECONNECT, DEFAULT_ENABLE_AUTO_RECONNECT
             )
         ),
+        "enable_developer_offline_alerts": bool(
+            entry.options.get(
+                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+            )
+        ),
+        "developer_alert_email": str(
+            entry.options.get(CONF_DEVELOPER_ALERT_EMAIL, "") or ""
+        ).strip(),
+        "developer_alert_notify_service": str(
+            entry.options.get(
+                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+            )
+            or ""
+        ).strip(),
+        "offline_alert_delay_minutes": entry.options.get(
+            CONF_OFFLINE_ALERT_DELAY_MINUTES,
+            DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+        ),
+        "send_recovery_email": bool(
+            entry.options.get(
+                CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL
+            )
+        ),
+        "friendly_name": str(entry.title or device_id),
+        "area": _device_area_name(hass, entry, device_id),
         "ha_host_ip": ha_host_ip,
         "ha_host_subnet": ha_host_subnet,
     }
