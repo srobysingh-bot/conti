@@ -30,10 +30,20 @@ CONF_DEVELOPER_ALERT_EMAIL: Final = "developer_alert_email"
 CONF_DEVELOPER_ALERT_NOTIFY_SERVICE: Final = "developer_alert_notify_service"
 CONF_OFFLINE_ALERT_DELAY_MINUTES: Final = "offline_alert_delay_minutes"
 CONF_SEND_RECOVERY_EMAIL: Final = "send_recovery_email"
+CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS: Final = "use_global_offline_alert_settings"
+CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE: Final = (
+    "disable_offline_alerts_for_this_device"
+)
+CONF_ENTRY_TYPE: Final = "entry_type"
+ENTRY_TYPE_GLOBAL_SETTINGS: Final = "global_settings"
+GLOBAL_SETTINGS_ENTRY_TITLE: Final = "Conti Global Settings"
+GLOBAL_SETTINGS_UNIQUE_ID: Final = "conti_global_settings"
 DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS: Final = False
 DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE: Final = "notify.email"
 DEFAULT_OFFLINE_ALERT_DELAY_MINUTES: Final = 5
 DEFAULT_SEND_RECOVERY_EMAIL: Final = False
+DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS: Final = True
+DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE: Final = False
 MIN_OFFLINE_ALERT_DELAY_MINUTES: Final = 1
 MAX_OFFLINE_ALERT_DELAY_MINUTES: Final = 60
 CONF_INVERT_POSITION: Final = "invert_position"

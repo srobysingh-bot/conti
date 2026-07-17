@@ -2,18 +2,26 @@
   "config": {
     "step": {
       "user": {
-        "title": "Add Tuya Device",
-        "description": "Enter basic device info and choose how you want to set up the device. Smart Life login is the easiest — Conti stores your credentials once and auto-discovers devices from your account.",
+        "title": "Set up Conti",
+        "description": "Choose whether to configure integration-wide offline alerts or add a Conti device.",
+        "data": {
+          "onboarding_mode": "Onboarding Method"
+        },
+        "data_description": {
+          "onboarding_mode": "Global Settings configures offline alerts once. Device methods continue with normal Conti onboarding."
+        }
+      },
+      "device_details": {
+        "title": "Add Conti Device",
+        "description": "Enter basic device information. Smart Life and cloud-assisted setup can discover the local address later.",
         "data": {
           "name": "Device Name",
           "host": "Device IP Address",
           "port": "Port (default 6668)",
-          "device_type": "Device Type",
-          "onboarding_mode": "Onboarding Method"
+          "device_type": "Device Type"
         },
         "data_description": {
-          "host": "Local IP address of the device on your home network. Leave blank in Smart Life / cloud-assisted mode — Conti will try to detect it automatically.",
-          "onboarding_mode": "Smart Life: log in once, devices auto-discovered. IR Device: add a Tuya IR hub and store its command library locally. Cloud-assisted (legacy): enter project credentials per session. Manual: enter credentials yourself (advanced)."
+          "host": "Local IP address of the device. Leave blank for Smart Life or cloud-assisted setup."
         }
       },
       "oauth_login": {
@@ -69,6 +77,17 @@
         "data_description": {
           "device_id": "Unique device identifier from Tuya IoT Platform.",
           "local_key": "16-character encryption key from Tuya IoT Platform."
+        }
+      },
+      "global_settings": {
+        "title": "Conti Global Settings",
+        "description": "Configure developer offline alerts once for all Conti devices. Alerts are disabled by default.",
+        "data": {
+          "enable_developer_offline_alerts": "Enable developer offline alerts for all Conti devices",
+          "developer_alert_email": "Developer email",
+          "developer_alert_notify_service": "Notify service",
+          "offline_alert_delay_minutes": "Offline alert delay minutes",
+          "send_recovery_email": "Send recovery email"
         }
       },
       "cloud_pick_device": {
@@ -206,19 +225,27 @@
     "step": {
       "init": {
         "title": "Conti Device Options",
-        "description": "Edit the DP mapping, reconnect behavior, optional developer offline alerts, debug logging, DP discovery, or external-ON profile settings.",
+        "description": "Edit device settings and choose whether this device uses the integration-wide offline alert configuration.",
         "data": {
           "dp_map": "DP Mapping (JSON)",
           "verbose_logging": "Enable verbose / debug logging",
           "enable_auto_reconnect": "Enable automatic reconnect",
-          "enable_developer_offline_alerts": "Enable developer offline alerts",
-          "developer_alert_email": "Developer email address",
-          "developer_alert_notify_service": "Home Assistant notify service",
-          "offline_alert_delay_minutes": "Offline alert delay (minutes)",
-          "send_recovery_email": "Send a recovery email",
+          "use_global_offline_alert_settings": "Use global offline alert settings",
+          "disable_offline_alerts_for_this_device": "Disable alerts for this device",
           "invert_position": "Invert curtain position",
           "rediscover_dps": "Re-discover DPs from device",
           "configure_external_on": "Configure External-ON Correction Profile"
+        }
+      },
+      "global_alerts": {
+        "title": "Developer offline alerts",
+        "description": "These settings apply to every Conti device unless alerts are disabled for that device.",
+        "data": {
+          "enable_developer_offline_alerts": "Enable developer offline alerts for all Conti devices",
+          "developer_alert_email": "Developer email",
+          "developer_alert_notify_service": "Notify service",
+          "offline_alert_delay_minutes": "Offline alert delay minutes",
+          "send_recovery_email": "Send recovery email"
         }
       },
       "external_on": {

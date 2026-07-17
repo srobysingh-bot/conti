@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -43,7 +44,7 @@ from .dp_mapping import mask_key
 from .tinytuya_client import TinyTuyaDevice
 
 if TYPE_CHECKING:
-    from .offline_alerts import OfflineAlertManager
+    from .offline_alerts import OfflineAlertConfig, OfflineAlertManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -155,6 +156,22 @@ class DeviceManager:
         ] = {}
         self._running = False
         self._alert_manager = alert_manager
+
+    def set_offline_alert_config(
+        self,
+        config: OfflineAlertConfig | Mapping[str, Any] | None,
+        *,
+        available: bool = True,
+    ) -> None:
+        """Update the shared integration-wide offline alert configuration."""
+        if self._alert_manager is not None:
+            self._alert_manager.configure_global(config, available=available)
+
+    def get_global_offline_alert_diagnostics(self) -> dict[str, Any]:
+        """Return redacted global offline alert diagnostics."""
+        if self._alert_manager is None:
+            return {}
+        return self._alert_manager.get_global_diagnostics()
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -753,6 +770,8 @@ class DeviceManager:
             diagnostics.update(
                 {
                     "offline_alert_enabled": False,
+                    "using_global_alert_settings": False,
+                    "alerts_disabled_for_this_device": False,
                     "offline_alert_sent": False,
                     "offline_since": None,
                     "offline_alert_reason": "",

@@ -7,10 +7,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.conti import (
+    _GLOBAL_ALERT_CONFIG_KEY,
+    _MANAGER_KEY,
+    async_setup_entry,
+    async_unload_entry,
+)
+from custom_components.conti.const import (
+    CONF_ENTRY_TYPE,
+    DOMAIN,
+    ENTRY_TYPE_GLOBAL_SETTINGS,
+)
 from custom_components.conti.device_manager import DeviceManager
+from custom_components.conti.diagnostics import async_get_config_entry_diagnostics
 from custom_components.conti.offline_alerts import (
+    OfflineAlertConfig,
     OfflineAlertManager,
     map_offline_reason,
+    offline_alert_config_from_mapping,
 )
 
 
@@ -110,6 +124,208 @@ async def test_offline_past_delay_sends_one_email() -> None:
     assert data["target"] == ["developer@example.com"]
     assert data["title"] == "Conti Alert: Device offline - Kitchen Plug"
     assert "Reconnect attempts: 3" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_one_global_config_applies_to_multiple_devices() -> None:
+    hass = _Hass()
+    manager = OfflineAlertManager(
+        hass,
+        config=_config(
+            developer_alert_email="global@example.com",
+            offline_alert_delay_minutes=5,
+        ),
+        sleep_func=_immediate_sleep,
+    )
+    manager.configure_device(
+        "device-1",
+        _config(
+            friendly_name="Kitchen Plug",
+            developer_alert_email="legacy-one@example.com",
+        ),
+    )
+    manager.configure_device(
+        "device-2",
+        _config(
+            friendly_name="Office Plug",
+            developer_alert_email="legacy-two@example.com",
+        ),
+    )
+
+    manager.device_offline("device-1", _diagnostics())
+    manager.device_offline("device-2", _diagnostics())
+    await asyncio.gather(
+        manager._states["device-1"].alert_task,
+        manager._states["device-2"].alert_task,
+    )
+
+    assert len(hass.services.calls) == 2
+    assert {call[2]["target"][0] for call in hass.services.calls} == {
+        "global@example.com"
+    }
+    assert {call[2]["title"] for call in hass.services.calls} == {
+        "Conti Alert: Device offline - Kitchen Plug",
+        "Conti Alert: Device offline - Office Plug",
+    }
+
+
+@pytest.mark.asyncio
+async def test_device_alert_override_does_not_affect_other_devices() -> None:
+    hass = _Hass()
+    manager = OfflineAlertManager(
+        hass,
+        config=_config(offline_alert_delay_minutes=5),
+        sleep_func=_immediate_sleep,
+    )
+    manager.configure_device(
+        "disabled",
+        _config(disable_offline_alerts_for_this_device=True),
+    )
+    manager.configure_device("enabled", _config(friendly_name="Enabled Device"))
+
+    manager.device_offline("disabled", _diagnostics())
+    manager.device_offline("enabled", _diagnostics())
+    await _wait_for_alert(manager, "enabled")
+
+    assert len(hass.services.calls) == 1
+    assert hass.services.calls[0][2]["title"].endswith("Enabled Device")
+    disabled = manager.get_diagnostics("disabled")
+    assert disabled["alerts_disabled_for_this_device"] is True
+    assert disabled["offline_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_disabled_global_config_takes_precedence_over_legacy_device_options() -> None:
+    hass = _Hass()
+    manager = OfflineAlertManager(
+        hass,
+        config=OfflineAlertConfig(enabled=False),
+        sleep_func=_immediate_sleep,
+    )
+    manager.configure_device("device-1", _config())
+    manager.device_offline("device-1", _diagnostics())
+    await asyncio.sleep(0)
+
+    assert hass.services.calls == []
+    diagnostics = manager.get_diagnostics("device-1")
+    assert diagnostics["using_global_alert_settings"] is True
+    assert diagnostics["offline_alert_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_per_device_alert_options_work_without_global_config() -> None:
+    hass = _Hass()
+    manager = OfflineAlertManager(hass, sleep_func=_immediate_sleep)
+    manager.configure_device("device-1", _config())
+    manager.device_offline("device-1", _diagnostics())
+    await _wait_for_alert(manager, "device-1")
+
+    assert hass.services.calls[0][2]["target"] == ["developer@example.com"]
+    assert manager.get_diagnostics("device-1")["using_global_alert_settings"] is False
+
+
+def test_global_alert_defaults_are_safe_and_redacted() -> None:
+    config = offline_alert_config_from_mapping({})
+    assert config.enabled is False
+    assert config.delay_minutes == 5
+
+    manager = OfflineAlertManager(
+        _Hass(),
+        config=_config(developer_alert_email="private@example.com"),
+    )
+    diagnostics = manager.get_global_diagnostics()
+    assert diagnostics == {
+        "global_offline_alerts_enabled": True,
+        "global_offline_alert_delay_minutes": 1.0,
+        "global_notify_service": "notify.email",
+        "global_recovery_email_enabled": False,
+        "developer_alert_email": "**REDACTED**",
+    }
+    assert "private@example.com" not in str(diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_global_entry_diagnostics_redact_developer_email() -> None:
+    entry = MagicMock()
+    entry.data = {
+        CONF_ENTRY_TYPE: ENTRY_TYPE_GLOBAL_SETTINGS,
+        **_config(developer_alert_email="private@example.com"),
+    }
+    entry.options = {}
+
+    diagnostics = await async_get_config_entry_diagnostics(MagicMock(), entry)
+
+    assert diagnostics["global_offline_alerts_enabled"] is True
+    assert diagnostics["global_offline_alert_delay_minutes"] == 1
+    assert diagnostics["global_notify_service"] == "notify.email"
+    assert diagnostics["global_recovery_email_enabled"] is False
+    assert diagnostics["developer_alert_email"] == "**REDACTED**"
+    assert "private@example.com" not in str(diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_global_entry_restart_setup_never_enters_device_runtime() -> None:
+    entry = MagicMock()
+    entry.entry_id = "conti-global"
+    entry.data = {CONF_ENTRY_TYPE: ENTRY_TYPE_GLOBAL_SETTINGS}
+    entry.options = {
+        "enable_developer_offline_alerts": True,
+        "developer_alert_email": "developer@example.com",
+        "developer_alert_notify_service": "notify.email",
+        "offline_alert_delay_minutes": 5,
+        "send_recovery_email": False,
+    }
+
+    with (
+        patch(
+            "custom_components.conti.device_manager.DeviceManager.add_device",
+            new_callable=AsyncMock,
+        ) as add_device,
+        patch("custom_components.conti.device_manager.TinyTuyaDevice") as tiny_client,
+    ):
+        # Two fresh hass objects model initial setup followed by a restart.
+        for _ in range(2):
+            hass = MagicMock()
+            hass.data = {}
+            hass.config_entries.async_forward_entry_setups = AsyncMock()
+            hass.config_entries.async_unload_platforms = AsyncMock()
+
+            assert await async_setup_entry(hass, entry)
+            assert isinstance(
+                hass.data[DOMAIN][_GLOBAL_ALERT_CONFIG_KEY],
+                OfflineAlertConfig,
+            )
+            assert _MANAGER_KEY not in hass.data[DOMAIN]
+            hass.config_entries.async_forward_entry_setups.assert_not_awaited()
+
+            assert await async_unload_entry(hass, entry)
+            hass.config_entries.async_unload_platforms.assert_not_awaited()
+
+        add_device.assert_not_awaited()
+        tiny_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_global_entry_updates_existing_manager_shared_config_only() -> None:
+    shared_manager = MagicMock()
+    entry = MagicMock()
+    entry.entry_id = "conti-global"
+    entry.data = {CONF_ENTRY_TYPE: ENTRY_TYPE_GLOBAL_SETTINGS}
+    entry.options = {
+        "enable_developer_offline_alerts": True,
+        "developer_alert_email": "developer@example.com",
+    }
+    hass = MagicMock()
+    hass.data = {DOMAIN: {_MANAGER_KEY: shared_manager}}
+
+    assert await async_setup_entry(hass, entry)
+
+    config = shared_manager.set_offline_alert_config.call_args.args[0]
+    assert isinstance(config, OfflineAlertConfig)
+    assert config.enabled is True
+    assert config.email == "developer@example.com"
+    assert not hasattr(config, "host")
+    assert not hasattr(config, "local_key")
 
 
 @pytest.mark.asyncio

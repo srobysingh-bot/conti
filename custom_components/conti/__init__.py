@@ -38,12 +38,14 @@ from .const import (
     CONF_DETECTED_VERSION,
     CONF_DEVELOPER_ALERT_EMAIL,
     CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     CONF_DEVICE_ID,
     CONF_DEVICE_PROFILE,
     CONF_DEVICE_TYPE,
     CONF_DP_MAP,
     CONF_ENABLE_AUTO_RECONNECT,
     CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+    CONF_ENTRY_TYPE,
     CONF_IR_BRAND,
     CONF_IR_BRAND_ID,
     CONF_IR_CATEGORY_ID,
@@ -58,17 +60,17 @@ from .const import (
     CONF_OFFLINE_ALERT_DELAY_MINUTES,
     CONF_RUNTIME_CHANNEL,
     CONF_SEND_RECOVERY_EMAIL,
+    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_ENABLE_AUTO_RECONNECT,
-    DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
-    DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
-    DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+    DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
-    DEFAULT_SEND_RECOVERY_EMAIL,
+    DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
+    ENTRY_TYPE_GLOBAL_SETTINGS,
     PLATFORMS,
     RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
@@ -85,6 +87,30 @@ _OAUTH_KEY = "oauth_manager"
 _IR_MANAGER_KEY = "ir_manager"
 _IR_SERVICES_REGISTERED = "ir_services_registered"
 _RECONNECT_SERVICES_REGISTERED = "reconnect_services_registered"
+_GLOBAL_ALERT_CONFIG_KEY = "global_offline_alert_config"
+
+
+def _is_global_settings_entry(entry: ConfigEntry) -> bool:
+    """Return whether this entry owns integration-wide settings only."""
+    return entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_GLOBAL_SETTINGS
+
+
+def _global_alert_values(entry: ConfigEntry) -> dict[str, Any]:
+    """Return global alert values with options taking precedence over data."""
+    values = dict(entry.data)
+    values.update(entry.options)
+    return values
+
+
+def _find_global_alert_values(hass: HomeAssistant) -> dict[str, Any] | None:
+    """Find the single persisted global settings source, if configured."""
+    entries = getattr(hass.config_entries, "async_entries", None)
+    if not callable(entries):
+        return None
+    for candidate in entries(DOMAIN):
+        if _is_global_settings_entry(candidate):
+            return _global_alert_values(candidate)
+    return None
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -548,6 +574,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
+    if _is_global_settings_entry(entry):
+        from .offline_alerts import (  # noqa: PLC0415
+            offline_alert_config_from_mapping,
+        )
+
+        config = offline_alert_config_from_mapping(_global_alert_values(entry))
+        hass.data[DOMAIN][_GLOBAL_ALERT_CONFIG_KEY] = config
+        hass.data[DOMAIN][entry.entry_id] = {
+            "global_settings": True,
+            "offline_alert_config": config,
+        }
+        manager = hass.data[DOMAIN].get(_MANAGER_KEY)
+        if manager is not None:
+            manager.set_offline_alert_config(config)
+        _LOGGER.info("Set up Conti Global Settings")
+        return True
+
     if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
         from .ir_cloud import TuyaIRCloud  # noqa: PLC0415
         from .ir_manager import IRManager  # noqa: PLC0415
@@ -659,7 +702,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # ---- Singleton DeviceManager ------------------------------------------
     if _MANAGER_KEY not in hass.data[DOMAIN]:
-        manager = DeviceManager(OfflineAlertManager(hass))
+        global_config = hass.data[DOMAIN].get(_GLOBAL_ALERT_CONFIG_KEY)
+        if global_config is None:
+            global_config = _find_global_alert_values(hass)
+        manager = DeviceManager(OfflineAlertManager(hass, config=global_config))
         await manager.start()
         hass.data[DOMAIN][_MANAGER_KEY] = manager
         hass.data[DOMAIN][_REF_COUNT_KEY] = 0
@@ -697,29 +743,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 CONF_ENABLE_AUTO_RECONNECT, DEFAULT_ENABLE_AUTO_RECONNECT
             )
         ),
-        "enable_developer_offline_alerts": bool(
+        "use_global_offline_alert_settings": bool(
             entry.options.get(
-                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
-                DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
+                DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
             )
         ),
-        "developer_alert_email": str(
-            entry.options.get(CONF_DEVELOPER_ALERT_EMAIL, "") or ""
-        ).strip(),
-        "developer_alert_notify_service": str(
+        "disable_offline_alerts_for_this_device": bool(
             entry.options.get(
-                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
-                DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
-            )
-            or ""
-        ).strip(),
-        "offline_alert_delay_minutes": entry.options.get(
-            CONF_OFFLINE_ALERT_DELAY_MINUTES,
-            DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
-        ),
-        "send_recovery_email": bool(
-            entry.options.get(
-                CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL
+                CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+                DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
             )
         ),
         "friendly_name": str(entry.title or device_id),
@@ -727,6 +760,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ha_host_ip": ha_host_ip,
         "ha_host_subnet": ha_host_subnet,
     }
+    # Existing per-device alert values remain a temporary fallback only when
+    # there is no global settings entry. They are not copied to new entries.
+    for legacy_key in (
+        CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+        CONF_DEVELOPER_ALERT_EMAIL,
+        CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+        CONF_OFFLINE_ALERT_DELAY_MINUTES,
+        CONF_SEND_RECOVERY_EMAIL,
+    ):
+        if legacy_key in entry.options:
+            device_config[legacy_key] = entry.options[legacy_key]
 
     low_power_sensor = bool(
         entry.data.get(CONF_LOW_POWER_DEVICE, False)
@@ -1029,6 +1073,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Conti config entry — disconnect device and clean up."""
+    if _is_global_settings_entry(entry):
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        hass.data.get(DOMAIN, {}).pop(_GLOBAL_ALERT_CONFIG_KEY, None)
+        manager = hass.data.get(DOMAIN, {}).get(_MANAGER_KEY)
+        if manager is not None:
+            # Keep global precedence disabled during reload/removal so legacy
+            # device settings cannot unexpectedly start a pending alert.
+            manager.set_offline_alert_config({}, available=True)
+        _LOGGER.info("Unloaded Conti Global Settings")
+        return True
+
     platforms = (
         [Platform.REMOTE, Platform.CLIMATE]
         if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR

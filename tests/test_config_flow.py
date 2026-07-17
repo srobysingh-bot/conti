@@ -4,20 +4,60 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import voluptuous as vol
 
 from custom_components.conti.config_flow import (
     _device_type_choices,
     _device_type_from_cloud_category,
+    _global_offline_alert_schema,
     _is_dali_cct_fallback,
     _test_device,
+    _user_schema,
 )
 from custom_components.conti.const import (
+    CONF_DEVELOPER_ALERT_EMAIL,
+    CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    CONF_DEVICE_TYPE,
+    CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+    CONF_OFFLINE_ALERT_DELAY_MINUTES,
+    CONF_SEND_RECOVERY_EMAIL,
+    DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+    DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
     DEVICE_TYPE_CURTAIN,
 )
+
+
+def test_global_onboarding_selection_has_no_device_fields() -> None:
+    values = _user_schema()({"onboarding_mode": "global_settings"})
+
+    assert values == {"onboarding_mode": "global_settings"}
+    assert CONF_DEVICE_TYPE not in values
+    for device_field in ("name", "host", "port", "local_key", "protocol_version", "dp_map"):
+        assert device_field not in values
+
+
+def test_global_alert_options_schema_has_safe_defaults() -> None:
+    schema = _global_offline_alert_schema()
+    values = schema({})
+
+    assert values[CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS] is False
+    assert values[CONF_OFFLINE_ALERT_DELAY_MINUTES] == 5
+    assert values[CONF_DEVELOPER_ALERT_EMAIL] == ""
+    assert values[CONF_DEVELOPER_ALERT_NOTIFY_SERVICE] == "notify.email"
+    assert values[CONF_SEND_RECOVERY_EMAIL] is False
+    assert DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS is False
+    assert DEFAULT_OFFLINE_ALERT_DELAY_MINUTES == 5
+
+
+@pytest.mark.parametrize("delay", [0, 61])
+def test_global_alert_delay_schema_rejects_out_of_range(delay: int) -> None:
+    with pytest.raises(vol.Invalid):
+        _global_offline_alert_schema()(
+            {CONF_OFFLINE_ALERT_DELAY_MINUTES: delay}
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -14,10 +14,19 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_DEVELOPER_ALERT_EMAIL,
+    CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+    CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+    CONF_OFFLINE_ALERT_DELAY_MINUTES,
+    CONF_SEND_RECOVERY_EMAIL,
+    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
     DEFAULT_SEND_RECOVERY_EMAIL,
+    DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     ERROR_LOG_COOLDOWN,
 )
 
@@ -73,19 +82,28 @@ class OfflineReason:
 
 @dataclass(frozen=True, slots=True)
 class OfflineAlertConfig:
-    """Sanitized per-device alert configuration."""
+    """One sanitized alert configuration shared by all Conti devices."""
 
     enabled: bool = DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS
     email: str = ""
     notify_service: str = DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE
     delay_minutes: float = DEFAULT_OFFLINE_ALERT_DELAY_MINUTES
     send_recovery_email: bool = DEFAULT_SEND_RECOVERY_EMAIL
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceOfflineAlertConfig:
+    """Non-secret per-device metadata and alert override flags."""
+
+    use_global_settings: bool = DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS
+    alerts_disabled: bool = DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE
     friendly_name: str = ""
     area: str = ""
     device_type: str = "unknown"
     host: str = "unknown"
     protocol_version: str = "unknown"
     auto_reconnect: bool = False
+    legacy_config: OfflineAlertConfig | None = None
 
 
 @dataclass(slots=True)
@@ -99,6 +117,40 @@ class OfflineAlertState:
     last_reason: str = "unknown"
     last_recovery_time: datetime | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+def offline_alert_config_from_mapping(config: Mapping[str, Any]) -> OfflineAlertConfig:
+    """Build a clamped global alert configuration from stored values."""
+    try:
+        delay_minutes = float(
+            config.get(
+                CONF_OFFLINE_ALERT_DELAY_MINUTES,
+                DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+            )
+        )
+    except (TypeError, ValueError):
+        delay_minutes = float(DEFAULT_OFFLINE_ALERT_DELAY_MINUTES)
+    delay_minutes = min(60.0, max(1.0, delay_minutes))
+    return OfflineAlertConfig(
+        enabled=bool(
+            config.get(
+                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+            )
+        ),
+        email=str(config.get(CONF_DEVELOPER_ALERT_EMAIL, "") or "").strip(),
+        notify_service=str(
+            config.get(
+                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+            )
+            or ""
+        ).strip(),
+        delay_minutes=delay_minutes,
+        send_recovery_email=bool(
+            config.get(CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL)
+        ),
+    )
 
 
 def map_offline_reason(diagnostics: Mapping[str, Any] | str | None) -> OfflineReason:
@@ -154,53 +206,79 @@ class OfflineAlertManager:
         self,
         hass: HomeAssistant,
         *,
+        config: OfflineAlertConfig | Mapping[str, Any] | None = None,
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._hass = hass
         self._sleep = sleep_func
-        self._configs: dict[str, OfflineAlertConfig] = {}
+        self._global_config = (
+            config
+            if isinstance(config, OfflineAlertConfig)
+            else offline_alert_config_from_mapping(config or {})
+        )
+        self._global_config_available = config is not None
+        self._configs: dict[str, DeviceOfflineAlertConfig] = {}
         self._states: dict[str, OfflineAlertState] = {}
         self._warning_times: dict[str, float] = {}
         self._tasks_by_device: dict[str, set[asyncio.Task[None]]] = {}
 
+    def configure_global(
+        self,
+        config: OfflineAlertConfig | Mapping[str, Any] | None,
+        *,
+        available: bool = True,
+    ) -> None:
+        """Replace the integration-wide config without starting new alerts."""
+        self._global_config = (
+            config
+            if isinstance(config, OfflineAlertConfig)
+            else offline_alert_config_from_mapping(config or {})
+        )
+        self._global_config_available = available
+        for device_id in self._states:
+            self._cancel_pending_if_disabled(device_id)
+
     def configure_device(self, device_id: str, config: Mapping[str, Any]) -> None:
-        """Store only values that are safe and necessary for notifications."""
-        try:
-            delay_minutes = float(
+        """Store device metadata, overrides, and temporary legacy fallback."""
+        legacy_keys = {
+            CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+            CONF_DEVELOPER_ALERT_EMAIL,
+            CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+            CONF_OFFLINE_ALERT_DELAY_MINUTES,
+            CONF_SEND_RECOVERY_EMAIL,
+        }
+        legacy_config = (
+            offline_alert_config_from_mapping(config)
+            if any(key in config for key in legacy_keys)
+            else None
+        )
+        self._configs[device_id] = DeviceOfflineAlertConfig(
+            use_global_settings=bool(
                 config.get(
-                    "offline_alert_delay_minutes",
-                    DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+                    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
+                    DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
                 )
-            )
-        except (TypeError, ValueError):
-            delay_minutes = float(DEFAULT_OFFLINE_ALERT_DELAY_MINUTES)
-        # Config flow enforces this range; clamping also protects hand-edited
-        # or migrated config entries from creating unsafe timers.
-        delay_minutes = min(60.0, max(1.0, delay_minutes))
-        self._configs[device_id] = OfflineAlertConfig(
-            enabled=bool(config.get("enable_developer_offline_alerts", False)),
-            email=str(config.get("developer_alert_email", "") or "").strip(),
-            notify_service=str(
+            ),
+            alerts_disabled=bool(
                 config.get(
-                    "developer_alert_notify_service",
-                    DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+                    DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
                 )
-                or ""
-            ).strip(),
-            delay_minutes=delay_minutes,
-            send_recovery_email=bool(config.get("send_recovery_email", False)),
+            ),
             friendly_name=str(config.get("friendly_name", "") or "").strip(),
             area=str(config.get("area", "") or "").strip(),
             device_type=str(config.get("device_type", "unknown") or "unknown"),
             host=str(config.get("host", "unknown") or "unknown"),
             protocol_version=str(config.get("protocol_version", "unknown") or "unknown"),
             auto_reconnect=bool(config.get("enable_auto_reconnect", False)),
+            legacy_config=legacy_config,
         )
         self._states.setdefault(device_id, OfflineAlertState())
+        self._cancel_pending_if_disabled(device_id)
 
     def device_offline(self, device_id: str, diagnostics: Mapping[str, Any] | None = None) -> None:
         """Start an alert delay once and refresh diagnostics on repeats."""
-        config = self._configs.get(device_id)
+        config = self._effective_config(device_id)
         if config is None or not config.enabled:
             return
         state = self._states.setdefault(device_id, OfflineAlertState())
@@ -220,7 +298,7 @@ class OfflineAlertManager:
     def device_online(self, device_id: str, diagnostics: Mapping[str, Any] | None = None) -> None:
         """Cancel a pending alert and optionally send one recovery message."""
         state = self._states.get(device_id)
-        config = self._configs.get(device_id)
+        config = self._effective_config(device_id)
         if state is None or state.offline_since is None:
             return
 
@@ -271,11 +349,16 @@ class OfflineAlertManager:
 
     def get_diagnostics(self, device_id: str) -> dict[str, Any]:
         """Return alert status without exposing the developer email address."""
-        config = self._configs.get(device_id, OfflineAlertConfig())
+        device_config = self._configs.get(device_id, DeviceOfflineAlertConfig())
+        config = self._effective_config(device_id) or OfflineAlertConfig()
         state = self._states.get(device_id, OfflineAlertState())
         reason = map_offline_reason(state.diagnostics)
         return {
             "offline_alert_enabled": config.enabled,
+            "using_global_alert_settings": bool(
+                device_config.use_global_settings and self._global_config_available
+            ),
+            "alerts_disabled_for_this_device": device_config.alerts_disabled,
             "offline_alert_sent": state.alert_sent,
             "offline_since": self._iso(state.offline_since),
             "offline_alert_reason": reason.code if state.offline_since else "",
@@ -283,15 +366,28 @@ class OfflineAlertManager:
             "developer_alert_notify_service": config.notify_service,
         }
 
+    def get_global_diagnostics(self) -> dict[str, Any]:
+        """Return non-secret integration-wide alert settings."""
+        config = self._global_config
+        return {
+            "global_offline_alerts_enabled": (
+                config.enabled if self._global_config_available else False
+            ),
+            "global_offline_alert_delay_minutes": config.delay_minutes,
+            "global_notify_service": config.notify_service,
+            "global_recovery_email_enabled": config.send_recovery_email,
+            "developer_alert_email": "**REDACTED**" if config.email else "",
+        }
+
     async def _delayed_alert(self, device_id: str) -> None:
         current = asyncio.current_task()
         try:
-            config = self._configs.get(device_id)
+            config = self._effective_config(device_id)
             if config is None:
                 return
             await self._sleep(max(0.0, config.delay_minutes * 60.0))
             state = self._states.get(device_id)
-            config = self._configs.get(device_id)
+            config = self._effective_config(device_id)
             if (
                 state is None
                 or config is None
@@ -319,24 +415,28 @@ class OfflineAlertManager:
                 state.alert_task = None
 
     async def _send_offline(self, device_id: str) -> None:
-        config = self._configs[device_id]
+        config = self._effective_config(device_id)
+        device_config = self._configs[device_id]
+        if config is None:
+            return
         state = self._states[device_id]
         diagnostics = state.diagnostics
         reason = map_offline_reason(diagnostics)
-        name = config.friendly_name or device_id
+        name = device_config.friendly_name or device_id
         delay = self._format_minutes(config.delay_minutes)
         title = f"Conti Alert: Device offline - {name}"
         message = "\n".join(
             (
                 f"Device: {name}",
                 f"Device ID: {device_id}",
-                f"Area/Room: {config.area or 'Not available'}",
-                f"Device type: {config.device_type}",
-                f"Saved IP: {config.host}",
-                f"Protocol: {config.protocol_version}",
+                f"Area/Room: {device_config.area or 'Not available'}",
+                f"Device type: {device_config.device_type}",
+                f"Saved IP: {device_config.host}",
+                f"Protocol: {device_config.protocol_version}",
                 f"Status: Offline for more than {delay}",
                 "Last seen: " + str(diagnostics.get("last_successful_local_update") or "Unknown"),
-                "Auto reconnect: " + ("enabled" if config.auto_reconnect else "disabled"),
+                "Auto reconnect: "
+                + ("enabled" if device_config.auto_reconnect else "disabled"),
                 "Reconnect attempts: " + str(int(diagnostics.get("reconnect_attempts", 0) or 0)),
                 "",
                 f"Simple reason: {reason.reason}",
@@ -354,10 +454,11 @@ class OfflineAlertManager:
         await self._notify(device_id, title, message)
 
     async def _send_recovery(self, device_id: str) -> None:
-        config = self._configs.get(device_id)
-        if config is None:
+        config = self._effective_config(device_id)
+        device_config = self._configs.get(device_id)
+        if config is None or device_config is None:
             return
-        name = config.friendly_name or device_id
+        name = device_config.friendly_name or device_id
         await self._notify(
             device_id,
             f"Conti Recovery: Device online - {name}",
@@ -365,7 +466,7 @@ class OfflineAlertManager:
         )
 
     async def _notify(self, device_id: str, title: str, message: str) -> None:
-        config = self._configs.get(device_id)
+        config = self._effective_config(device_id)
         if config is None:
             return
         try:
@@ -388,6 +489,30 @@ class OfflineAlertManager:
                 else f"Conti could not send the developer alert for {device_id}."
             )
             await self._persistent_notification(device_id, fallback)
+
+    def _effective_config(self, device_id: str) -> OfflineAlertConfig | None:
+        """Resolve global-first settings with a temporary legacy fallback."""
+        device = self._configs.get(device_id)
+        if device is None or device.alerts_disabled:
+            return None
+        if device.use_global_settings and self._global_config_available:
+            return self._global_config
+        return device.legacy_config
+
+    def _cancel_pending_if_disabled(self, device_id: str) -> None:
+        """Cancel an unsent timer when a global or device option disables it."""
+        state = self._states.get(device_id)
+        config = self._effective_config(device_id)
+        if (
+            state is not None
+            and not state.alert_sent
+            and state.alert_task is not None
+            and not state.alert_task.done()
+            and (config is None or not config.enabled)
+        ):
+            state.alert_task.cancel()
+            state.alert_task = None
+            state.offline_since = None
 
     async def _persistent_notification(self, device_id: str, message: str) -> None:
         notification_id = "conti_offline_alert_" + re.sub(r"[^a-zA-Z0-9_-]", "_", device_id)

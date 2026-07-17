@@ -74,6 +74,7 @@ from .const import (
     CONF_DETECTED_VERSION,
     CONF_DEVELOPER_ALERT_EMAIL,
     CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     CONF_DEVICE_ID,
     CONF_DEVICE_TYPE,
     CONF_DEVICE_PROFILE,
@@ -81,6 +82,7 @@ from .const import (
     CONF_DP_MAP,
     CONF_ENABLE_AUTO_RECONNECT,
     CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+    CONF_ENTRY_TYPE,
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
     CONF_INVERT_POSITION,
@@ -112,21 +114,27 @@ from .const import (
     CONF_PROTOCOL_VERSION,
     CONF_RUNTIME_CHANNEL,
     CONF_SEND_RECOVERY_EMAIL,
+    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     CONF_TUYA_CATEGORY,
     CONF_VERBOSE_LOGGING,
     DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+    DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     DEFAULT_INVERT_POSITION,
     DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
     DEFAULT_SEND_RECOVERY_EMAIL,
+    DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     DEVICE_TYPE_CURTAIN,
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_IR,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
+    ENTRY_TYPE_GLOBAL_SETTINGS,
+    GLOBAL_SETTINGS_ENTRY_TITLE,
+    GLOBAL_SETTINGS_UNIQUE_ID,
     MAX_OFFLINE_ALERT_DELAY_MINUTES,
     MIN_OFFLINE_ALERT_DELAY_MINUTES,
     RUNTIME_CHANNEL_CLOUD,
@@ -481,24 +489,16 @@ async def _discover_confident_lan_host(device_id: str) -> tuple[str | None, list
 
 
 def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
-    """Step 1: basic info + choose onboarding path (no device_id/local_key)."""
+    """Step 1: choose a global-settings or device onboarding path."""
     d = defaults or {}
     return vol.Schema(
         {
-            vol.Required(CONF_NAME, default=d.get(CONF_NAME, "")): str,
-            vol.Optional(CONF_HOST, default=d.get(CONF_HOST, "")): str,
-            vol.Optional(
-                CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)
-            ): int,
-            vol.Required(
-                CONF_DEVICE_TYPE,
-                default=d.get(CONF_DEVICE_TYPE, DEVICE_TYPE_LIGHT),
-            ): vol.In(_device_type_choices()),
             vol.Required(
                 "onboarding_mode",
                 default=d.get("onboarding_mode", "smart_life"),
             ): vol.In(
                 {
+                    "global_settings": "Conti Global Settings (offline alerts)",
                     "smart_life": "Login with Smart Life (recommended)",
                     "ir_device": "IR Device (Smart Life)",
                     "cloud_assisted": "Cloud-assisted (legacy)",
@@ -506,6 +506,22 @@ def _user_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
                     "manual": "Manual / Advanced",
                 }
             ),
+        }
+    )
+
+
+def _device_details_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
+    """Collect fields used only by normal device entries."""
+    d = defaults or {}
+    return vol.Schema(
+        {
+            vol.Required(CONF_NAME, default=d.get(CONF_NAME, "")): str,
+            vol.Optional(CONF_HOST, default=d.get(CONF_HOST, "")): str,
+            vol.Optional(CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)): int,
+            vol.Required(
+                CONF_DEVICE_TYPE,
+                default=d.get(CONF_DEVICE_TYPE, DEVICE_TYPE_LIGHT),
+            ): vol.In(_device_type_choices()),
         }
     )
 
@@ -542,6 +558,92 @@ def _manual_credentials_schema(defaults: dict[str, Any] | None = None) -> vol.Sc
                 CONF_LOCAL_KEY, default=d.get(CONF_LOCAL_KEY, "")
             ): str,
         }
+    )
+
+
+def _global_offline_alert_schema(
+    defaults: dict[str, Any] | None = None,
+) -> vol.Schema:
+    """Integration-wide developer alert settings."""
+    d = defaults or {}
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                default=d.get(
+                    CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                    DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                ),
+            ): bool,
+            vol.Optional(
+                CONF_DEVELOPER_ALERT_EMAIL,
+                default=d.get(CONF_DEVELOPER_ALERT_EMAIL, ""),
+            ): str,
+            vol.Optional(
+                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                default=d.get(
+                    CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                    DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                ),
+            ): str,
+            vol.Optional(
+                CONF_OFFLINE_ALERT_DELAY_MINUTES,
+                default=d.get(
+                    CONF_OFFLINE_ALERT_DELAY_MINUTES,
+                    DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+                ),
+            ): vol.All(
+                vol.Coerce(int),
+                vol.Range(
+                    min=MIN_OFFLINE_ALERT_DELAY_MINUTES,
+                    max=MAX_OFFLINE_ALERT_DELAY_MINUTES,
+                ),
+            ),
+            vol.Optional(
+                CONF_SEND_RECOVERY_EMAIL,
+                default=d.get(CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL),
+            ): bool,
+        }
+    )
+
+
+def _normalized_global_alert_values(values: dict[str, Any]) -> dict[str, Any]:
+    """Return the complete persisted global alert configuration."""
+    return {
+        CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS: bool(
+            values.get(
+                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+            )
+        ),
+        CONF_DEVELOPER_ALERT_EMAIL: str(
+            values.get(CONF_DEVELOPER_ALERT_EMAIL, "") or ""
+        ).strip(),
+        CONF_DEVELOPER_ALERT_NOTIFY_SERVICE: str(
+            values.get(
+                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
+                DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
+            )
+            or ""
+        ).strip(),
+        CONF_OFFLINE_ALERT_DELAY_MINUTES: int(
+            values.get(
+                CONF_OFFLINE_ALERT_DELAY_MINUTES,
+                DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
+            )
+        ),
+        CONF_SEND_RECOVERY_EMAIL: bool(
+            values.get(CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL)
+        ),
+    }
+
+
+def _global_alert_destination_missing(values: dict[str, Any]) -> bool:
+    """Return whether enabled alerts lack both supported destinations."""
+    return bool(
+        values.get(CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS, False)
+        and not str(values.get(CONF_DEVELOPER_ALERT_EMAIL, "")).strip()
+        and not str(values.get(CONF_DEVELOPER_ALERT_NOTIFY_SERVICE, "")).strip()
     )
 
 
@@ -824,7 +926,23 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
-        """Step 1 — collect basic info and choose onboarding path."""
+        """Choose global settings or one of the device onboarding paths."""
+        if user_input is not None:
+            mode = user_input.get("onboarding_mode", "smart_life")
+            self._onboarding_mode = mode
+            if mode == "global_settings":
+                return await self.async_step_global_settings()
+            return await self.async_step_device_details()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=_user_schema(),
+        )
+
+    async def async_step_device_details(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Collect basic information for a normal device entry."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -834,8 +952,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
                 CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
             }
-            mode = user_input.get("onboarding_mode", "smart_life")
-            self._onboarding_mode = mode
+            mode = self._onboarding_mode
             if mode == "ir_device":
                 _LOGGER.info("IR onboarding started")
                 self._flow_data[CONF_DEVICE_TYPE] = DEVICE_TYPE_IR
@@ -854,8 +971,32 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_manual_credentials()
 
         return self.async_show_form(
-            step_id="user",
-            data_schema=_user_schema(),
+            step_id="device_details",
+            data_schema=_device_details_schema(user_input),
+            errors=errors,
+        )
+
+    async def async_step_global_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Create the single integration-wide offline alert settings entry."""
+        await self.async_set_unique_id(GLOBAL_SETTINGS_UNIQUE_ID)
+        self._abort_if_unique_id_configured()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if _global_alert_destination_missing(user_input):
+                errors["base"] = "developer_alert_destination_required"
+            else:
+                return self.async_create_entry(
+                    title=GLOBAL_SETTINGS_ENTRY_TITLE,
+                    data={
+                        CONF_ENTRY_TYPE: ENTRY_TYPE_GLOBAL_SETTINGS,
+                        **_normalized_global_alert_values(user_input),
+                    },
+                )
+        return self.async_show_form(
+            step_id="global_settings",
+            data_schema=_global_offline_alert_schema(user_input),
             errors=errors,
         )
 
@@ -3877,6 +4018,8 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         """Device settings form with option to configure external-ON."""
+        if self._entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_GLOBAL_SETTINGS:
+            return await self.async_step_global_alerts(user_input)
         if self._entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
             return await self.async_step_ir_options(user_input)
 
@@ -3890,15 +4033,6 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                     raise ValueError  # noqa: TRY301
             except (json.JSONDecodeError, ValueError):
                 errors[CONF_DP_MAP] = "invalid_dp_map"
-
-            if (
-                user_input.get(CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS, False)
-                and not str(user_input.get(CONF_DEVELOPER_ALERT_EMAIL, "")).strip()
-                and not str(
-                    user_input.get(CONF_DEVELOPER_ALERT_NOTIFY_SERVICE, "")
-                ).strip()
-            ):
-                errors["base"] = "developer_alert_destination_required"
 
             if not errors:
                 from .dp_mapping import normalize_dp_map  # noqa: PLC0415
@@ -3919,32 +4053,16 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                 )
                 new_options.update(
                     {
-                        CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS: bool(
+                        CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS: bool(
                             user_input.get(
-                                CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
-                                DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+                                CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
+                                DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
                             )
                         ),
-                        CONF_DEVELOPER_ALERT_EMAIL: str(
-                            user_input.get(CONF_DEVELOPER_ALERT_EMAIL, "") or ""
-                        ).strip(),
-                        CONF_DEVELOPER_ALERT_NOTIFY_SERVICE: str(
+                        CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE: bool(
                             user_input.get(
-                                CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
-                                DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
-                            )
-                            or ""
-                        ).strip(),
-                        CONF_OFFLINE_ALERT_DELAY_MINUTES: int(
-                            user_input.get(
-                                CONF_OFFLINE_ALERT_DELAY_MINUTES,
-                                DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
-                            )
-                        ),
-                        CONF_SEND_RECOVERY_EMAIL: bool(
-                            user_input.get(
-                                CONF_SEND_RECOVERY_EMAIL,
-                                DEFAULT_SEND_RECOVERY_EMAIL,
+                                CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+                                DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
                             )
                         ),
                     }
@@ -3994,23 +4112,13 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
         current_invert_position = self._entry.options.get(
             CONF_INVERT_POSITION, DEFAULT_INVERT_POSITION
         )
-        current_alerts_enabled = self._entry.options.get(
-            CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
-            DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
+        current_use_global_alerts = self._entry.options.get(
+            CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
+            DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
         )
-        current_alert_email = self._entry.options.get(
-            CONF_DEVELOPER_ALERT_EMAIL, ""
-        )
-        current_notify_service = self._entry.options.get(
-            CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
-            DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
-        )
-        current_alert_delay = self._entry.options.get(
-            CONF_OFFLINE_ALERT_DELAY_MINUTES,
-            DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
-        )
-        current_recovery_email = self._entry.options.get(
-            CONF_SEND_RECOVERY_EMAIL, DEFAULT_SEND_RECOVERY_EMAIL
+        current_device_alerts_disabled = self._entry.options.get(
+            CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+            DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
         )
 
         return self.async_show_form(
@@ -4030,35 +4138,40 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         default=current_invert_position,
                     ): bool,
                     vol.Optional(
-                        CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
-                        default=current_alerts_enabled,
+                        CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
+                        default=current_use_global_alerts,
                     ): bool,
                     vol.Optional(
-                        CONF_DEVELOPER_ALERT_EMAIL,
-                        default=current_alert_email,
-                    ): str,
-                    vol.Optional(
-                        CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
-                        default=current_notify_service,
-                    ): str,
-                    vol.Optional(
-                        CONF_OFFLINE_ALERT_DELAY_MINUTES,
-                        default=current_alert_delay,
-                    ): vol.All(
-                        vol.Coerce(int),
-                        vol.Range(
-                            min=MIN_OFFLINE_ALERT_DELAY_MINUTES,
-                            max=MAX_OFFLINE_ALERT_DELAY_MINUTES,
-                        ),
-                    ),
-                    vol.Optional(
-                        CONF_SEND_RECOVERY_EMAIL,
-                        default=current_recovery_email,
+                        CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+                        default=current_device_alerts_disabled,
                     ): bool,
                     vol.Optional("rediscover_dps", default=False): bool,
                     vol.Optional("configure_external_on", default=False): bool,
                 }
             ),
+            errors=errors,
+        )
+
+    async def async_step_global_alerts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Edit the one shared developer offline alert configuration."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            if _global_alert_destination_missing(user_input):
+                errors["base"] = "developer_alert_destination_required"
+            else:
+                return self.async_create_entry(
+                    title="",
+                    data=_normalized_global_alert_values(user_input),
+                )
+        current = dict(self._entry.data)
+        current.update(self._entry.options)
+        if user_input is not None:
+            current.update(user_input)
+        return self.async_show_form(
+            step_id="global_alerts",
+            data_schema=_global_offline_alert_schema(current),
             errors=errors,
         )
 
