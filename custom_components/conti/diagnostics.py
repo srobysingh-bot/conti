@@ -11,6 +11,11 @@ from .const import CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_GLOBAL_SETTINGS
 from .offline_alerts import offline_alert_config_from_mapping
 
 _CONNECTION_FIELDS = (
+    "connection_type",
+    "gateway_connected",
+    "gateway_child_count",
+    "gateway_error",
+    "child_error",
     "device_id",
     "ha_host_ip",
     "ha_host_subnet",

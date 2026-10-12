@@ -58,26 +58,28 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
 
 from .const import (
+    CONF_CHILD_CID,
+    CONF_CLOUD_ACCESS_ID,
+    CONF_CLOUD_ACCESS_SECRET,
+    CONF_CLOUD_REGION,
+    CONF_CONNECTION_TYPE,
     CONF_DAY_BRIGHTNESS,
     CONF_DAY_END,
     CONF_DAY_KELVIN,
     CONF_DAY_START,
     CONF_DEFERRED_LOCAL_CONNECT,
-    CONF_CLOUD_ACCESS_ID,
-    CONF_CLOUD_ACCESS_SECRET,
-    CONF_CLOUD_REGION,
     CONF_DETECTED_VERSION,
     CONF_DEVELOPER_ALERT_EMAIL,
     CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
-    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     CONF_DEVICE_ID,
-    CONF_DEVICE_TYPE,
+    CONF_DEVICE_METADATA,
     CONF_DEVICE_PROFILE,
+    CONF_DEVICE_TYPE,
+    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     CONF_DISCOVERED_DPS,
     CONF_DP_MAP,
     CONF_ENABLE_AUTO_RECONNECT,
@@ -85,8 +87,9 @@ from .const import (
     CONF_ENTRY_TYPE,
     CONF_EXTERNAL_ON_APPLY,
     CONF_EXTERNAL_ON_ENABLED,
+    CONF_GATEWAY_DEVICE_ID,
+    CONF_GATEWAY_METADATA,
     CONF_INVERT_POSITION,
-    CONF_LOCAL_KEY,
     CONF_IR_BRAND,
     CONF_IR_BRAND_ID,
     CONF_IR_CATEGORY,
@@ -99,9 +102,10 @@ from .const import (
     CONF_IR_REMOTE_ID,
     CONF_IR_REMOTE_INDEX,
     CONF_IR_SELECTED_PACK,
+    CONF_LOCAL_KEY,
+    CONF_LOW_POWER_DEVICE,
     CONF_MAPPING_CONFIDENCE,
     CONF_MAPPING_SOURCE,
-    CONF_LOW_POWER_DEVICE,
     CONF_MORNING_BRIGHTNESS,
     CONF_MORNING_END,
     CONF_MORNING_KELVIN,
@@ -114,12 +118,14 @@ from .const import (
     CONF_PROTOCOL_VERSION,
     CONF_RUNTIME_CHANNEL,
     CONF_SEND_RECOVERY_EMAIL,
-    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     CONF_TUYA_CATEGORY,
+    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     CONF_VERBOSE_LOGGING,
-    DEFAULT_ENABLE_AUTO_RECONNECT,
+    CONNECTION_TYPE_DIRECT,
+    CONNECTION_TYPE_GATEWAY_CHILD,
     DEFAULT_DEVELOPER_ALERT_NOTIFY_SERVICE,
     DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+    DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     DEFAULT_INVERT_POSITION,
     DEFAULT_OFFLINE_ALERT_DELAY_MINUTES,
@@ -128,11 +134,12 @@ from .const import (
     DEFAULT_SEND_RECOVERY_EMAIL,
     DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     DEVICE_TYPE_CURTAIN,
-    DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_IR,
+    DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     ENTRY_TYPE_GLOBAL_SETTINGS,
+    GATEWAY_CONFIG_KEYS,
     GLOBAL_SETTINGS_ENTRY_TITLE,
     GLOBAL_SETTINGS_UNIQUE_ID,
     MAX_OFFLINE_ALERT_DELAY_MINUTES,
@@ -516,6 +523,12 @@ def _device_details_schema(defaults: dict[str, Any] | None = None) -> vol.Schema
     return vol.Schema(
         {
             vol.Required(CONF_NAME, default=d.get(CONF_NAME, "")): str,
+            vol.Optional(
+                CONF_CONNECTION_TYPE, default=d.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_DIRECT),
+            ): vol.In({
+                CONNECTION_TYPE_DIRECT: "Direct LAN Device",
+                CONNECTION_TYPE_GATEWAY_CHILD: "Device behind Tuya Gateway",
+            }),
             vol.Optional(CONF_HOST, default=d.get(CONF_HOST, "")): str,
             vol.Optional(CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT)): int,
             vol.Required(
@@ -951,6 +964,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_HOST: user_input.get(CONF_HOST, "").strip(),
                 CONF_PORT: user_input.get(CONF_PORT, DEFAULT_PORT),
                 CONF_DEVICE_TYPE: user_input[CONF_DEVICE_TYPE],
+                CONF_CONNECTION_TYPE: user_input.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_DIRECT),
             }
             mode = self._onboarding_mode
             if mode == "ir_device":
@@ -964,6 +978,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_oauth_login()
             if mode == "cloud_assisted":
                 return await self.async_step_cloud_credentials()
+            if self._flow_data[CONF_CONNECTION_TYPE] == CONNECTION_TYPE_GATEWAY_CHILD:
+                return await self.async_step_gateway_child()
             # Manual/local mode: host is required to be able to connect
             if not self._flow_data[CONF_HOST]:
                 errors["base"] = "host_required_manual"
@@ -974,6 +990,202 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="device_details",
             data_schema=_device_details_schema(user_input),
             errors=errors,
+        )
+
+    @staticmethod
+    def _is_gateway_related(info: dict[str, Any]) -> bool:
+        from .gateway import child_cid, parent_id  # noqa: PLC0415
+
+        return bool(parent_id(info) or child_cid(info) or info.get("sub") or info.get("is_gateway"))
+
+    def _is_gateway_candidate(self, device_id: str, info: dict[str, Any]) -> bool:
+        from .gateway import parent_id  # noqa: PLC0415
+
+        return bool(info.get("is_gateway")) or any(
+            parent_id(child) == device_id for child in self._cloud_candidates
+        )
+
+    async def _prepare_gateway_child(
+        self, device_id: str, info: dict[str, Any],
+    ) -> config_entries.ConfigFlowResult:
+        from .gateway import child_cid, device_metadata, parent_id  # noqa: PLC0415
+
+        if not child_cid(info) and not self._is_gateway_candidate(device_id, info):
+            if self._onboarding_mode == "cloud_assisted":
+                details = await self._cloud_get_credentials(device_id)
+            else:
+                oauth = await self._get_oauth_manager()
+                details = await oauth.async_get_device_info(device_id)
+            if details:
+                info = {**info, **details}
+        if self._is_gateway_candidate(device_id, info):
+            self._flow_data[CONF_GATEWAY_DEVICE_ID] = device_id
+            return await self.async_step_gateway_pick_child()
+        self._flow_data.update({
+            CONF_CONNECTION_TYPE: CONNECTION_TYPE_GATEWAY_CHILD,
+            CONF_DEVICE_ID: device_id,
+            CONF_CHILD_CID: child_cid(info),
+            CONF_GATEWAY_DEVICE_ID: parent_id(info),
+            CONF_DEVICE_METADATA: device_metadata(info),
+        })
+        if info.get("category"):
+            self._tuya_category = info["category"]
+            hint = _device_type_from_cloud_category(info["category"])
+            if hint:
+                self._flow_data[CONF_DEVICE_TYPE] = hint
+        await self.async_set_unique_id(device_id)
+        self._abort_if_unique_id_configured()
+        gateway_id = parent_id(info)
+        if gateway_id:
+            if self._onboarding_mode == "cloud_assisted":
+                parent = await self._cloud_get_credentials(gateway_id)
+            else:
+                oauth = await self._get_oauth_manager()
+                parent = await oauth.async_get_device_info(gateway_id)
+            if parent:
+                self._flow_data[CONF_GATEWAY_METADATA] = device_metadata(parent)
+                self._flow_data[CONF_LOCAL_KEY] = parent.get("local_key", "")
+                host = str(parent.get("ip", ""))
+                try:
+                    if ipaddress.ip_address(host).is_private:
+                        self._flow_data.setdefault(CONF_HOST, host)
+                        if not self._flow_data[CONF_HOST]:
+                            self._flow_data[CONF_HOST] = host
+                except ValueError:
+                    pass
+        return await self.async_step_gateway_child()
+
+    async def async_step_gateway_pick_child(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> config_entries.ConfigFlowResult:
+        from .gateway import parent_id  # noqa: PLC0415
+
+        gateway_id = self._flow_data.get(CONF_GATEWAY_DEVICE_ID, "")
+        if user_input is None:
+            try:
+                if self._onboarding_mode == "cloud_assisted":
+                    from .cloud_schema import TuyaCloudSchemaHelper  # noqa: PLC0415
+
+                    helper = TuyaCloudSchemaHelper(
+                        self._cloud_auth["access_id"], self._cloud_auth["access_secret"],
+                        self._cloud_auth["region"],
+                    )
+                    discovered = await helper.get_gateway_children(gateway_id)
+                else:
+                    oauth = await self._get_oauth_manager()
+                    discovered = await oauth.async_list_gateway_children(gateway_id)
+                known = {d.get("id") or d.get("device_id") for d in self._cloud_candidates}
+                self._cloud_candidates.extend(
+                    d for d in discovered if (d.get("id") or d.get("device_id")) not in known
+                )
+            except Exception:  # noqa: BLE001
+                # Child-list access varies by account; never replace the
+                # working manual path with a mandatory cloud dependency.
+                _LOGGER.debug("Gateway child metadata unavailable; use manual CID setup")
+        children = {
+            str(d.get("id") or d.get("device_id")): d
+            for d in self._cloud_candidates if parent_id(d) == gateway_id
+        }
+        if user_input is not None:
+            selected_id = user_input.get("cloud_device_id", "")
+            selected = children.get(selected_id)
+            if selected:
+                return await self._prepare_gateway_child(selected_id, selected)
+            if selected_id == "manual":
+                self._flow_data[CONF_CONNECTION_TYPE] = CONNECTION_TYPE_GATEWAY_CHILD
+                return await self.async_step_gateway_child()
+        choices = {
+            device_id: str(d.get("name") or d.get("product_name") or device_id)
+            for device_id, d in children.items()
+        }
+        choices["manual"] = "Enter child Device ID and CID manually (advanced)"
+        return self.async_show_form(
+            step_id="gateway_pick_child",
+            data_schema=vol.Schema({vol.Required("cloud_device_id"): vol.In(choices)}),
+        )
+
+    async def async_step_gateway_child(
+        self, user_input: dict[str, Any] | None = None,
+    ) -> config_entries.ConfigFlowResult:
+        """Configure parent credentials and the independent child node ID."""
+        from .gateway import probe_child  # noqa: PLC0415
+
+        errors: dict[str, str] = {}
+        saved = {
+            e.entry_id: e for e in self.hass.config_entries.async_entries(DOMAIN)
+            if e.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+        }
+        if user_input is not None:
+            self._flow_data.update(user_input)
+            self._flow_data[CONF_CONNECTION_TYPE] = CONNECTION_TYPE_GATEWAY_CHILD
+            existing = saved.get(user_input.get("saved_gateway", ""))
+            if existing is not None:
+                for key in (CONF_GATEWAY_DEVICE_ID, CONF_HOST, CONF_PORT, CONF_LOCAL_KEY):
+                    self._flow_data[key] = existing.data[key]
+                self._flow_data[CONF_PROTOCOL_VERSION] = (
+                    existing.data.get(CONF_DETECTED_VERSION)
+                    or existing.data.get(CONF_PROTOCOL_VERSION, "auto")
+                )
+            for key in (CONF_DEVICE_ID, CONF_GATEWAY_DEVICE_ID, CONF_CHILD_CID,
+                        CONF_HOST, CONF_LOCAL_KEY):
+                self._flow_data[key] = str(self._flow_data.get(key, "")).strip()
+            if not self._flow_data[CONF_CHILD_CID]:
+                errors["base"] = "child_identifier_missing"
+            elif not self._flow_data[CONF_GATEWAY_DEVICE_ID] or (
+                self._flow_data[CONF_GATEWAY_DEVICE_ID] == self._flow_data[CONF_DEVICE_ID]
+            ):
+                errors["base"] = "gateway_identifier_invalid"
+            elif not all(
+                self._flow_data.get(k) for k in (CONF_DEVICE_ID, CONF_HOST, CONF_LOCAL_KEY)
+            ):
+                errors["base"] = "gateway_credentials_required"
+            else:
+                await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
+                self._abort_if_unique_id_configured()
+                manager = self.hass.data.get(DOMAIN, {}).get("manager")
+                shared = None
+                if manager:
+                    shared = manager.get_gateway(self._flow_data[CONF_GATEWAY_DEVICE_ID])
+                ok, version, dps, error = await probe_child(self._flow_data, shared)
+                if not ok:
+                    errors["base"] = error
+                else:
+                    from .gateway import map_child_dps  # noqa: PLC0415
+
+                    self._detected_version = version
+                    self._requested_protocol_version = self._flow_data.get(
+                        CONF_PROTOCOL_VERSION, "auto"
+                    )
+                    self._discovered_dps = dps
+                    await self._async_try_silent_cloud_schema_fetch()
+                    self._final_dp_map = map_child_dps(
+                        self._flow_data[CONF_DEVICE_TYPE], dps, self._cloud_dp_map,
+                    )
+                    used_cloud = bool(set(self._cloud_dp_map) & set(dps))
+                    self._mapping_source = "cloud" if used_cloud else "auto"
+                    self._confidence = 1.0 if used_cloud else 0.6
+                    return await self.async_step_review()
+        d = self._flow_data
+        fields: dict[Any, Any] = {}
+        if saved:
+            fields[vol.Optional("saved_gateway", default="manual")] = vol.In({
+                "manual": "Configure gateway manually",
+                **{k: f"Gateway used by {e.title}" for k, e in saved.items()},
+            })
+        for key in (
+            CONF_GATEWAY_DEVICE_ID, CONF_HOST, CONF_LOCAL_KEY, CONF_DEVICE_ID, CONF_CHILD_CID,
+        ):
+            fields[vol.Optional(key, default=d.get(key, ""))] = str
+        fields[vol.Optional(CONF_PORT, default=d.get(CONF_PORT, DEFAULT_PORT))] = vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=65535)
+        )
+        fields[vol.Optional(
+            CONF_PROTOCOL_VERSION, default=d.get(CONF_PROTOCOL_VERSION, "auto")
+        )] = vol.In(
+            SUPPORTED_VERSIONS
+        )
+        return self.async_show_form(
+            step_id="gateway_child", data_schema=vol.Schema(fields), errors=errors,
         )
 
     async def async_step_global_settings(
@@ -1176,6 +1388,15 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if info is None:
                     errors["base"] = "cloud_fetch_failed"
                 else:
+                    from .gateway import child_cid, parent_id  # noqa: PLC0415
+
+                    if parent_id(info) or child_cid(info) or info.get("sub") or (
+                        self._flow_data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+                    ):
+                        return await self._prepare_gateway_child(selected_id, info)
+                    if self._is_gateway_candidate(selected_id, info):
+                        self._flow_data[CONF_GATEWAY_DEVICE_ID] = selected_id
+                        return await self.async_step_gateway_pick_child()
                     local_key = str(info.get("local_key", "")).strip()
                     cloud_ip = str(info.get("ip", "")).strip()
                     category = str(info.get("category", "")).strip()
@@ -1267,6 +1488,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
         # Build choice map.
+        self._cloud_candidates = cloud_devices
         choices: dict[str, str] = {}
         for dev in cloud_devices:
             dev_id = str(
@@ -1346,6 +1568,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         )
                         errors["base"] = self._cloud_error_key(exc)
 
+                    if "base" not in errors and (self._is_gateway_related(selected) or (
+                        self._flow_data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+                    )):
+                        return await self._prepare_gateway_child(
+                            selected.get("device_id", ""), selected
+                        )
                     if "base" not in errors and not str(selected.get("local_key", "")).strip():
                         errors["base"] = "cloud_device_missing_local_key"
 
@@ -1425,6 +1653,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._abort_if_unique_id_configured()
                     return await self.async_step_ir_pack_manufacturer()
 
+                if self._is_gateway_related(selected) or (
+                    self._flow_data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+                ):
+                    return await self._prepare_gateway_child(selected_id, selected)
+
                 if not str(selected.get("local_key", "")).strip():
                     try:
                         refreshed = await self._cloud_get_credentials(selected_id)
@@ -1437,6 +1670,8 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         )
                         errors["base"] = self._cloud_error_key(exc)
 
+                if self._is_gateway_related(selected):
+                    return await self._prepare_gateway_child(selected_id, selected)
                 if not str(selected.get("local_key", "")).strip():
                     if "base" not in errors:
                         errors["base"] = "cloud_device_missing_local_key"
@@ -1495,7 +1730,7 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # If the user supplied an IP in step 1, prefer devices that match it
         # but always fall back to the full list so nothing is hidden.
         host = self._flow_data.get(CONF_HOST, "").strip()
-        if host:
+        if host and self._flow_data.get(CONF_CONNECTION_TYPE) != CONNECTION_TYPE_GATEWAY_CHILD:
             ip_matches = [
                 d for d in cloud_devices
                 if str(d.get("ip", "")).strip() == host
@@ -1523,6 +1758,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
 
             results.append(candidate)
+            from .gateway import device_metadata  # noqa: PLC0415
+
+            candidate.update(device_metadata(dev))
 
         return results
 
@@ -1546,9 +1784,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             TuyaCloudAPIError,
             TuyaCloudAuthError,
             TuyaCloudPaginationError,
-            TuyaCloudPermissionExpiredError,
-            TuyaCloudPathError,
             TuyaCloudParseError,
+            TuyaCloudPathError,
+            TuyaCloudPermissionExpiredError,
             TuyaCloudRegionError,
         )
 
@@ -3071,11 +3309,14 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Step 4 — review and confirm the DP mapping."""
         errors: dict[str, str] = {}
+        gateway_child = self._flow_data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
 
         if user_input is not None:
             action = user_input.get("action", "accept")
 
             if action == "learn":
+                if gateway_child:
+                    return await self.async_step_gateway_child()
                 return await self.async_step_pre_learn()
 
             if action == "edit":
@@ -3097,6 +3338,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if action == "accept" and not self._final_dp_map:
                 errors["base"] = "empty_dp_map"
+            if gateway_child and (
+                not self._final_dp_map or set(self._final_dp_map) - set(self._discovered_dps)
+            ):
+                errors["base"] = "child_mapping_failed"
 
             if (
                 action == "accept"
@@ -3157,6 +3402,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "dp_summary": dp_summary,
             "confidence_warning": confidence_warning,
         }
+        if gateway_child:
+            action_choices.pop("learn")
+            default_action = "accept"
 
         return self.async_show_form(
             step_id="review",
@@ -3184,12 +3432,12 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> config_entries.ConfigFlowResult:
         """Show device classification and prepare guided learn."""
         from .guided_learn import (  # noqa: PLC0415
-            classify_device_family,
-            generate_learn_steps,
-            build_action_plan,
-            family_display_name,
             FAMILY_MULTI_GANG_SWITCH,
             FAMILY_POWER_STRIP,
+            build_action_plan,
+            classify_device_family,
+            family_display_name,
+            generate_learn_steps,
         )
 
         if user_input is not None:
@@ -3251,10 +3499,10 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Step 6 — interactive guided learn for DP mapping."""
         from .guided_learn import (  # noqa: PLC0415
             LearnSession,
-            family_display_name,
-            validate_evidence,
             describe_missing,
+            family_display_name,
             get_required_roles,
+            validate_evidence,
         )
 
         # Initialise learn session on first entry
@@ -3774,6 +4022,11 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_MAPPING_CONFIDENCE: self._confidence,
         }
 
+        if self._flow_data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD:
+            for key in (*GATEWAY_CONFIG_KEYS, CONF_DEVICE_METADATA, CONF_GATEWAY_METADATA):
+                if key in self._flow_data:
+                    entry_data[key] = self._flow_data[key]
+
         # Persist auto-detected version
         if self._detected_version:
             entry_data[CONF_DETECTED_VERSION] = self._detected_version
@@ -4038,6 +4291,23 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                 from .dp_mapping import normalize_dp_map  # noqa: PLC0415
 
                 dp_map = normalize_dp_map(dp_map)
+                gateway_child = (
+                    self._entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+                )
+                if gateway_child:
+                    verified_raw = (
+                        self._entry.options.get(CONF_DISCOVERED_DPS)
+                        or self._entry.data.get(CONF_DISCOVERED_DPS, "{}")
+                    )
+                    verified = (
+                        json.loads(verified_raw) if isinstance(verified_raw, str) else verified_raw
+                    )
+                    manager = self.hass.data[DOMAIN]["manager"]
+                    verified = {
+                        **verified, **manager.get_cached_dps(self._entry.data[CONF_DEVICE_ID])
+                    }
+                    if not dp_map or set(dp_map) - set(verified):
+                        errors["base"] = "child_mapping_failed"
                 new_options = _options_with_manual_dp_map(
                     self._entry.options,
                     dp_map,
@@ -4069,18 +4339,25 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                 )
 
                 if user_input.get("rediscover_dps", False):
-                    ok, _, discovered, _ = await _test_device(
-                        device_id=self._entry.data[CONF_DEVICE_ID],
-                        ip=self._entry.data[CONF_HOST],
-                        local_key=self._entry.data[CONF_LOCAL_KEY],
-                        version=(
-                            self._entry.data.get(CONF_DETECTED_VERSION)
-                            or self._entry.data.get(
-                                CONF_PROTOCOL_VERSION, DEFAULT_PROTOCOL_VERSION
-                            )
-                        ),
-                        port=self._entry.data.get(CONF_PORT, DEFAULT_PORT),
-                    )
+                    if self._entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD:
+                        manager = self.hass.data[DOMAIN]["manager"]
+                        discovered = await manager.detect_dps(self._entry.data[CONF_DEVICE_ID])
+                        ok = bool(discovered)
+                        if not ok:
+                            errors["base"] = "child_dp_discovery_empty"
+                    else:
+                        ok, _, discovered, _ = await _test_device(
+                            device_id=self._entry.data[CONF_DEVICE_ID],
+                            ip=self._entry.data[CONF_HOST],
+                            local_key=self._entry.data[CONF_LOCAL_KEY],
+                            version=(
+                                self._entry.data.get(CONF_DETECTED_VERSION)
+                                or self._entry.data.get(
+                                    CONF_PROTOCOL_VERSION, DEFAULT_PROTOCOL_VERSION
+                                )
+                            ),
+                            port=self._entry.data.get(CONF_PORT, DEFAULT_PORT),
+                        )
                     if ok and discovered:
                         from .dp_mapping import auto_map_dps, merge_dp_maps  # noqa: PLC0415
 
@@ -4088,6 +4365,12 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                             self._entry.data.get(CONF_DEVICE_TYPE, "switch"),
                             discovered,
                         )
+                        if gateway_child:
+                            from .gateway import map_child_dps  # noqa: PLC0415
+
+                            auto = map_child_dps(
+                                self._entry.data.get(CONF_DEVICE_TYPE, "switch"), discovered
+                            )
                         new_options[CONF_DP_MAP] = json.dumps(
                             merge_dp_maps(dp_map, auto)
                         )
@@ -4095,11 +4378,12 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         new_options[CONF_MAPPING_SOURCE] = "discovered"
 
                 # If user checked "configure external-ON", go to that step
-                if user_input.get("configure_external_on", False):
+                if not errors and user_input.get("configure_external_on", False):
                     self._pending_options = new_options
                     return await self.async_step_external_on()
 
-                return self.async_create_entry(title="", data=new_options)
+                if not errors:
+                    return self.async_create_entry(title="", data=new_options)
 
         current_dp_map = (
             self._entry.options.get(CONF_DP_MAP)

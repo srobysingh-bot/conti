@@ -356,7 +356,7 @@ class TuyaOAuthManager:
 
         import aiohttp  # noqa: PLC0415
 
-        from .cloud_schema import TUYA_HA_CLIENT_ID, _QR_LOGIN_BASE  # noqa: PLC0415
+        from .cloud_schema import _QR_LOGIN_BASE, TUYA_HA_CLIENT_ID  # noqa: PLC0415
 
         url = f"{_QR_LOGIN_BASE}/v1.0/m/token/{self._refresh_token}"
         headers = {
@@ -499,6 +499,9 @@ class TuyaOAuthManager:
             if online_values:
                 info["online"] = any(bool(value) for value in online_values)
             if info["id"]:
+                from .gateway import device_metadata  # noqa: PLC0415
+
+                info.update(device_metadata(dev))
                 devices.append(info)
                 self._sharing_device_cache[info["id"]] = info
                 # Build a synthesised schema dict from the SDK's function /
@@ -582,6 +585,22 @@ class TuyaOAuthManager:
         result = await helper.get_device_credentials(device_id, strict=False)
         self._sync_from_helper(helper)
         return result
+
+    async def async_list_gateway_children(self, gateway_id: str) -> list[dict[str, Any]]:
+        """Reuse the existing account metadata and project API when available."""
+        from .gateway import parent_id  # noqa: PLC0415
+
+        if self.is_qr_mode:
+            # QR sharing sessions do not necessarily authorize OpenAPI calls.
+            # Preserve SDK metadata and provide the advanced CID form if absent.
+            devices = await self.async_list_devices()
+            return [device for device in devices if parent_id(device) == gateway_id]
+        if not await self.async_ensure_token():
+            return []
+        helper = self._get_helper()
+        children = await helper.get_gateway_children(gateway_id)
+        self._sync_from_helper(helper)
+        return list(children)
 
     async def async_get_device_schema(
         self, device_id: str

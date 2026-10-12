@@ -34,18 +34,22 @@ from .const import (
     CONF_CLOUD_ACCESS_ID,
     CONF_CLOUD_ACCESS_SECRET,
     CONF_CLOUD_REGION,
+    CONF_CONNECTION_TYPE,
     CONF_DEFERRED_LOCAL_CONNECT,
     CONF_DETECTED_VERSION,
     CONF_DEVELOPER_ALERT_EMAIL,
     CONF_DEVELOPER_ALERT_NOTIFY_SERVICE,
-    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     CONF_DEVICE_ID,
+    CONF_DEVICE_METADATA,
     CONF_DEVICE_PROFILE,
     CONF_DEVICE_TYPE,
+    CONF_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
     CONF_DP_MAP,
     CONF_ENABLE_AUTO_RECONNECT,
     CONF_ENABLE_DEVELOPER_OFFLINE_ALERTS,
     CONF_ENTRY_TYPE,
+    CONF_GATEWAY_DEVICE_ID,
+    CONF_GATEWAY_METADATA,
     CONF_IR_BRAND,
     CONF_IR_BRAND_ID,
     CONF_IR_CATEGORY_ID,
@@ -56,21 +60,23 @@ from .const import (
     CONF_LOCAL_KEY,
     CONF_LOW_POWER_DEVICE,
     CONF_MAPPING_SOURCE,
-    CONF_PROTOCOL_VERSION,
     CONF_OFFLINE_ALERT_DELAY_MINUTES,
+    CONF_PROTOCOL_VERSION,
     CONF_RUNTIME_CHANNEL,
     CONF_SEND_RECOVERY_EMAIL,
-    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     CONF_TUYA_CATEGORY,
+    CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     CONF_VERBOSE_LOGGING,
-    DEFAULT_ENABLE_AUTO_RECONNECT,
+    CONNECTION_TYPE_GATEWAY_CHILD,
     DEFAULT_DISABLE_OFFLINE_ALERTS_FOR_THIS_DEVICE,
+    DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
     DEFAULT_USE_GLOBAL_OFFLINE_ALERT_SETTINGS,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     ENTRY_TYPE_GLOBAL_SETTINGS,
+    GATEWAY_CONFIG_KEYS,
     PLATFORMS,
     RUNTIME_CHANNEL_CLOUD,
     RUNTIME_CHANNEL_CLOUD_SENSOR,
@@ -760,6 +766,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "ha_host_ip": ha_host_ip,
         "ha_host_subnet": ha_host_subnet,
     }
+    gateway_child = entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+    if gateway_child:
+        device_config.update({
+            key: entry.data[key] for key in GATEWAY_CONFIG_KEYS if key in entry.data
+        })
+        # Register the parent before entity platforms attach the child device.
+        from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+        registry = dr.async_get(hass)
+        gateway_id = entry.data[CONF_GATEWAY_DEVICE_ID]
+        gateway_metadata = entry.data.get(CONF_GATEWAY_METADATA, {})
+        registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, gateway_id)},
+            name=(gateway_metadata.get("name") or gateway_metadata.get("product_name")
+                  or f"Tuya Gateway {gateway_id[-6:]}"),
+            manufacturer=gateway_metadata.get("manufacturer") or "Tuya",
+        )
+        metadata = entry.data.get(CONF_DEVICE_METADATA, {})
+        registry.async_get_or_create(
+            config_entry_id=entry.entry_id, identifiers={(DOMAIN, device_id)},
+            name=entry.title, manufacturer=metadata.get("manufacturer") or "Tuya",
+            model=metadata.get("model") or metadata.get("product_name") or None,
+            via_device=(DOMAIN, gateway_id),
+        )
+
     # Existing per-device alert values remain a temporary fallback only when
     # there is no global settings entry. They are not copied to new entries.
     for legacy_key in (
@@ -920,40 +952,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "in the background",
                 device_id,
             )
-        try:
-            from .cloud_device_runtime import CloudDeviceRuntime  # noqa: PLC0415
-            from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
+        if not gateway_child:
+            try:
+                from .cloud_device_runtime import CloudDeviceRuntime  # noqa: PLC0415
+                from .tuya_oauth import TuyaOAuthManager  # noqa: PLC0415
 
-            availability_oauth_key = f"{_OAUTH_KEY}_availability"
-            oauth = hass.data[DOMAIN].get(availability_oauth_key)
-            if oauth is None:
-                oauth = TuyaOAuthManager(hass, entry_id=entry.entry_id)
-                await oauth.async_load()
-                if not oauth.is_configured:
-                    oauth_global = TuyaOAuthManager(hass)
-                    await oauth_global.async_load()
-                    oauth = oauth_global
+                availability_oauth_key = f"{_OAUTH_KEY}_availability"
+                oauth = hass.data[DOMAIN].get(availability_oauth_key)
+                if oauth is None:
+                    oauth = TuyaOAuthManager(hass, entry_id=entry.entry_id)
+                    await oauth.async_load()
+                    if not oauth.is_configured:
+                        oauth_global = TuyaOAuthManager(hass)
+                        await oauth_global.async_load()
+                        oauth = oauth_global
+                    if oauth.is_configured:
+                        hass.data[DOMAIN][availability_oauth_key] = oauth
+
                 if oauth.is_configured:
-                    hass.data[DOMAIN][availability_oauth_key] = oauth
-
-            if oauth.is_configured:
-                cloud_availability_runtime = CloudDeviceRuntime(
-                    device_id=device_id,
-                    oauth_manager=oauth,
-                    dp_map=dp_map,
-                )
-                _LOGGER.info(
-                    "Cloud availability monitor enabled for local device %s",
+                    cloud_availability_runtime = CloudDeviceRuntime(
+                        device_id=device_id,
+                        oauth_manager=oauth,
+                        dp_map=dp_map,
+                    )
+                    _LOGGER.info(
+                        "Cloud availability monitor enabled for local device %s",
+                        device_id,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Cloud availability monitor unavailable for %s: %s",
                     device_id,
+                    exc,
                 )
-        except Exception as exc:  # noqa: BLE001
-            _LOGGER.debug(
-                "Cloud availability monitor unavailable for %s: %s",
-                device_id,
-                exc,
-            )
 
-        if cloud_availability_runtime is None:
+        if cloud_availability_runtime is None and not gateway_child:
             access_id = str(entry.data.get(CONF_CLOUD_ACCESS_ID, "")).strip()
             access_secret = str(
                 entry.data.get(CONF_CLOUD_ACCESS_SECRET, "")

@@ -8,7 +8,7 @@ include = ["custom_components*"]
 
 [project]
 name = "conti"
-version = "0.3.8"
+version = "0.3.9"
 description = "Pure local LAN control of Tuya-based IoT devices as a Home Assistant custom integration"
 readme = "README.md"
 license = {text = "MIT"}
@@ -19,7 +19,7 @@ authors = [
 
 dependencies = [
     "cryptography>=41.0.0",
-    "tinytuya>=1.13.0",
+    "tinytuya>=1.17.6",
 ]
 
 [project.optional-dependencies]

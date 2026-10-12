@@ -33,6 +33,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from .const import (
+    CONF_CONNECTION_TYPE,
+    CONF_GATEWAY_DEVICE_ID,
+    CONNECTION_TYPE_GATEWAY_CHILD,
     DEFAULT_ENABLE_AUTO_RECONNECT,
     DEFAULT_PORT,
     DEFAULT_PROTOCOL_VERSION,
@@ -41,6 +44,7 @@ from .const import (
     RECONNECT_MAX_DELAY,
 )
 from .dp_mapping import mask_key
+from .gateway import GatewayChild, GatewaySession
 from .tinytuya_client import TinyTuyaDevice
 
 if TYPE_CHECKING:
@@ -150,6 +154,8 @@ class DeviceManager:
 
     def __init__(self, alert_manager: OfflineAlertManager | None = None) -> None:
         self._devices: dict[str, _ManagedDevice] = {}
+        self._gateways: dict[str, GatewaySession] = {}
+        self._gateway_setup_lock = asyncio.Lock()
         # Per-device: *set* of callbacks so multiple listeners can register.
         self._state_callbacks: dict[
             str, set[Callable[[str, dict[str, Any]], None]]
@@ -183,6 +189,11 @@ class DeviceManager:
         """Close every connection and cancel pending reconnects/listeners."""
         self._running = False
         cancelled: list[asyncio.Task[None]] = []
+        for gateway in self._gateways.values():
+            await self._stop_gateway_listener(gateway)
+            if gateway.reconnect_task and not gateway.reconnect_task.done():
+                gateway.reconnect_task.cancel()
+                cancelled.append(gateway.reconnect_task)
         listeners: list[asyncio.Task[None]] = []
         for dev in self._devices.values():
             if dev.listener_task and not dev.listener_task.done():
@@ -200,6 +211,9 @@ class DeviceManager:
             await asyncio.gather(*listeners, return_exceptions=True)
         for dev in self._devices.values():
             await dev.client.close()
+        for gateway in self._gateways.values():
+            await gateway.close()
+        self._gateways.clear()
         if self._alert_manager is not None:
             await self._alert_manager.async_shutdown()
         self._devices.clear()
@@ -228,6 +242,190 @@ class DeviceManager:
                     del self._state_callbacks[device_id]
 
     # -- Device registration -------------------------------------------------
+
+    def get_gateway(self, gateway_id: str) -> GatewaySession | None:
+        """Allow onboarding to reuse a registered parent's socket."""
+        return self._gateways.get(gateway_id)
+
+    async def _add_gateway_child(self, config: dict[str, Any]) -> bool:
+        """Register a separate child while sharing its parent's transport."""
+        async with self._gateway_setup_lock:
+            device_id = str(config["device_id"])
+            if device_id in self._devices:
+                return self.is_online(device_id)
+            gateway_id = str(config.get(CONF_GATEWAY_DEVICE_ID, "")).strip()
+            if not gateway_id or gateway_id == device_id:
+                raise ValueError("gateway_identifier_invalid")
+            gateway = self._gateways.get(gateway_id)
+            if gateway_id in self._devices:
+                raise ValueError("gateway_configuration_conflict")
+            if gateway is None:
+                gateway = GatewaySession(config)
+                self._gateways[gateway_id] = gateway
+                gateway.on_disconnect = lambda: self._gateway_disconnected(gateway)
+                gateway.on_child_offline = self._gateway_child_offline
+            elif (gateway.host, gateway.key, gateway.port) != (
+                str(config["host"]), str(config["local_key"]).strip(),
+                int(config.get("port", DEFAULT_PORT)),
+            ) or str(config.get("protocol_version", "auto")) not in {
+                "auto", gateway.version, gateway.detected_version,
+            }:
+                raise ValueError("gateway_configuration_conflict")
+            await self._stop_gateway_listener(gateway)
+            try:
+                async with gateway.lock:
+                    client = GatewayChild(config, gateway)
+            except ValueError:
+                if gateway.children:
+                    self._start_gateway_listener(gateway)
+                else:
+                    self._gateways.pop(gateway_id, None)
+                raise
+            managed = _ManagedDevice(client, config)
+            self._devices[device_id] = managed
+            self._wire_client(managed)
+            if self._alert_manager is not None:
+                self._alert_manager.configure_device(device_id, config)
+            connected = await client.connect()
+            if connected:
+                await client.status()
+                managed.online = client.last_status_was_live or bool(client.cached_dps)
+                self._update_diag_on_connect(managed)
+            if managed.online:
+                self._clear_cloud_fallback(managed)
+                self._device_online(managed)
+            else:
+                managed.diag.last_error = client.last_failure_reason or gateway.error
+                self._device_offline(managed)
+            self._start_gateway_listener(gateway)
+            self._schedule_gateway_reconnect(gateway)
+            return managed.online
+
+    async def _query_gateway_child(self, managed: _ManagedDevice) -> dict[str, Any] | None:
+        client = managed.client
+        assert isinstance(client, GatewayChild)
+        if not client.connected:
+            self._gateway_disconnected(client.gateway)
+            return client.cached_dps
+        if managed.lock.locked():
+            return None
+        async with managed.lock:
+            dps = await client.status(timeout=2.0)
+        if dps:
+            managed.online = True
+            managed.diag.consecutive_failures = 0
+            managed.diag.last_status_ok = time.monotonic()
+            self._clear_cloud_fallback(managed)
+            self._device_online(managed)
+        else:
+            managed.diag.consecutive_failures += 1
+            managed.diag.last_error = client.last_failure_reason
+            if managed.diag.consecutive_failures >= 5:
+                managed.online = False
+                self._device_offline(managed)
+        if not client.connected:
+            self._gateway_disconnected(client.gateway)
+        return dps or client.cached_dps
+
+    def _gateway_disconnected(self, gateway: GatewaySession) -> None:
+        for device_id in gateway.children:
+            managed = self._devices.get(device_id)
+            if managed is not None:
+                managed.online = False
+                managed.diag.last_error = gateway.error or "gateway_unreachable"
+                managed.local_status = "reconnecting"
+                self._device_offline(managed)
+                self._on_dp_update(device_id, {})
+        self._schedule_gateway_reconnect(gateway)
+
+    def _gateway_child_offline(self, device_id: str) -> None:
+        managed = self._devices.get(device_id)
+        if managed is not None:
+            managed.online = False
+            managed.diag.last_error = "child_offline"
+            self._device_offline(managed)
+            self._on_dp_update(device_id, {})
+
+    def _start_gateway_listener(self, gateway: GatewaySession) -> None:
+        if not self._running or not gateway.connected or not gateway.children:
+            return
+        if gateway.listener_task and not gateway.listener_task.done():
+            return
+        gateway.listener_stop.clear()
+        gateway.listener_task = asyncio.create_task(self._listen_gateway(gateway))
+
+    async def _stop_gateway_listener(self, gateway: GatewaySession) -> None:
+        gateway.listener_stop.set()
+        task = gateway.listener_task
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+            gateway.listener_task = None
+
+    async def _listen_gateway(self, gateway: GatewaySession) -> None:
+        try:
+            while self._running and gateway.connected and not gateway.listener_stop.is_set():
+                await gateway.receive()
+                await asyncio.sleep(0.15)
+        finally:
+            if gateway.listener_task is asyncio.current_task():
+                gateway.listener_task = None
+
+    def _schedule_gateway_reconnect(self, gateway: GatewaySession) -> None:
+        if not self._running or gateway.connected:
+            return
+        if gateway.reconnect_task and not gateway.reconnect_task.done():
+            return
+        if not any(
+            self._devices[device_id].config.get("enable_auto_reconnect", False)
+            for device_id in gateway.children if device_id in self._devices
+        ):
+            return
+        gateway.reconnect_task = asyncio.create_task(self._recover_gateway(gateway))
+
+    async def _recover_gateway(self, gateway: GatewaySession) -> None:
+        delay = RECONNECT_BASE_DELAY
+        try:
+            while self._running and gateway.children and not gateway.connected:
+                for device_id in gateway.children:
+                    self._devices[device_id].next_retry_time = self._utc_after(delay)
+                await asyncio.sleep(delay)
+                if gateway.connected or not gateway.children or not self._running:
+                    return
+                if await self._restore_gateway(gateway):
+                    return
+                delay = min(delay * 2, RECONNECT_MAX_DELAY)
+        finally:
+            for device_id in gateway.children:
+                if device_id in self._devices:
+                    self._devices[device_id].next_retry_time = None
+            gateway.reconnect_task = None
+
+    async def _restore_gateway(self, gateway: GatewaySession) -> bool:
+        """Reconnect one parent, rebuild all child handles, then refresh each."""
+        await self._stop_gateway_listener(gateway)
+        self._gateway_disconnected(gateway)
+        await gateway.close()
+        for device_id in gateway.children:
+            self._devices[device_id].diag.reconnect_attempts += 1
+        connected = await gateway.connect()
+        if connected:
+            for device_id, child in list(gateway.children.items()):
+                managed = self._devices.get(device_id)
+                if managed is None:
+                    continue
+                # Cached pre-disconnect state is never proof of recovery.
+                dps = await child.status()
+                managed.online = bool(dps)
+                self._update_diag_on_connect(managed)
+                if dps:
+                    self._clear_cloud_fallback(managed)
+                    self._device_online(managed)
+                else:
+                    self._device_offline(managed)
+            self._start_gateway_listener(gateway)
+        else:
+            self._gateway_disconnected(gateway)
+        return connected
 
     @staticmethod
     def _new_client(config: dict[str, Any]) -> TinyTuyaDevice:
@@ -264,7 +462,11 @@ class DeviceManager:
 
         Returns `True` if the initial connection **and** status succeeded.
         """
+        if config.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD:
+            return await self._add_gateway_child(config)
         device_id: str = config["device_id"]
+        if device_id in self._gateways:
+            raise ValueError("gateway_configuration_conflict")
         if self._alert_manager is not None:
             self._alert_manager.configure_device(device_id, config)
         if device_id in self._devices:
@@ -403,6 +605,23 @@ class DeviceManager:
         managed = self._devices.pop(device_id, None)
         if managed is None:
             return
+        if isinstance(managed.client, GatewayChild):
+            gateway = managed.client.gateway
+            await self._stop_gateway_listener(gateway)
+            async with gateway.lock:
+                await managed.client.close()
+            if not gateway.children:
+                if gateway.reconnect_task and not gateway.reconnect_task.done():
+                    gateway.reconnect_task.cancel()
+                    await asyncio.gather(gateway.reconnect_task, return_exceptions=True)
+                await gateway.close()
+                self._gateways.pop(gateway.device_id, None)
+            else:
+                self._start_gateway_listener(gateway)
+            if self._alert_manager is not None:
+                await self._alert_manager.remove_device(device_id)
+            self._state_callbacks.pop(device_id, None)
+            return
         if managed.listener_task and not managed.listener_task.done():
             managed.listener_stop.set()
             await asyncio.gather(managed.listener_task, return_exceptions=True)
@@ -528,6 +747,9 @@ class DeviceManager:
             return {}
 
         # ---- Device is currently offline ----
+        if isinstance(managed.client, GatewayChild):
+            return await self._query_gateway_child(managed)
+
         if not managed.online:
             # Polling must not be a hidden reconnect path. It can only ensure
             # the explicitly enabled background task exists and serve cache.
@@ -648,6 +870,9 @@ class DeviceManager:
             return {}
 
         # Ensure the device is connected
+        if isinstance(managed.client, GatewayChild):
+            return await managed.client.detect_dps() if managed.client.connected else {}
+
         if not managed.online or not managed.client.connected:
             _LOGGER.info("detect_dps: connecting to %s first", device_id)
             async with managed.lock:
@@ -681,6 +906,8 @@ class DeviceManager:
         managed = self._devices.get(device_id)
         if not managed:
             return False
+        if isinstance(managed.client, GatewayChild):
+            return managed.online and managed.client.connected
         if managed.control_path == "unavailable":
             return False
         if managed.control_path == "cloud_fallback":
@@ -764,6 +991,14 @@ class DeviceManager:
             "last_probe_failure_detail": client.last_failure_detail,
             "protocol_attempt_failures": client.attempt_failures,
         }
+        if isinstance(client, GatewayChild):
+            diagnostics.update({
+                "connection_type": CONNECTION_TYPE_GATEWAY_CHILD,
+                "gateway_connected": client.gateway.connected,
+                "gateway_child_count": len(client.gateway.children),
+                "gateway_error": client.gateway.error,
+                "child_error": client.last_failure_reason,
+            })
         if self._alert_manager is not None:
             diagnostics.update(self._alert_manager.get_diagnostics(device_id))
         else:
@@ -982,6 +1217,10 @@ class DeviceManager:
             _LOGGER.debug("Ignoring stale-client DP callback device=%s", device_id)
             return
         if managed and local and dps:
+            if isinstance(managed.client, GatewayChild):
+                managed.online = True
+                managed.diag.consecutive_failures = 0
+                self._clear_cloud_fallback(managed)
             managed.diag.last_local_update = self._utc_now()
             self._device_online(managed)
         callbacks = self._state_callbacks.get(device_id)
@@ -1206,6 +1445,20 @@ class DeviceManager:
         if not managed:
             return False
 
+        if isinstance(managed.client, GatewayChild):
+            gateway = managed.client.gateway
+            if gateway.reconnect_task and not gateway.reconnect_task.done():
+                await asyncio.shield(gateway.reconnect_task)
+                return gateway.connected
+            task = asyncio.create_task(self._restore_gateway(gateway))
+            gateway.reconnect_task = task
+            try:
+                return await asyncio.shield(task)
+            finally:
+                if task.done():
+                    gateway.reconnect_task = None
+                    self._schedule_gateway_reconnect(gateway)
+
         current = asyncio.current_task()
         existing = managed.reconnect_task
         if existing and existing is not current and not existing.done():
@@ -1240,9 +1493,16 @@ class DeviceManager:
     async def reconnect_all(self) -> dict[str, bool]:
         """Reconnect degraded devices serially and isolate per-device errors."""
         results: dict[str, bool] = {}
+        gateways_done: dict[str, bool] = {}
         for device_id in self.degraded_device_ids():
+            client = self._devices[device_id].client
+            if isinstance(client, GatewayChild) and client.gateway.device_id in gateways_done:
+                results[device_id] = gateways_done[client.gateway.device_id]
+                continue
             try:
                 results[device_id] = await self.reconnect_device(device_id)
+                if isinstance(client, GatewayChild):
+                    gateways_done[client.gateway.device_id] = results[device_id]
             except Exception as exc:  # noqa: BLE001
                 results[device_id] = False
                 managed = self._devices.get(device_id)
@@ -1261,6 +1521,9 @@ class DeviceManager:
     def _schedule_reconnect(self, device_id: str) -> None:
         managed = self._devices.get(device_id)
         if not managed or not self._running:
+            return
+        if isinstance(managed.client, GatewayChild):
+            self._schedule_gateway_reconnect(managed.client.gateway)
             return
         if not managed.config.get(
             "enable_auto_reconnect", DEFAULT_ENABLE_AUTO_RECONNECT

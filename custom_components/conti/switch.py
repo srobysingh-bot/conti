@@ -20,9 +20,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_CONNECTION_TYPE,
     CONF_DEVICE_ID,
+    CONF_DEVICE_METADATA,
     CONF_DEVICE_TYPE,
     CONF_DP_MAP,
+    CONF_GATEWAY_DEVICE_ID,
+    CONNECTION_TYPE_GATEWAY_CHILD,
     DEVICE_TYPE_SENSOR,
     DEVICE_TYPE_SWITCH,
     DOMAIN,
@@ -129,6 +133,13 @@ class ContiSwitch(CoordinatorEntity[ContiCoordinator], SwitchEntity):
             "name": entry.title,
             "manufacturer": MANUFACTURER,
         }
+        if entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD:
+            metadata = entry.data.get(CONF_DEVICE_METADATA, {})
+            self._attr_device_info.update({
+                "via_device": (DOMAIN, entry.data[CONF_GATEWAY_DEVICE_ID]),
+                "model": metadata.get("model") or metadata.get("product_name") or None,
+                "manufacturer": metadata.get("manufacturer") or "Tuya",
+            })
 
     def _dp_value(self) -> Any:
         data = self.coordinator.data or {}

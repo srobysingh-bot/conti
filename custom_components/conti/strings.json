@@ -18,10 +18,32 @@
           "name": "Device Name",
           "host": "Device IP Address",
           "port": "Port (default 6668)",
-          "device_type": "Device Type"
+          "device_type": "Device Type",
+          "connection_type": "Device connection type"
         },
         "data_description": {
           "host": "Local IP address of the device. Leave blank for Smart Life or cloud-assisted setup."
+        }
+      },
+      "gateway_child": {
+        "title": "Configure gateway and child",
+        "description": "Use the gateway LAN address and local key, and the child Device ID and separate CID (node_id). Cloud metadata may fill these fields; confirm them before querying. A device ID is not a CID. Only locally reported child datapoints can be mapped.",
+        "data": {
+          "saved_gateway": "Reuse configured gateway",
+          "gateway_device_id": "Gateway Device ID",
+          "host": "Gateway LAN IP / hostname",
+          "local_key": "Gateway local key",
+          "device_id": "Child Device ID",
+          "child_cid": "Child CID / node_id (advanced)",
+          "port": "Gateway TCP port",
+          "protocol_version": "Gateway protocol version"
+        }
+      },
+      "gateway_pick_child": {
+        "title": "Select gateway child",
+        "description": "Choose a child associated with this gateway. If your account does not expose the relationship or CID, use the advanced manual option.",
+        "data": {
+          "cloud_device_id": "Child device"
         }
       },
       "oauth_login": {
@@ -218,7 +240,23 @@
       "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
       "ir_learning_failed": "IR learning failed. Make sure the remote was captured and try again.",
       "ir_send_failed": "IR command sending failed on all available paths.",
-      "unknown": "An unexpected error occurred."
+      "unknown": "An unexpected error occurred.",
+      "gateway_unreachable": "Cannot reach the gateway on the LAN. Check its address, TCP port and network routing.",
+      "gateway_authentication_failed": "Gateway authentication/decryption failed. Check the gateway local key.",
+      "gateway_key_or_version": "The gateway rejected the key or protocol version (TinyTuya error 914). Check both; this error cannot distinguish them.",
+      "gateway_protocol_unsupported": "This gateway protocol is unsupported. Select a supported Tuya LAN protocol.",
+      "gateway_connected_but_child_not_found": "The gateway responded but its child list does not contain this CID. Check the parent relationship and node_id.",
+      "child_identifier_missing": "Enter the child CID / node_id. The cloud device ID cannot be substituted automatically.",
+      "child_identifier_duplicate": "This CID is already assigned to a child on this gateway.",
+      "child_offline": "The gateway reports this child offline. Wake or power the child and retry.",
+      "child_status_query_failed": "The gateway did not return a verified status for this child. Check its CID, power and support for local queries.",
+      "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry.",
+      "child_protocol_error": "The gateway/child returned an invalid or unsupported protocol response. Check its LAN protocol and local support.",
+      "child_mapping_failed": "A child mapping must be nonempty and contain only datapoints verified from this child on the LAN.",
+      "gateway_identifier_invalid": "Enter the parent gateway Device ID. It must differ from the child Device ID.",
+      "gateway_credentials_required": "Enter the gateway LAN address and local key, and the child Device ID.",
+      "gateway_configuration_conflict": "This gateway is already configured with different connection settings or as a direct device. Use matching settings or remove the old gateway shell entry.",
+      "child_local_control_unsupported": "The gateway or child reports that this local operation is unsupported."
     }
   },
   "options": {
@@ -296,7 +334,9 @@
       "invalid_dp_map": "The DP mapping JSON is not valid.",
       "developer_alert_destination_required": "Enter a developer email address or a Home Assistant notify service.",
       "ir_learning_failed": "IR learning failed. Make sure the captured payload is not empty or too short.",
-      "ir_command_exists": "That IR command already exists. Enable overwrite to replace it."
+      "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
+      "child_mapping_failed": "A child mapping must be nonempty and contain only datapoints verified from this child on the LAN.",
+      "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry."
     }
   }
 }

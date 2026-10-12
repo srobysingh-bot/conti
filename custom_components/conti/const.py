@@ -16,6 +16,16 @@ MANUFACTURER: Final = "Conti"
 # Config-entry data keys
 # ---------------------------------------------------------------------------
 CONF_DEVICE_ID: Final = "device_id"
+CONF_CONNECTION_TYPE: Final = "connection_type"
+CONNECTION_TYPE_DIRECT: Final = "direct"
+CONNECTION_TYPE_GATEWAY_CHILD: Final = "gateway_child"
+CONF_GATEWAY_DEVICE_ID: Final = "gateway_device_id"
+CONF_CHILD_CID: Final = "child_cid"
+CONF_DEVICE_METADATA: Final = "device_metadata"
+CONF_GATEWAY_METADATA: Final = "gateway_metadata"
+# host/local_key/protocol_version belong to the gateway for child entries.
+# Reuse these existing fields rather than storing a second copy of credentials.
+GATEWAY_CONFIG_KEYS: Final = (CONF_CONNECTION_TYPE, CONF_GATEWAY_DEVICE_ID, CONF_CHILD_CID)
 CONF_LOCAL_KEY: Final = "local_key"
 CONF_PROTOCOL_VERSION: Final = "protocol_version"
 CONF_DEVICE_TYPE: Final = "device_type"

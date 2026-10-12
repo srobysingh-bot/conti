@@ -667,7 +667,20 @@ class TuyaCloudSchemaHelper:
         if local_key:
             result["local_key"] = str(local_key)
 
+        from .gateway import device_metadata  # noqa: PLC0415
+
+        result.update(device_metadata(device_info))
         return result
+
+    async def get_gateway_children(self, gateway_id: str) -> list[dict[str, Any]]:
+        """Read Tuya's documented Zigbee child list during onboarding only."""
+        payload = await self._api_get(f"/v1.0/devices/{gateway_id}/sub-devices")
+        if isinstance(payload, list):
+            payload = {"list": payload}
+        children = self._extract_device_list(payload)
+        for child in children:
+            child["gateway_id"] = gateway_id
+        return children
 
     async def get_device_status(
         self,
@@ -1107,6 +1120,9 @@ class TuyaCloudSchemaHelper:
                     info["online"] = bool(item.get(online_key))
                     break
             devices.append(info)
+            from .gateway import device_metadata  # noqa: PLC0415
+
+            info.update(device_metadata(item))
         return devices
 
     @staticmethod
