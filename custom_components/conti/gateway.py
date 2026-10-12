@@ -7,6 +7,7 @@ No gateway DPS or unidentified packets are accepted as child state.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -16,6 +17,8 @@ import tinytuya
 
 from .const import AUTO_DETECT_ORDER, CONF_CHILD_CID, CONF_GATEWAY_DEVICE_ID
 from .tinytuya_client import TinyTuyaDevice
+
+_LOGGER = logging.getLogger(__name__)
 
 METADATA_FIELDS = (
     "name",
@@ -83,7 +86,9 @@ def gateway_error(result: Any = None, exc: Exception | None = None) -> str:
         if code == "914":
             # TinyTuya uses 914 for key OR version. Never call it proven bad auth.
             return "gateway_key_or_version"
-        if code in {"901", "902", "905"}:
+        if code == "902":
+            return "gateway_response_timeout"
+        if code in {"901", "905"}:
             return "gateway_unreachable"
         if code == "904":
             return "child_protocol_error"
@@ -114,6 +119,8 @@ class GatewaySession:
         self.connected = False
         self.detected_version: str | None = None
         self.error = ""
+        self.failure_code = "none"
+        self.failure_stage = "gateway_session"
         self.listener_task: asyncio.Task[None] | None = None
         self.listener_stop = asyncio.Event()
         self.reconnect_task: asyncio.Task[Any] | None = None
@@ -236,6 +243,8 @@ class GatewaySession:
                 self.error = "gateway_protocol_unsupported"
                 return False, updates
             self._close_sync()
+            self.failure_stage = "gateway_session"
+            self.failure_code = "none"
             try:
                 self.device = tinytuya.Device(
                     self.device_id,
@@ -255,6 +264,7 @@ class GatewaySession:
                 # A valid subdevice-list response verifies gateway decryption
                 # even when a selected child is missing or asleep.
                 result = self.device.subdev_query()
+                self.failure_stage = "gateway_child_list"
                 self._presence_at = time.monotonic()
                 authenticated = (
                     isinstance(result, dict)
@@ -270,6 +280,7 @@ class GatewaySession:
                         child._last_failure_reason = self.child_error(child)
                         continue
                     packet = child._send_status_query(child._device, float(version))
+                    self.failure_stage = "child_status"
                     routed = self.route(packet)
                     updates.update(routed)
                     authenticated = authenticated or bool(routed)
@@ -289,6 +300,10 @@ class GatewaySession:
                         child._detected_version = version if self.version == "auto" else None
                     return True, updates
                 self.error = gateway_error(result)
+                if isinstance(result, dict) and str(result.get("Err", "")) in {
+                    str(code) for code in range(900, 915)
+                }:
+                    self.failure_code = str(result["Err"])
             except Exception as exc:
                 self.error = gateway_error(exc=exc)
         self._close_sync()
@@ -480,9 +495,18 @@ async def probe_child(
         async with gateway.lock:
             child = GatewayChild(config, gateway)
         if not await gateway.connect():
+            _LOGGER.warning(
+                "Conti gateway setup failed: stage=%s protocol=%s "
+                "tinytuya_code=%s error=%s",
+                gateway.failure_stage, gateway.version, gateway.failure_code, gateway.error,
+            )
             return False, None, {}, gateway.error
         dps = await child.detect_dps()
         if not dps:
+            _LOGGER.warning(
+                "Conti gateway setup failed: stage=child_discovery protocol=%s error=%s",
+                gateway.detected_version, child.last_failure_reason or "child_dp_discovery_empty",
+            )
             return (
                 False,
                 gateway.detected_version,

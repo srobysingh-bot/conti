@@ -188,6 +188,8 @@ async def test_missing_cid_never_connects(factory):
         ({"Error": "Decrypt failed"}, None, "gateway_authentication_failed"),
         ({"Err": "914"}, None, "gateway_key_or_version"),
         ({"Err": "901"}, None, "gateway_unreachable"),
+        ({"Err": "902"}, None, "gateway_response_timeout"),
+        ({"Err": "905"}, None, "gateway_unreachable"),
         ({"Err": "904"}, None, "child_protocol_error"),
         (None, ConnectionRefusedError(), "gateway_unreachable"),
         (None, ValueError("protocol unsupported"), "gateway_protocol_unsupported"),
@@ -206,6 +208,8 @@ def test_error_classification(result, exc, expected):
             "gateway_authentication_failed",
         ),
         ({"Err": "901", "Error": "Network Error"}, "gateway_unreachable"),
+        ({"Err": "902", "Error": "Timeout", "Payload": "0123456789abcdef"},
+         "gateway_response_timeout"),
         ({"Err": "914", "Error": "key or version"}, "gateway_key_or_version"),
     ],
 )
@@ -215,6 +219,9 @@ async def test_failed_gateway_probe_has_no_secret_detail(factory, caplog, reply,
     ok, _, dps, error = await probe_child(config())
     assert not ok and not dps and error == expected
     assert "0123456789abcdef" not in caplog.text
+    assert "Conti gateway setup failed: stage=child_status" in caplog.text
+    if reply.get("Err"):
+        assert f"tinytuya_code={reply['Err']}" in caplog.text
     assert factory.parents[0].closed
 
 
@@ -634,6 +641,39 @@ async def test_failed_child_probe_releases_id_and_allows_retry(factory, flow_mod
     result = await flow.async_step_gateway_child(config())
     assert result["step_id"] == "review"
     assert flow.unique_id == "child-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["901", "902"])
+@pytest.mark.parametrize("reachable", [True, False])
+async def test_failed_setup_reports_tcp_evidence_after_closing_probe(
+    factory, flow_module, caplog, code, reachable,
+):
+    flow = make_flow(flow_module)
+    reply = {"Err": code, "Error": "failure", "Payload": "0123456789abcdef"}
+    factory.gateway_reply = reply
+    factory.replies["node-a"] = reply
+
+    async def tcp_probe(host, port):
+        assert host == "10.10.10.10" and port == 6668
+        assert factory.parents and all(parent.closed for parent in factory.parents)
+        return reachable, None if reachable else "cannot_connect", (
+            "connected" if reachable else "timeout"
+        )
+
+    with patch.object(flow_module, "_async_probe_tcp", AsyncMock(side_effect=tcp_probe)) as tcp:
+        result = await flow.async_step_gateway_child(config())
+    expected = (
+        "gateway_tcp_reachable_no_session" if reachable
+        else "gateway_unreachable" if code == "901"
+        else "gateway_response_timeout"
+    )
+    assert result["errors"]["base"] == expected
+    assert flow.unique_id is None
+    tcp.assert_awaited_once()
+    assert "Conti gateway setup diagnostic:" in caplog.text
+    assert f"tcp_result={'connected' if reachable else 'timeout'}" in caplog.text
+    assert "0123456789abcdef" not in caplog.text
 
 
 @pytest.mark.asyncio

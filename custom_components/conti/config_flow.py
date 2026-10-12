@@ -1170,6 +1170,21 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # A failed probe leaves the form open for corrections, but
                     # must not reserve this child if the user abandons it.
                     await self.async_set_unique_id(None)
+                    if error in {"gateway_unreachable", "gateway_response_timeout"}:
+                        # Run on the HA host after the failed Tuya session has
+                        # closed. A successful TCP open does not verify its key.
+                        reachable, _, tcp_result = await _async_probe_tcp(
+                            self._flow_data[CONF_HOST],
+                            int(self._flow_data.get(CONF_PORT, DEFAULT_PORT)),
+                        )
+                        _LOGGER.warning(
+                            "Conti gateway setup diagnostic: protocol=%s "
+                            "tuya_error=%s tcp_result=%s",
+                            self._flow_data.get(CONF_PROTOCOL_VERSION, "auto"),
+                            error, tcp_result,
+                        )
+                        if reachable:
+                            error = "gateway_tcp_reachable_no_session"
                     errors["base"] = error
                 else:
                     from .gateway import map_child_dps  # noqa: PLC0415

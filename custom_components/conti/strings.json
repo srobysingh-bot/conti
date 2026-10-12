@@ -244,6 +244,8 @@
       "ir_send_failed": "IR command sending failed on all available paths.",
       "unknown": "An unexpected error occurred.",
       "gateway_unreachable": "Cannot reach the gateway on the LAN. Check its address, TCP port and network routing.",
+      "gateway_response_timeout": "The Tuya gateway request timed out. Check the Conti setup diagnostic in Home Assistant logs for the TCP test result.",
+      "gateway_tcp_reachable_no_session": "Home Assistant can open the gateway TCP port, but the Tuya request failed. Recheck the gateway key/protocol and any other local gateway clients. See the Conti setup diagnostic in Home Assistant logs.",
       "gateway_authentication_failed": "Gateway authentication/decryption failed. Check the gateway local key.",
       "gateway_key_or_version": "The gateway rejected the key or protocol version (TinyTuya error 914). Check both; this error cannot distinguish them.",
       "gateway_protocol_unsupported": "This gateway protocol is unsupported. Select a supported Tuya LAN protocol.",

@@ -8,9 +8,40 @@ local `main`, `origin/main`, and GitHub HEAD were all
 **feat: add global offline alert settings for Conti**. The working tree was clean.
 The offline alert changes in that commit are preserved.
 
-This implementation is packaged as **Conti 0.3.10**, tagged `v0.3.10`, for
+This implementation is packaged as **Conti 0.3.11**, tagged `v0.3.11`, for
 download through HACS. No installation or deployment to Home Assistant was
-performed during development or release. The real gateway was not contacted.
+performed during development or release. Subsequent read-only LAN checks
+verified WG-Z1 protocol 3.4, the Quad child CID, and live child status. No relay
+commands were sent; Home Assistant host connectivity remains under diagnosis.
+
+## Home Assistant connection diagnostics in 0.3.11
+
+Conti's exact `probe_child()` code succeeded repeatedly from the development
+workspace against the real gateway using protocol **3.4** and child CID
+**fc4d6afffe4d4eea**. The Quad returned 21 live datapoints. This verifies local
+status reads from that workspace only; it does not prove the Home Assistant
+host has the same route, session behavior, or relay control results.
+
+The user confirmed Conti 0.3.10 and a full Home Assistant restart, but setup still
+reported `gateway_unreachable` without a Conti log entry. This release fixes the
+diagnostic gap; it does not claim to resolve the underlying host-specific failure.
+
+- TinyTuya error 902 is now distinguished as a response timeout.
+- Failed onboarding records its stage, selected protocol, normalized error and
+  numeric TinyTuya code at warning level, without keys, IDs or raw payloads.
+- After a connection/timeout failure, the config flow tests TCP reachability from
+  the Home Assistant host and logs `Conti gateway setup diagnostic`.
+- A successful TCP test produces `gateway_tcp_reachable_no_session`, explaining
+  that the socket can open but the Tuya request failed. A failed TCP test keeps
+  the connection/timeout error and logs the network result. TCP success alone
+  does not verify the gateway key or protocol.
+- Healthy onboarding does not open this extra diagnostic connection.
+
+Update through HACS to **0.3.11**, restart Home Assistant, and submit one setup
+attempt. Search HA logs for `Conti gateway setup` and collect the stage, numeric
+TinyTuya code and `tcp_result`. These results are required to diagnose the
+remaining Home Assistant-specific failure. No hardware commands are sent by
+this diagnostic check.
 
 ## Setup retry fix in 0.3.10
 
@@ -47,8 +78,8 @@ protocol, CID or DPS error requires the specific message/log to diagnose.
 | `custom_components/conti/diagnostics.py` | Export sanitized gateway connection, child count and error fields. |
 | `custom_components/conti/strings.json` | Labels and gateway/child errors, including options validation and setup retry messages. |
 | `custom_components/conti/translations/en.json` | Packaged English labels/errors for the Home Assistant frontend. |
-| `custom_components/conti/manifest.json` | Bump integration version to `0.3.10` and require `tinytuya>=1.17.6`. |
-| `pyproject.toml` | Match version `0.3.10` and the TinyTuya dependency floor. |
+| `custom_components/conti/manifest.json` | Bump integration version to `0.3.11` and require `tinytuya>=1.17.6`. |
+| `pyproject.toml` | Match version `0.3.11` and the TinyTuya dependency floor. |
 | `tests/test_gateway.py` | Mocked transport, flow, mapping, sharing, availability, recovery and concurrency coverage. |
 | `tests/test_gateway_protocol.py` | Contract check against installed TinyTuya with sockets mocked. |
 | `docs/gateway-child-testing.md` | This implementation report and physical test procedure. |
@@ -111,7 +142,7 @@ availability do not use Tuya cloud.
 Entries without gateway fields still take the existing direct-device path. No
 entry version bump or migration is required. The existing protocol wrapper,
 entity implementations, direct onboarding and offline alert behavior are retained.
-Previously passing tests remain passing. Physical regression tests were not run.
+Previously passing tests remain passing. Physical relay regression tests were not run; only read-only gateway/child LAN status was checked.
 
 Smart Life SDK/account metadata varies. Conti preserves parent, CID/node, product,
 category and online hints when supplied. Project-based cloud onboarding can also
@@ -143,16 +174,16 @@ Protocol references:
 
 | Check | Before edits | With gateway changes |
 | --- | --- | --- |
-| Existing/full pytest suite | 244 passed, 6 failed | 297 passed, same 6 failed |
-| New gateway tests, including installed-library contract | Not present | 53 passed |
+| Existing/full pytest suite | 244 passed, 6 failed | 304 passed, same 6 failed |
+| New gateway tests, including installed-library contract | Not present | 60 passed |
 | Gateway + device manager + config flow + offline alert focused run | Not applicable | 117 passed |
 | Full Ruff check | 178 existing findings | 172 existing findings; no findings on added/edited lines |
 | Ruff on new gateway module/tests | Not applicable | Passed |
 | Full mypy | 64 errors in 19 files | Same 64 errors in 19 files; new gateway module has no errors |
 | Python compilation and `git diff --check` | Not recorded | Passed |
 
-The full suite for 0.3.10 was run with `python -m pytest tests/ -q` and
-completed with **297 passed, 6 failed**, and 151 warnings. The five added retry
+The full suite for 0.3.11 was run with `python -m pytest tests/ -q` and
+completed with **304 passed, 6 failed**, and 156 warnings. Retry and diagnostic
 regression tests all pass. The warnings are from existing pytest-asyncio fixtures.
 The earlier 0.3.9 coverage run reported 38% overall integration coverage; coverage
 was not recalculated for this setup-only hotfix. The 117-test focused run above
@@ -185,11 +216,11 @@ These are manual instructions for testing the reviewed changes. No installation
 or test below has been performed on the live Home Assistant instance.
 
 1. Use a test Home Assistant installation with LAN access to the WG-Z1. In HACS,
-   open Conti and download/update to **v0.3.10**, then restart Home Assistant.
+   open Conti and download/update to **v0.3.11**, then restart Home Assistant.
    Allow HA to install TinyTuya 1.17.6 or newer. If HACS still lists the older
-   version, use Conti's **Update information** action, then select **v0.3.10**
+   version, use Conti's **Update information** action, then select **v0.3.11**
    in the download/redownload version selector. Confirm the installed integration
-   manifest reports `0.3.10` before starting the device tests.
+   manifest reports `0.3.11` before starting the device tests.
 2. Gather the **WG-Z1 gateway Device ID and gateway local key**, plus the Quad
    Switch Pro 2's **cloud Device ID and separate CID/node_id**. Prefer existing
    Smart Life metadata. If the SDK does not expose the CID, use Tuya device
