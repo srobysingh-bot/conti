@@ -1033,8 +1033,9 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             hint = _device_type_from_cloud_category(info["category"])
             if hint:
                 self._flow_data[CONF_DEVICE_TYPE] = hint
-        await self.async_set_unique_id(device_id)
-        self._abort_if_unique_id_configured()
+        conflict = await self._async_claim_gateway_child(device_id)
+        if conflict is not None:
+            return conflict
         gateway_id = parent_id(info)
         if gateway_id:
             if self._onboarding_mode == "cloud_assisted":
@@ -1104,6 +1105,23 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required("cloud_device_id"): vol.In(choices)}),
         )
 
+    async def _async_claim_gateway_child(
+        self, device_id: str,
+    ) -> config_entries.ConfigFlowResult | None:
+        """Resume an existing child setup without starting a second LAN probe."""
+        await self.async_set_unique_id(device_id, raise_on_progress=False)
+        self._abort_if_unique_id_configured()
+        for flow in self._async_in_progress(
+            include_uninitialized=True, match_context={"unique_id": device_id},
+        ):
+            if flow["context"].get("source") == config_entries.SOURCE_REAUTH:
+                continue
+            return self.async_abort(
+                reason="gateway_setup_in_progress",
+                next_flow=(config_entries.FlowType.CONFIG_FLOW, flow["flow_id"]),
+            )
+        return None
+
     async def async_step_gateway_child(
         self, user_input: dict[str, Any] | None = None,
     ) -> config_entries.ConfigFlowResult:
@@ -1140,14 +1158,18 @@ class ContiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ):
                 errors["base"] = "gateway_credentials_required"
             else:
-                await self.async_set_unique_id(self._flow_data[CONF_DEVICE_ID])
-                self._abort_if_unique_id_configured()
+                conflict = await self._async_claim_gateway_child(self._flow_data[CONF_DEVICE_ID])
+                if conflict is not None:
+                    return conflict
                 manager = self.hass.data.get(DOMAIN, {}).get("manager")
                 shared = None
                 if manager:
                     shared = manager.get_gateway(self._flow_data[CONF_GATEWAY_DEVICE_ID])
                 ok, version, dps, error = await probe_child(self._flow_data, shared)
                 if not ok:
+                    # A failed probe leaves the form open for corrections, but
+                    # must not reserve this child if the user abandons it.
+                    await self.async_set_unique_id(None)
                     errors["base"] = error
                 else:
                     from .gateway import map_child_dps  # noqa: PLC0415

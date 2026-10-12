@@ -8,9 +8,29 @@ local `main`, `origin/main`, and GitHub HEAD were all
 **feat: add global offline alert settings for Conti**. The working tree was clean.
 The offline alert changes in that commit are preserved.
 
-This implementation is packaged as **Conti 0.3.9**, tagged `v0.3.9`, for
+This implementation is packaged as **Conti 0.3.10**, tagged `v0.3.10`, for
 download through HACS. No installation or deployment to Home Assistant was
 performed during development or release. The real gateway was not contacted.
+
+## Setup retry fix in 0.3.10
+
+Home Assistant reserves a device unique ID while its setup flow remains open.
+Starting another setup for the same child could therefore abort with the raw
+`already_in_progress` message even though no Conti device entry had been created.
+The screenshot establishes a conflicting flow; it does not establish why the
+first gateway probe failed or whether the supplied credentials/CID are correct.
+
+Gateway retries now use Home Assistant's `next_flow` mechanism to resume the
+existing setup without opening another gateway socket or discarding its state.
+Already-configured children still reject duplicate entries. Failed gateway probes
+release their unique ID while keeping the form and entered values available for
+correction. Other devices and reauthentication flows remain independent.
+
+English UI translations are now shipped in `translations/en.json`, including
+clear gateway versus child field labels and actionable setup-conflict messages.
+After downloading 0.3.10, restart Home Assistant to load the fix and clear any
+unfinished 0.3.9 flows. Try adding the child once. A subsequent gateway, key,
+protocol, CID or DPS error requires the specific message/log to diagnose.
 
 ## Exact files changed
 
@@ -25,9 +45,10 @@ performed during development or release. The real gateway was not contacted.
 | `custom_components/conti/cloud_schema.py` | Preserve relationship metadata and use Tuya's documented gateway child-list endpoint. |
 | `custom_components/conti/tuya_oauth.py` | Preserve SDK metadata and reuse the existing account/helper for child selection. |
 | `custom_components/conti/diagnostics.py` | Export sanitized gateway connection, child count and error fields. |
-| `custom_components/conti/strings.json` | Labels and gateway/child errors, including options validation errors. |
-| `custom_components/conti/manifest.json` | Bump integration version to `0.3.9` and require `tinytuya>=1.17.6`. |
-| `pyproject.toml` | Match version `0.3.9` and the TinyTuya dependency floor. |
+| `custom_components/conti/strings.json` | Labels and gateway/child errors, including options validation and setup retry messages. |
+| `custom_components/conti/translations/en.json` | Packaged English labels/errors for the Home Assistant frontend. |
+| `custom_components/conti/manifest.json` | Bump integration version to `0.3.10` and require `tinytuya>=1.17.6`. |
+| `pyproject.toml` | Match version `0.3.10` and the TinyTuya dependency floor. |
 | `tests/test_gateway.py` | Mocked transport, flow, mapping, sharing, availability, recovery and concurrency coverage. |
 | `tests/test_gateway_protocol.py` | Contract check against installed TinyTuya with sockets mocked. |
 | `docs/gateway-child-testing.md` | This implementation report and physical test procedure. |
@@ -122,22 +143,21 @@ Protocol references:
 
 | Check | Before edits | With gateway changes |
 | --- | --- | --- |
-| Existing/full pytest suite | 244 passed, 6 failed | 292 passed, same 6 failed |
-| New gateway tests, including installed-library contract | Not present | 48 passed |
+| Existing/full pytest suite | 244 passed, 6 failed | 297 passed, same 6 failed |
+| New gateway tests, including installed-library contract | Not present | 53 passed |
 | Gateway + device manager + config flow + offline alert focused run | Not applicable | 117 passed |
 | Full Ruff check | 178 existing findings | 172 existing findings; no findings on added/edited lines |
 | Ruff on new gateway module/tests | Not applicable | Passed |
 | Full mypy | 64 errors in 19 files | Same 64 errors in 19 files; new gateway module has no errors |
 | Python compilation and `git diff --check` | Not recorded | Passed |
 
-The full CI-equivalent test command was:
+The full suite for 0.3.10 was run with `python -m pytest tests/ -q` and
+completed with **297 passed, 6 failed**, and 151 warnings. The five added retry
+regression tests all pass. The warnings are from existing pytest-asyncio fixtures.
+The earlier 0.3.9 coverage run reported 38% overall integration coverage; coverage
+was not recalculated for this setup-only hotfix. The 117-test focused run above
+was also performed during 0.3.9 validation.
 
-```text
-python -m pytest tests/ -v --cov=custom_components/conti --cov-report=term-missing
-```
-
-It completed with **292 passed, 6 failed**, **38% overall integration coverage**,
-and 146 warnings. The warnings are from the existing pytest-asyncio fixtures.
 Lint and type-check commands match `.github/workflows/ci.yml`:
 
 ```text
@@ -165,11 +185,11 @@ These are manual instructions for testing the reviewed changes. No installation
 or test below has been performed on the live Home Assistant instance.
 
 1. Use a test Home Assistant installation with LAN access to the WG-Z1. In HACS,
-   open Conti and download/update to **v0.3.9**, then restart Home Assistant.
+   open Conti and download/update to **v0.3.10**, then restart Home Assistant.
    Allow HA to install TinyTuya 1.17.6 or newer. If HACS still lists the older
-   version, use Conti's **Update information** action, then select **v0.3.9**
+   version, use Conti's **Update information** action, then select **v0.3.10**
    in the download/redownload version selector. Confirm the installed integration
-   manifest reports `0.3.9` before starting the device tests.
+   manifest reports `0.3.10` before starting the device tests.
 2. Gather the **WG-Z1 gateway Device ID and gateway local key**, plus the Quad
    Switch Pro 2's **cloud Device ID and separate CID/node_id**. Prefer existing
    Smart Life metadata. If the SDK does not expose the CID, use Tuya device

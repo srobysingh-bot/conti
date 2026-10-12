@@ -1,0 +1,344 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Conti",
+        "description": "Choose whether to configure integration-wide offline alerts or add a Conti device.",
+        "data": {
+          "onboarding_mode": "Onboarding Method"
+        },
+        "data_description": {
+          "onboarding_mode": "Global Settings configures offline alerts once. Device methods continue with normal Conti onboarding."
+        }
+      },
+      "device_details": {
+        "title": "Add Conti Device",
+        "description": "Enter basic device information. Smart Life and cloud-assisted setup can discover the local address later.",
+        "data": {
+          "name": "Device Name",
+          "host": "Device IP Address",
+          "port": "Port (default 6668)",
+          "device_type": "Device Type",
+          "connection_type": "Device connection type"
+        },
+        "data_description": {
+          "host": "Local IP address of the device. Leave blank for Smart Life or cloud-assisted setup."
+        }
+      },
+      "gateway_child": {
+        "title": "Configure gateway and child",
+        "description": "Use the gateway LAN address and local key, and the child Device ID and separate CID (node_id). Cloud metadata may fill these fields; confirm them before querying. A device ID is not a CID. Only locally reported child datapoints can be mapped.",
+        "data": {
+          "saved_gateway": "Reuse configured gateway",
+          "gateway_device_id": "Gateway Device ID",
+          "host": "Gateway LAN IP / hostname",
+          "local_key": "Gateway local key",
+          "device_id": "Child Device ID",
+          "child_cid": "Child CID / node_id (advanced)",
+          "port": "Gateway TCP port",
+          "protocol_version": "Gateway protocol version"
+        }
+      },
+      "gateway_pick_child": {
+        "title": "Select gateway child",
+        "description": "Choose a child associated with this gateway. If your account does not expose the relationship or CID, use the advanced manual option.",
+        "data": {
+          "cloud_device_id": "Child device"
+        }
+      },
+      "oauth_login": {
+        "title": "Login with Smart Life",
+        "description": "Enter your User Code and select your data centre region. On the next screen you will scan a QR code with the Smart Life / Tuya Smart app to authorise Conti.\n\nYour User Code is shown on the Tuya IoT Platform under **Cloud → Link Tuya App Account → Add App Account** (also called \u201cApp Account UID\u201d in some regions).",
+        "data": {
+          "user_code": "User Code",
+          "tuya_region": "Data Centre Region"
+        },
+        "data_description": {
+          "user_code": "Account identifier from the Tuya IoT Platform (Cloud → Link Tuya App Account → Add App Account).",
+          "tuya_region": "Select the Tuya data centre closest to your region."
+        }
+      },
+      "oauth_qr_scan": {
+        "title": "Scan QR Code with Smart Life App",
+        "description": "Open the **Smart Life** app on your phone, tap the **scan icon** (top-right of the Profile tab), and scan the QR code shown below.\n\nAfter scanning and tapping **Confirm** in the app, click **Submit**.",
+        "data": {
+          "qr_image": "QR Code"
+        }
+      },
+      "oauth_pick_device": {
+        "title": "Select Device",
+        "description": "Choose a device from your Smart Life account to add. Conti will auto-fill credentials and attempt local control.",
+        "data": {
+          "cloud_device_id": "Device"
+        }
+      },
+      "ir_select_device": {
+        "title": "Select IR Device",
+        "description": "Choose an IR hub from your Smart Life account. If your IR hub is missing from the list, enter its Tuya Device ID manually.",
+        "data": {
+          "ir_device_id": "IR Device",
+          "manual_ir_device_id": "Manual IR Device ID"
+        }
+      },
+      "cloud_credentials": {
+        "title": "Tuya Cloud — Sign In",
+        "description": "Enter your Tuya IoT Platform API credentials. Conti will connect to your account, fetch your linked devices, and let you select the one to set up - no manual Device ID or Local Key required.\n\nCredentials are used only during setup for normal local devices. For low-power sleepy sensors that require cloud runtime polling, credentials are stored for that device.",
+        "data": {
+          "tuya_access_id": "Access ID / Client ID",
+          "tuya_access_secret": "Access Secret / Client Secret",
+          "tuya_region": "Data Centre Region"
+        }
+      },
+      "manual_credentials": {
+        "title": "Manual Device Credentials",
+        "description": "Enter the Device ID and Local Key for your device. Both values can be found in the Tuya IoT Platform under your device details.",
+        "data": {
+          "device_id": "Device ID",
+          "local_key": "Local Key"
+        },
+        "data_description": {
+          "device_id": "Unique device identifier from Tuya IoT Platform.",
+          "local_key": "16-character encryption key from Tuya IoT Platform."
+        }
+      },
+      "global_settings": {
+        "title": "Conti Global Settings",
+        "description": "Configure developer offline alerts once for all Conti devices. Alerts are disabled by default.",
+        "data": {
+          "enable_developer_offline_alerts": "Enable developer offline alerts for all Conti devices",
+          "developer_alert_email": "Developer email",
+          "developer_alert_notify_service": "Notify service",
+          "offline_alert_delay_minutes": "Offline alert delay minutes",
+          "send_recovery_email": "Send recovery email"
+        }
+      },
+      "cloud_pick_device": {
+        "title": "Select Cloud Device",
+        "description": "Multiple cloud devices are available. Choose the correct device to auto-fill Device ID and Local Key.",
+        "data": {
+          "cloud_device_id": "Cloud Device"
+        }
+      },
+      "confirm_host": {
+        "title": "Enter Device IP Address",
+        "description": "Conti fetched your device credentials successfully, but local host confirmation is still required.\n\n{host_resolution}\n\n{candidates_hint}\n\nPlease enter the device\u2019s local IP address to continue.",
+        "data": {
+          "host": "Device IP Address"
+        },
+        "data_description": {
+          "host": "Local IP address of the device on your home network (e.g. 192.168.1.100)."
+        }
+      },
+      "detect": {
+        "title": "Detection Results",
+        "description": "Conti connected to your device and detected:\n\n• Protocol: v{protocol_version}\n• Data points found: {dp_count}\n• Data points mapped: {mapped_count}\n• Device profile: {profile_name}\n• Mapping confidence: {confidence}\n\nYou can proceed with these results, override the protocol version, or use Tuya Cloud to improve the mapping.",
+        "data": {
+          "use_cloud_assist": "Use Tuya Cloud to improve mapping (optional)",
+          "protocol_override": "Protocol version override (advanced)"
+        }
+      },
+      "cloud_assist": {
+        "title": "Tuya Cloud Assist (Optional)",
+        "description": "Provide your Tuya IoT Platform API credentials to fetch the device schema.  This improves DP mapping accuracy.  Leave blank to skip.\n\nCredentials are used only during setup for normal local devices. For low-power sleepy sensors that require cloud runtime polling, credentials are stored for that device.",
+        "data": {
+          "tuya_access_id": "Access ID / Client ID",
+          "tuya_access_secret": "Access Secret / Client Secret",
+          "tuya_region": "Data Centre Region"
+        }
+      },
+      "review": {
+        "title": "Review DP Mapping",
+        "description": "Profile: {profile_name} ({confidence} confidence, source: {mapping_source})\n\n{confidence_warning}\n\nDP Mapping:\n```\n{dp_summary}\n```\n\nChoose an action below.",
+        "data": {
+          "action": "Action",
+          "dp_map": "DP Mapping (JSON) \u2014 only used if you choose Manual Edit"
+        }
+      },
+      "pre_learn": {
+        "title": "Guided Learn \u2014 Device Classification",
+        "description": "Conti identified this device as:\n\n**{device_family}**\n\n{classification_reason}\n\nTo complete the mapping, Conti will guide you through {total_steps} step(s):\n\n{action_plan}\n\nAdjust the number of switches/outlets below if incorrect, then click Submit to start learning.",
+        "data": {
+          "gang_count": "Number of switches / outlets (adjust if incorrect)"
+        }
+      },
+      "learn": {
+        "title": "Guided Learn \u2014 Step {step_number} of {total_steps}",
+        "description": "Device: {device_family}\n\n**{instruction}**\n\n{feedback}\n\n{learned_summary}\n{missing_summary}",
+        "data": {
+          "learn_action": "Action"
+        }
+      },
+      "ir_category": {
+        "title": "IR Setup \u2014 Select Category",
+        "description": "Choose the appliance category for this IR remote.",
+        "data": {
+          "ir_category": "Category"
+        }
+      },
+      "ir_brand": {
+        "title": "IR Setup \u2014 Select Brand",
+        "description": "Choose the appliance brand.",
+        "data": {
+          "ir_brand": "Brand"
+        }
+      },
+      "ir_model": {
+        "title": "IR Setup \u2014 Select Model",
+        "description": "Choose the matching remote model.\n\n{ac_warning}",
+        "data": {
+          "ir_model": "Model"
+        }
+      },
+      "ir_fetch": {
+        "title": "IR Setup \u2014 Fetch Library",
+        "description": "Conti is fetching and storing the IR command library.",
+        "data": {}
+      }
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "already_in_progress": "Another setup for this device is still open. Finish or close the earlier setup, then retry. If it cannot be found, restart Home Assistant to clear unfinished setup attempts.",
+      "gateway_setup_in_progress": "An unfinished setup for this child already exists. Continue to resume it and correct the gateway credentials if needed. If the earlier setup cannot be resumed, restart Home Assistant and try again."
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the device over local TCP. Check host/IP, port, and routing/firewall rules between Home Assistant and the device.",
+      "device_not_responding": "Device not responding (offline or wrong IP).",
+      "device_unreachable_network": "Device unreachable (check WiFi/network).",
+      "port_blocked_local_unsupported": "Port blocked or device does not support local control.",
+      "invalid_auth": "Invalid local key or device not compatible.",
+      "wrong_protocol": "Protocol mismatch. The device rejected all attempted protocol versions (3.3, 3.4, 3.5, 3.1). Check the device firmware version.",
+      "empty_status": "The device answered the local status probe but returned no data points. Cloud-mapped DALI lights can continue setup and retry locally in the background.",
+      "no_response": "The TCP port is open, but the device did not return a Tuya status response.",
+      "empty_payload": "The device returned an empty Tuya payload.",
+      "malformed_payload_904": "The device returned TinyTuya Err 904 (Unexpected Payload). Conti will try DALI-compatible v3.4 probes and can continue from cloud-cached state.",
+      "local_key_or_version_914": "The device returned TinyTuya Err 914 (Check device key or version). For an exact DALI CCT cloud schema, Conti can continue through Tuya Cloud fallback.",
+      "invalid_dp_map": "The DP mapping JSON is not valid. Please check the format.",
+      "cloud_fetch_failed": "Could not fetch device schema from Tuya Cloud. Check your credentials and try again, or skip cloud assist.",
+      "cloud_auth_failed": "Tuya cloud authentication failed. Check Access ID, Access Secret, and selected region.",
+      "cloud_permission_expired": "Tuya cloud development plan permission has expired for this project (code 28841002). Renew the plan/subscription in Tuya IoT Cloud and retry.",
+      "cloud_region_mismatch": "Tuya cloud region mismatch. The selected data centre does not match your linked project/account region.",
+      "cloud_api_path_failed": "Tuya cloud API path is not available for this project/region. Check project type and selected region.",
+      "cloud_parse_failed": "Received an unexpected response from Tuya cloud. Please try again; if it persists, check integration logs.",
+      "cloud_pagination_failed": "Cloud device list pagination did not complete safely. Please try again; if it persists, check integration logs.",
+      "cloud_api_failed": "Tuya cloud API request failed due to a network/API error. Please try again.",
+      "cloud_credentials_required": "Tuya cloud credentials are required when cloud auto-fill is enabled.",
+      "cloud_no_device_match": "No linked cloud devices were returned for this Tuya project/region. Check credentials, region, and project linkage.",
+      "cloud_device_missing_local_key": "The selected cloud device was found, but Tuya did not return a local key. This can happen with some account/project configurations. Use Manual onboarding as fallback.",
+      "oauth_token_expired": "Smart Life session has expired. Please re-authenticate by removing and re-adding the integration.",
+      "oauth_setup_failed": "Could not connect to your Smart Life account. Check your credentials and try again.",
+      "smart_life_login_failed": "Smart Life QR code authorization failed. Please try again.",
+      "qr_generation_failed": "Failed to generate QR code. Check your User Code and region, then try again. See integration logs for details.",
+      "qr_not_scanned": "QR code has not been scanned yet. Open the Smart Life app, scan the QR code, then click Submit.",
+      "user_code_required": "User Code is required for Smart Life QR login. Find it in the Tuya IoT Platform under Cloud → Link Tuya App Account.",
+      "app_credentials_missing": "Smart Life login is unavailable. The Home Assistant administrator must set TUYA_APP_ACCESS_ID and TUYA_APP_ACCESS_SECRET environment variables. See integration documentation.",
+      "manual_credentials_required": "Enter both Device ID and Local Key, or enable cloud auto-fill.",
+      "host_required_manual": "Device IP address is required for manual onboarding. Enter the local IP of the device.",
+      "empty_dp_map": "No data points are mapped. The device would create no entities. Use Guided Learn or Manual Edit to add mappings.",
+      "incomplete_cct_map": "This light looks like a warm/cool (CCT) device, but the mapping is missing brightness and/or colour temperature. Use Guided Learn or Manual Edit before finishing.",
+      "ir_library_fetch_failed": "Unable to fetch IR library. Device may be offline, unsupported, or not linked to this Smart Life account.",
+      "ir_requires_login": "Smart Life login is required before fetching the IR library.",
+      "ir_no_device_found": "No IR devices found.\n\nMake sure:\n- The device is added in Smart Life\n- The device category is IR remote\n- You are using the same Smart Life account",
+      "ir_command_not_found": "The selected IR command, category, brand, or model was not found.",
+      "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
+      "ir_learning_failed": "IR learning failed. Make sure the remote was captured and try again.",
+      "ir_send_failed": "IR command sending failed on all available paths.",
+      "unknown": "An unexpected error occurred.",
+      "gateway_unreachable": "Cannot reach the gateway on the LAN. Check its address, TCP port and network routing.",
+      "gateway_authentication_failed": "Gateway authentication/decryption failed. Check the gateway local key.",
+      "gateway_key_or_version": "The gateway rejected the key or protocol version (TinyTuya error 914). Check both; this error cannot distinguish them.",
+      "gateway_protocol_unsupported": "This gateway protocol is unsupported. Select a supported Tuya LAN protocol.",
+      "gateway_connected_but_child_not_found": "The gateway responded but its child list does not contain this CID. Check the parent relationship and node_id.",
+      "child_identifier_missing": "Enter the child CID / node_id. The cloud device ID cannot be substituted automatically.",
+      "child_identifier_duplicate": "This CID is already assigned to a child on this gateway.",
+      "child_offline": "The gateway reports this child offline. Wake or power the child and retry.",
+      "child_status_query_failed": "The gateway did not return a verified status for this child. Check its CID, power and support for local queries.",
+      "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry.",
+      "child_protocol_error": "The gateway/child returned an invalid or unsupported protocol response. Check its LAN protocol and local support.",
+      "child_mapping_failed": "A child mapping must be nonempty and contain only datapoints verified from this child on the LAN.",
+      "gateway_identifier_invalid": "Enter the parent gateway Device ID. It must differ from the child Device ID.",
+      "gateway_credentials_required": "Enter the gateway LAN address and local key, and the child Device ID.",
+      "gateway_configuration_conflict": "This gateway is already configured with different connection settings or as a direct device. Use matching settings or remove the old gateway shell entry.",
+      "child_local_control_unsupported": "The gateway or child reports that this local operation is unsupported."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Conti Device Options",
+        "description": "Edit device settings and choose whether this device uses the integration-wide offline alert configuration.",
+        "data": {
+          "dp_map": "DP Mapping (JSON)",
+          "verbose_logging": "Enable verbose / debug logging",
+          "enable_auto_reconnect": "Enable automatic reconnect",
+          "use_global_offline_alert_settings": "Use global offline alert settings",
+          "disable_offline_alerts_for_this_device": "Disable alerts for this device",
+          "invert_position": "Invert curtain position",
+          "rediscover_dps": "Re-discover DPs from device",
+          "configure_external_on": "Configure External-ON Correction Profile"
+        }
+      },
+      "global_alerts": {
+        "title": "Developer offline alerts",
+        "description": "These settings apply to every Conti device unless alerts are disabled for that device.",
+        "data": {
+          "enable_developer_offline_alerts": "Enable developer offline alerts for all Conti devices",
+          "developer_alert_email": "Developer email",
+          "developer_alert_notify_service": "Notify service",
+          "offline_alert_delay_minutes": "Offline alert delay minutes",
+          "send_recovery_email": "Send recovery email"
+        }
+      },
+      "external_on": {
+        "title": "External-ON Correction Profile",
+        "description": "Configure time-based brightness and warmth correction applied when the light is turned on externally (RF remote / wall switch). Set a slot\u2019s brightness to 0 to disable that slot.",
+        "data": {
+          "external_on_enabled": "Enable external-ON correction",
+          "external_on_apply": "Apply correction on external ON",
+          "morning_start_time": "Morning \u2014 start time",
+          "morning_end_time": "Morning \u2014 end time",
+          "morning_brightness_pct": "Morning \u2014 brightness (%)",
+          "morning_kelvin": "Morning \u2014 colour temperature (K)",
+          "day_start_time": "Day \u2014 start time",
+          "day_end_time": "Day \u2014 end time",
+          "day_brightness_pct": "Day \u2014 brightness (%)",
+          "day_kelvin": "Day \u2014 colour temperature (K)",
+          "night_start_time": "Night \u2014 start time",
+          "night_end_time": "Night \u2014 end time",
+          "night_brightness_pct": "Night \u2014 brightness (%)",
+          "night_kelvin": "Night \u2014 colour temperature (K)"
+        }
+      },
+      "ir_options": {
+        "title": "IR Device Options",
+        "description": "Manage learned commands for this IR device.",
+        "data": {
+          "ir_action": "Action"
+        }
+      },
+      "ir_learn": {
+        "title": "Add Missing IR Command",
+        "description": "Enter the action name, then press Submit to start IR learning mode.\n\n{ac_warning}",
+        "data": {
+          "ir_command_action": "Command action",
+          "overwrite": "Overwrite existing command"
+        },
+        "data_description": {
+          "ir_command_action": "Example: swing_vertical_on"
+        }
+      },
+      "ir_learn_capture": {
+        "title": "Capture IR Command",
+        "description": "Point the original remote at the IR hub and press the button for **{action}**, then click Submit.",
+        "data": {}
+      }
+    },
+    "error": {
+      "invalid_dp_map": "The DP mapping JSON is not valid.",
+      "developer_alert_destination_required": "Enter a developer email address or a Home Assistant notify service.",
+      "ir_learning_failed": "IR learning failed. Make sure the captured payload is not empty or too short.",
+      "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
+      "child_mapping_failed": "A child mapping must be nonempty and contain only datapoints verified from this child on the LAN.",
+      "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry."
+    }
+  }
+}

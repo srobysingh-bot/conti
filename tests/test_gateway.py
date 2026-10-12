@@ -451,7 +451,7 @@ def test_cloud_metadata_preserves_relationship_without_guessing_cid():
 
 
 @pytest.fixture
-def flow_module():
+def flow_module(monkeypatch):
     """Load real flow methods against a minimal HA ConfigFlow test base.
 
     Existing tests mock the whole ConfigFlow class, which cannot exercise
@@ -460,6 +460,12 @@ def flow_module():
     entries = sys.modules["homeassistant"].config_entries
 
     class FlowBase:
+        def __init__(self):
+            self.flow_id = "current-flow"
+            self.context = {"source": "user"}
+            self.in_progress = []
+            self.configured_ids = set()
+
         def __init_subclass__(cls, **kwargs):
             pass
 
@@ -469,11 +475,28 @@ def flow_module():
         def async_create_entry(self, **kwargs):
             return {"type": "create_entry", **kwargs}
 
-        async def async_set_unique_id(self, value):
+        def async_abort(self, **kwargs):
+            return {"type": "abort", **kwargs}
+
+        def _async_in_progress(self, include_uninitialized=False, match_context=None):
+            return [
+                flow for flow in self.in_progress
+                if flow["flow_id"] != self.flow_id
+                and all(flow["context"].get(k) == v for k, v in (match_context or {}).items())
+            ]
+
+        async def async_set_unique_id(self, value, *, raise_on_progress=True):
+            if value is not None and raise_on_progress and any(
+                flow["context"].get("source") != "reauth"
+                for flow in self._async_in_progress(match_context={"unique_id": value})
+            ):
+                raise RuntimeError("already_in_progress")
             self.unique_id = value
+            self.context["unique_id"] = value
 
         def _abort_if_unique_id_configured(self):
-            pass
+            if self.unique_id in self.configured_ids:
+                raise RuntimeError("already_configured")
 
     name = "custom_components.conti._gateway_test_flow"
     path = Path(__file__).parents[1] / "custom_components/conti/config_flow.py"
@@ -485,6 +508,8 @@ def flow_module():
     ):
         spec.loader.exec_module(module)
     module.CONF_HOST, module.CONF_PORT, module.CONF_NAME = "host", "port", "name"
+    monkeypatch.setattr(entries, "SOURCE_REAUTH", "reauth")
+    monkeypatch.setattr(entries, "FlowType", SimpleNamespace(CONFIG_FLOW="config_flow"))
     return module
 
 
@@ -562,6 +587,79 @@ async def test_child_flow_missing_identifier_shows_specific_error(factory, flow_
     result = await flow.async_step_gateway_child({flow_module.CONF_CHILD_CID: ""})
     assert result["errors"]["base"] == "child_identifier_missing"
     assert not factory.parents
+
+
+@pytest.mark.asyncio
+async def test_retry_resumes_unfinished_child_flow_without_opening_socket(factory, flow_module):
+    flow = make_flow(flow_module)
+    original = {
+        "flow_id": "previous-setup",
+        "context": {"source": "user", "unique_id": "child-a"},
+    }
+    flow.in_progress = [original]
+    result = await flow.async_step_gateway_child(config())
+    assert result == {
+        "type": "abort",
+        "reason": "gateway_setup_in_progress",
+        "next_flow": ("config_flow", "previous-setup"),
+    }
+    assert flow.in_progress == [original]
+    assert not factory.parents
+
+
+@pytest.mark.asyncio
+async def test_cloud_selection_resumes_existing_child_setup(flow_module):
+    flow = make_flow(flow_module)
+    flow.in_progress = [{
+        "flow_id": "previous-setup",
+        "context": {"source": "user", "unique_id": "child-a"},
+    }]
+    flow._get_oauth_manager = AsyncMock()
+    result = await flow._prepare_gateway_child(
+        "child-a", {"gateway_id": "gateway-1", "node_id": "node-a"},
+    )
+    assert result["next_flow"] == ("config_flow", "previous-setup")
+    flow._get_oauth_manager.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_child_probe_releases_id_and_allows_retry(factory, flow_module):
+    flow = make_flow(flow_module)
+    factory.replies["node-a"] = {"cid": "node-a", "dps": {}}
+    result = await flow.async_step_gateway_child(config())
+    assert result["type"] == "form"
+    assert result["errors"]["base"] == "child_dp_discovery_empty"
+    assert flow.unique_id is None
+    factory.replies["node-a"] = {"cid": "node-a", "dps": {"11": True}}
+    result = await flow.async_step_gateway_child(config())
+    assert result["step_id"] == "review"
+    assert flow.unique_id == "child-a"
+
+
+@pytest.mark.asyncio
+async def test_configured_child_still_blocks_duplicate_setup(factory, flow_module):
+    flow = make_flow(flow_module)
+    flow.configured_ids.add("child-a")
+    flow.in_progress = [{
+        "flow_id": "previous-setup",
+        "context": {"source": "user", "unique_id": "child-a"},
+    }]
+    with pytest.raises(RuntimeError, match="already_configured"):
+        await flow.async_step_gateway_child(config())
+    assert not factory.parents
+
+
+@pytest.mark.asyncio
+async def test_gateway_retry_ignores_self_other_devices_and_reauth(factory, flow_module):
+    flow = make_flow(flow_module)
+    flow.in_progress = [
+        {"flow_id": flow.flow_id, "context": {"source": "user", "unique_id": "child-a"}},
+        {"flow_id": "other", "context": {"source": "user", "unique_id": "child-b"}},
+        {"flow_id": "reauth", "context": {"source": "reauth", "unique_id": "child-a"}},
+    ]
+    result = await flow.async_step_gateway_child(config())
+    assert result["step_id"] == "review"
+    assert flow.unique_id == "child-a"
 
 
 @pytest.mark.asyncio

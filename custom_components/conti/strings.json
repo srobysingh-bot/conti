@@ -196,7 +196,9 @@
       }
     },
     "abort": {
-      "already_configured": "This device is already configured."
+      "already_configured": "This device is already configured.",
+      "already_in_progress": "Another setup for this device is still open. Finish or close the earlier setup, then retry. If it cannot be found, restart Home Assistant to clear unfinished setup attempts.",
+      "gateway_setup_in_progress": "An unfinished setup for this child already exists. Continue to resume it and correct the gateway credentials if needed. If the earlier setup cannot be resumed, restart Home Assistant and try again."
     },
     "error": {
       "cannot_connect": "Unable to connect to the device over local TCP. Check host/IP, port, and routing/firewall rules between Home Assistant and the device.",
