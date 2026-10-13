@@ -916,3 +916,37 @@ async def test_options_rediscovery_uses_managed_child_and_preserves_errors(flow_
     assert result["type"] == "form"
     assert result["errors"]["base"] == "child_dp_discovery_empty"
     manager.detect_dps.assert_awaited_once_with("child-a")
+
+
+@pytest.mark.parametrize("raw", ["invalid", "", "example"])
+async def test_optional_model_import_keeps_sensor_mapping_and_validates(flow_module, raw):
+    f = flow_module
+    model = Path(__file__).parents[1] / "docs/examples/yk-zigbee-control-model.json"
+    raw = model.read_text() if raw == "example" else raw
+    entry = SimpleNamespace(
+        data={
+            "device_id": "child-a", "connection_type": "gateway_child",
+            "dp_map": '{"52":{"key":"dp_52","type":"str"}}',
+            "discovered_dps": '{"52":"switch_8"}',
+        }, options={},
+    )
+    manager = SimpleNamespace(get_cached_dps=lambda _: {"52": "switch_8"})
+    flow = f.ContiOptionsFlow(entry)
+    flow.hass = SimpleNamespace(data={DOMAIN: {"manager": manager}})
+    result = await flow.async_step_init({"dp_map": entry.data["dp_map"], "control_model": raw})
+    if raw == "invalid":
+        assert result["type"] == "form"
+        assert result["errors"] == {"control_model": "invalid_control_model"}
+    else:
+        assert result["type"] == "create_entry"
+        assert json.loads(result["data"]["dp_map"]) == json.loads(entry.data["dp_map"])
+        assert bool(result["data"]["control_model"]) == bool(raw)
+
+
+async def test_direct_options_do_not_offer_control_model(flow_module):
+    f = flow_module
+    entry = SimpleNamespace(data={"device_id": "direct", "dp_map": "{}"}, options={})
+    flow = f.ContiOptionsFlow(entry)
+    flow.hass = SimpleNamespace(data={DOMAIN: {}})
+    result = await flow.async_step_init()
+    assert "control_model" not in {str(marker.schema) for marker in result["data_schema"].schema}

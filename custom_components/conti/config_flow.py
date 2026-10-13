@@ -67,6 +67,7 @@ from .const import (
     CONF_CLOUD_ACCESS_SECRET,
     CONF_CLOUD_REGION,
     CONF_CONNECTION_TYPE,
+    CONF_CONTROL_MODEL,
     CONF_DAY_BRIGHTNESS,
     CONF_DAY_END,
     CONF_DAY_KELVIN,
@@ -4358,6 +4359,18 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_INVERT_POSITION,
                     ),
                 )
+                if gateway_child:
+                    from .model_controls import canonical_control_model  # noqa: PLC0415
+
+                    try:
+                        new_options[CONF_CONTROL_MODEL] = canonical_control_model(
+                            user_input.get(
+                                CONF_CONTROL_MODEL,
+                                self._entry.options.get(CONF_CONTROL_MODEL, ""),
+                            )
+                        )
+                    except (ValueError, TypeError, AttributeError):
+                        errors[CONF_CONTROL_MODEL] = "invalid_control_model"
                 new_options.update(
                     {
                         CONF_USE_GLOBAL_OFFLINE_ALERT_SETTINGS: bool(
@@ -4447,6 +4460,13 @@ class ContiOptionsFlow(config_entries.OptionsFlow):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_DP_MAP, default=current_dp_map): str,
+                    **({
+                        vol.Optional(
+                            CONF_CONTROL_MODEL,
+                            default=self._entry.options.get(CONF_CONTROL_MODEL, ""),
+                        ): str,
+                    } if self._entry.data.get(CONF_CONNECTION_TYPE)
+                    == CONNECTION_TYPE_GATEWAY_CHILD else {}),
                     vol.Optional(
                         CONF_VERBOSE_LOGGING, default=current_verbose
                     ): bool,

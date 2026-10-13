@@ -276,7 +276,11 @@
           "disable_offline_alerts_for_this_device": "Disable alerts for this device",
           "invert_position": "Invert curtain position",
           "rediscover_dps": "Re-discover DPs from device",
-          "configure_external_on": "Configure External-ON Correction Profile"
+          "configure_external_on": "Configure External-ON Correction Profile",
+          "control_model": "Smart Life control model (JSON, optional)"
+        },
+        "data_description": {
+          "control_model": "Paste this device’s Tuya Query Things Data Model response to add dashboard commands. Leave blank to remove them. These controls send commands; they do not detect physical remote presses."
         }
       },
       "global_alerts": {
@@ -340,7 +344,8 @@
       "ir_learning_failed": "IR learning failed. Make sure the captured payload is not empty or too short.",
       "ir_command_exists": "That IR command already exists. Enable overwrite to replace it.",
       "child_mapping_failed": "A child mapping must be nonempty and contain only datapoints verified from this child on the LAN.",
-      "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry."
+      "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry.",
+      "invalid_control_model": "The model must contain valid writable bool, enum or numeric properties with DP IDs, codes and ranges."
     }
   },
   "services": {

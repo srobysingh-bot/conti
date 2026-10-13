@@ -1,0 +1,208 @@
+{
+  "modelId": "fjjr8o",
+  "services": [
+    {
+      "properties": [
+        {
+          "abilityId": 2,
+          "accessMode": "ro",
+          "code": "scene_controller",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "scene_1",
+              "scene_2",
+              "scene_3",
+              "scene_4"
+            ]
+          }
+        },
+        {
+          "abilityId": 6,
+          "accessMode": "wr",
+          "code": "switch_controller",
+          "typeSpec": {
+            "type": "bool"
+          }
+        },
+        {
+          "abilityId": 7,
+          "accessMode": "wr",
+          "code": "mode_controller",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "white",
+              "colour",
+              "scene"
+            ]
+          }
+        },
+        {
+          "abilityId": 8,
+          "accessMode": "wr",
+          "code": "bright_controller",
+          "typeSpec": {
+            "type": "value",
+            "min": 10,
+            "max": 1000,
+            "scale": 0,
+            "step": 1
+          }
+        },
+        {
+          "abilityId": 9,
+          "accessMode": "wr",
+          "code": "temp_controller",
+          "typeSpec": {
+            "type": "value",
+            "min": 0,
+            "max": 1000,
+            "scale": 0,
+            "step": 1
+          }
+        },
+        {
+          "abilityId": 10,
+          "accessMode": "wr",
+          "code": "color_controller",
+          "typeSpec": {
+            "type": "string",
+            "maxlen": 255
+          }
+        },
+        {
+          "abilityId": 21,
+          "accessMode": "rw",
+          "code": "button_mode_1",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 22,
+          "accessMode": "rw",
+          "code": "button_mode_2",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 23,
+          "accessMode": "rw",
+          "code": "button_mode_3",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 24,
+          "accessMode": "rw",
+          "code": "button_mode_4",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 25,
+          "accessMode": "rw",
+          "code": "button_mode_5",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 26,
+          "accessMode": "rw",
+          "code": "button_mode_6",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 27,
+          "accessMode": "rw",
+          "code": "button_mode_7",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 28,
+          "accessMode": "rw",
+          "code": "button_mode_8",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "no_initialize",
+              "remote_control",
+              "wireless_switch"
+            ]
+          }
+        },
+        {
+          "abilityId": 30,
+          "accessMode": "wr",
+          "code": "scene_data",
+          "typeSpec": {
+            "type": "string",
+            "maxlen": 255
+          }
+        },
+        {
+          "abilityId": 52,
+          "accessMode": "rw",
+          "code": "scene_switch",
+          "typeSpec": {
+            "type": "enum",
+            "range": [
+              "switch_1",
+              "switch_2",
+              "switch_3",
+              "switch_4",
+              "switch_5",
+              "switch_6",
+              "switch_7",
+              "switch_8"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

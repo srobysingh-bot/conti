@@ -30,6 +30,7 @@ CONF_LOCAL_KEY: Final = "local_key"
 CONF_PROTOCOL_VERSION: Final = "protocol_version"
 CONF_DEVICE_TYPE: Final = "device_type"
 CONF_DP_MAP: Final = "dp_map"
+CONF_CONTROL_MODEL: Final = "control_model"
 CONF_DETECTED_VERSION: Final = "detected_version"
 CONF_DISCOVERED_DPS: Final = "discovered_dps"
 CONF_VERBOSE_LOGGING: Final = "verbose_logging"
@@ -159,6 +160,9 @@ PLATFORMS: Final = [
     Platform.CLIMATE,
     Platform.REMOTE,
     Platform.COVER,
+    Platform.BUTTON,
+    Platform.SELECT,
+    Platform.NUMBER,
 ]
 
 # ---------------------------------------------------------------------------

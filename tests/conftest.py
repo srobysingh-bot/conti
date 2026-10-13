@@ -36,6 +36,9 @@ _HA_MODULES = [
     "homeassistant.components.light",
     "homeassistant.components.sensor",
     "homeassistant.components.switch",
+    "homeassistant.components.button",
+    "homeassistant.components.select",
+    "homeassistant.components.number",
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
     "homeassistant.util",
@@ -55,6 +58,9 @@ class _Platform(str, Enum):
     CLIMATE = "climate"
     REMOTE = "remote"
     COVER = "cover"
+    BUTTON = "button"
+    SELECT = "select"
+    NUMBER = "number"
 
 
 class _CoverEntityFeature(IntFlag):
