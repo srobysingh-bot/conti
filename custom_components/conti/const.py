@@ -159,6 +159,7 @@ PLATFORMS: Final = [
     Platform.CLIMATE,
     Platform.REMOTE,
     Platform.COVER,
+    Platform.EVENT,
 ]
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ _HA_MODULES = [
     "homeassistant.components.fan",
     "homeassistant.components.light",
     "homeassistant.components.sensor",
+    "homeassistant.components.event",
     "homeassistant.components.switch",
     "homeassistant.data_entry_flow",
     "homeassistant.exceptions",
@@ -55,6 +56,7 @@ class _Platform(str, Enum):
     CLIMATE = "climate"
     REMOTE = "remote"
     COVER = "cover"
+    EVENT = "event"
 
 
 class _CoverEntityFeature(IntFlag):
