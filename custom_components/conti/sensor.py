@@ -29,9 +29,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_CONNECTION_TYPE,
     CONF_DEVICE_ID,
+    CONF_DEVICE_METADATA,
     CONF_DEVICE_TYPE,
     CONF_DP_MAP,
+    CONF_GATEWAY_DEVICE_ID,
+    CONNECTION_TYPE_GATEWAY_CHILD,
     DEVICE_TYPE_SENSOR,
     DOMAIN,
     DP_KEY_BATTERY,
@@ -71,6 +75,15 @@ _SENSOR_META: dict[str, tuple[SensorDeviceClass | None, str | None, SensorStateC
 }
 
 
+def _is_raw_child_dp(entry: ConfigEntry, dp_id: str, info: Any) -> bool:
+    """Recognize the existing raw fallback without guessing a DP's meaning."""
+    return (
+        entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD
+        and isinstance(info, dict)
+        and info.get("key") == f"dp_{dp_id}"
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -84,15 +97,15 @@ async def async_setup_entry(
         raw = entry.options.get(CONF_DP_MAP) or entry.data.get(CONF_DP_MAP, "{}")
         dp_map_check = json.loads(raw) if isinstance(raw, str) else (raw or {})
         if not isinstance(dp_map_check, dict) or not any(
-            isinstance(v, dict) and v.get("key") in _SENSOR_META
-            for v in dp_map_check.values()
+            isinstance(v, dict)
+            and (v.get("key") in _SENSOR_META or _is_raw_child_dp(entry, str(dp), v))
+            for dp, v in dp_map_check.items()
         ):
             return
 
     coordinator: ContiCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    dp_map: dict[str, Any] = json.loads(
-        entry.options.get(CONF_DP_MAP) or entry.data.get(CONF_DP_MAP, "{}")
-    )
+    raw = entry.options.get(CONF_DP_MAP) or entry.data.get(CONF_DP_MAP, "{}")
+    dp_map: dict[str, Any] = json.loads(raw) if isinstance(raw, str) else (raw or {})
     device_id: str = entry.data[CONF_DEVICE_ID]
 
     entities: list[ContiSensor] = []
@@ -100,7 +113,7 @@ async def async_setup_entry(
         if not isinstance(info, dict):
             continue
         key = info.get("key", "")
-        if key in _SENSOR_META:
+        if key in _SENSOR_META or _is_raw_child_dp(entry, str(dp_id), info):
             entities.append(
                 ContiSensor(coordinator, entry, device_id, str(dp_id), info)
             )
@@ -127,7 +140,8 @@ class ContiSensor(CoordinatorEntity[ContiCoordinator], SensorEntity):
         self._dp_id = dp_id
         self._dp_info = dp_info
         self._key: str = dp_info.get("key", dp_id)
-        self._scale: int = dp_info.get("scale", 1)
+        self._raw_child_dp = _is_raw_child_dp(entry, dp_id, dp_info)
+        self._scale: int = 1 if self._raw_child_dp else dp_info.get("scale", 1)
 
         meta = _SENSOR_META.get(self._key, (None, None, None, None))
         dev_class, unit, state_class, icon = meta
@@ -139,12 +153,33 @@ class ContiSensor(CoordinatorEntity[ContiCoordinator], SensorEntity):
         self._attr_state_class = state_class
         if icon:
             self._attr_icon = icon
+        if self._raw_child_dp:
+            self._attr_name = f"DP {dp_id}"
+            self._attr_icon = "mdi:code-braces"
 
         self._attr_device_info = {
             "identifiers": {(DOMAIN, device_id)},
             "name": entry.title,
             "manufacturer": MANUFACTURER,
         }
+        if entry.data.get(CONF_CONNECTION_TYPE) == CONNECTION_TYPE_GATEWAY_CHILD:
+            metadata = entry.data.get(CONF_DEVICE_METADATA, {})
+            self._attr_device_info.update({
+                "via_device": (DOMAIN, entry.data[CONF_GATEWAY_DEVICE_ID]),
+                "model": metadata.get("model") or metadata.get("product_name") or None,
+                "manufacturer": metadata.get("manufacturer") or "Tuya",
+            })
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Keep the full raw value when it cannot fit in an HA state string."""
+        if not self._raw_child_dp:
+            return None
+        raw = (self.coordinator.data or {}).get(self._device_id, {}).get(self._dp_id)
+        attributes: dict[str, Any] = {"dp_id": self._dp_id, "read_only": True}
+        if isinstance(raw, (dict, list)) or isinstance(raw, str) and len(raw) > 255:
+            attributes["raw_value"] = raw
+        return attributes
 
     @property
     def available(self) -> bool:
@@ -156,6 +191,14 @@ class ContiSensor(CoordinatorEntity[ContiCoordinator], SensorEntity):
         raw = data.get(self._device_id, {}).get(self._dp_id)
         if raw is None:
             return None
+        if self._raw_child_dp:
+            if isinstance(raw, (dict, list)):
+                return json.dumps(raw, ensure_ascii=False)[:255]
+            if isinstance(raw, str):
+                return raw[:255]
+            if isinstance(raw, (int, float)):
+                return raw
+            return str(raw)[:255]
         if self._scale and self._scale != 1:
             try:
                 return round(float(raw) / self._scale, 2)

@@ -69,14 +69,19 @@ def map_child_dps(
     """Reuse Conti mapping rules, restricted to locally verified child DPs."""
     from .dp_mapping import auto_map_dps, build_raw_dp_map
 
-    mapping = auto_map_dps(device_type, dps)
+    # Preserve unmapped reports as read-only values. A gateway child can be
+    # a scene remote whose string DPs have no switch/light heuristic at all.
+    mapping = build_raw_dp_map(dps)
+    for spec in mapping.values():
+        spec["read_only"] = True
+    mapping.update(auto_map_dps(device_type, dps))
     if device_type == "switch":
         for dp, value in dps.items():
-            if isinstance(value, bool) and dp not in mapping:
+            if isinstance(value, bool) and mapping[dp].get("read_only"):
                 mapping[dp] = {"key": f"switch_{dp}", "type": "bool"}
     mapping.update({k: v for k, v in (cloud_map or {}).items() if k in dps})
     verified = {k: v for k, v in mapping.items() if k in dps}
-    return verified or build_raw_dp_map(dps)
+    return verified
 
 
 def gateway_error(result: Any = None, exc: Exception | None = None) -> str:

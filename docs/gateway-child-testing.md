@@ -8,11 +8,75 @@ local `main`, `origin/main`, and GitHub HEAD were all
 **feat: add global offline alert settings for Conti**. The working tree was clean.
 The offline alert changes in that commit are preserved.
 
-This implementation is packaged as **Conti 0.3.11**, tagged `v0.3.11`, for
+This implementation is packaged as **Conti 0.3.12**, tagged `v0.3.12`, for
 download through HACS. No installation or deployment to Home Assistant was
 performed during development or release. Subsequent read-only LAN checks
 verified WG-Z1 protocol 3.4, the Quad child CID, and live child status. No relay
-commands were sent; Home Assistant host connectivity remains under diagnosis.
+commands were sent. The user subsequently added the Quad in Home Assistant;
+all four relay DPs were verified in workspace LAN reads after physical operation.
+
+## Missing raw child entities fixed in 0.3.12
+
+Before these edits, the clean checkout and `origin/main` both matched
+`fd0cc87f076d6ebba21e908c41ada0dab6dc90fd` (0.3.11). The user's second gateway
+child, a Kerr YK-16 Zigbee remote, had this saved mapping but no entities:
+
+```json
+{
+  "22": {"key": "dp_22", "type": "str"},
+  "23": {"key": "dp_23", "type": "str"},
+  "27": {"key": "dp_27", "type": "str"},
+  "52": {"key": "dp_52", "type": "str"}
+}
+```
+
+The gateway transport had produced a nonempty raw fallback map, but no entity
+platform consumed the `dp_<id>` string roles. The switch platform requires bool
+DPs, and the sensor platform previously accepted only known semantic roles.
+Creating a device registry entry therefore did not guarantee any entities.
+
+- The sensor platform now exposes gateway-child raw roles as read-only DP
+  sensors, independently of the selected Light/Switch/Sensor category. Existing
+  0.3.10/0.3.11 raw mappings work after updating and restarting, without re-adding
+  the child or changing its Device ID/CID.
+- New gateway discovery preserves unmapped DPs alongside mapped roles. It still
+  excludes cloud-only DPs not observed in that child's local response.
+- Each sensor uses the child's coordinator and registry identity, links through
+  the parent gateway, and follows child availability. Values are unscaled and
+  never written to the device. Long/structured payloads retain their full value
+  in a `raw_value` attribute while keeping the HA state within 255 characters.
+- Direct-device raw mappings retain their existing behavior. Known direct
+  temperature/energy/battery roles and scaling remain unchanged.
+
+### YK remote verification
+
+1. Update HACS to **v0.3.12** and fully restart Home Assistant. The screenshot
+   showed the running integration version **0.3.10**.
+2. Keep the existing four-DP mapping above. The `yk` child should now show sensors
+   **DP 22, DP 23, DP 27, DP 52**, all under the same physical child device.
+3. Press one remote button at a time and inspect each sensor's value. Check that
+   sibling children on the gateway do not receive its values. Save the full Tuya
+   model and the raw reports for ON/OFF, brightness, colour-temperature and S1-S8
+   before assigning button meanings.
+4. These sensors expose reported data; they do **not** claim 16 verified button
+   events or relay control. Repeated identical button values may not generate a
+   sensor state-change trigger. Proper event entities require identification of
+   the button/action reports and a live push test; polling a stored scene value
+   must not be treated as a new press.
+
+The remote's complete map was supplied by the user. Its live DP values and
+physical push behavior have not been tested from this workspace because its
+child Device ID/CID were not provided. No live Home Assistant changes were made.
+
+Validation: gateway tests and raw-sensor regression tests **69 passed**. Full
+pytest **313 passed, the same 6 pre-existing failures** listed below. Ruff retains
+the same 172 existing findings; mypy retains the same 64 errors in 19 files.
+The full CI coverage command also returned 313 passed and the same 6 failures,
+with **39% overall integration coverage**.
+The raw-sensor tests exercise the actual platform class with the supplied map,
+legacy entries, options priority, sibling isolation, missing/long values and
+direct-device compatibility. Test state values are synthetic, not asserted
+physical button codes.
 
 ## Home Assistant connection diagnostics in 0.3.11
 
