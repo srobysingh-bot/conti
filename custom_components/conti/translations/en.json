@@ -342,5 +342,31 @@
       "child_mapping_failed": "A child mapping must be nonempty and contain only datapoints verified from this child on the LAN.",
       "child_dp_discovery_empty": "The child responded without usable datapoints. Operate or wake the child and retry."
     }
+  },
+  "services": {
+    "start_gateway_report_capture": {
+      "name": "Start gateway report capture",
+      "description": "Record incoming child reports using the existing connection. No commands are sent. Download child diagnostics afterward.",
+      "fields": {
+        "device_id": {
+          "name": "Child Device ID",
+          "description": "Tuya Device ID of the loaded Conti gateway child."
+        },
+        "duration": {
+          "name": "Duration",
+          "description": "Seconds to capture before stopping automatically (10-300)."
+        }
+      }
+    },
+    "stop_gateway_report_capture": {
+      "name": "Stop gateway report capture",
+      "description": "Stop capture and retain its reports in child diagnostics until the next capture or HA restart.",
+      "fields": {
+        "device_id": {
+          "name": "Child Device ID",
+          "description": "Tuya Device ID used to start capture."
+        }
+      }
+    }
   }
 }

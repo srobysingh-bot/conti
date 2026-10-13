@@ -96,6 +96,14 @@ _RECONNECT_SERVICES_REGISTERED = "reconnect_services_registered"
 _GLOBAL_ALERT_CONFIG_KEY = "global_offline_alert_config"
 
 
+async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
+    """Register report capture even before any device entries are loaded."""
+    from .gateway_capture import register_capture_services  # noqa: PLC0415
+
+    register_capture_services(hass)
+    return True
+
+
 def _is_global_settings_entry(entry: ConfigEntry) -> bool:
     """Return whether this entry owns integration-wide settings only."""
     return entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_GLOBAL_SETTINGS
@@ -1127,6 +1135,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         entry_data = hass.data[DOMAIN].pop(entry.entry_id, {})
         device_id = entry_data.get("device_id") or entry.data.get(CONF_DEVICE_ID)
+        if device_id:
+            from .gateway_capture import stop_capture  # noqa: PLC0415
+
+            stop_capture(hass, device_id, "entry_unloaded")
         if entry.data.get(CONF_RUNTIME_CHANNEL) == RUNTIME_CHANNEL_IR:
             _LOGGER.info("Unloaded Conti IR device %s", device_id)
             return True

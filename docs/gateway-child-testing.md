@@ -8,12 +8,22 @@ local `main`, `origin/main`, and GitHub HEAD were all
 **feat: add global offline alert settings for Conti**. The working tree was clean.
 The offline alert changes in that commit are preserved.
 
-This implementation is packaged as **Conti 0.3.12**, tagged `v0.3.12`, for
+This implementation is packaged as **Conti 0.3.13**, tagged `v0.3.13`, for
 download through HACS. No installation or deployment to Home Assistant was
 performed during development or release. Subsequent read-only LAN checks
 verified WG-Z1 protocol 3.4, the Quad child CID, and live child status. No relay
 commands were sent. The user subsequently added the Quad in Home Assistant;
 all four relay DPs were verified in workspace LAN reads after physical operation.
+
+## Shared-connection report capture in 0.3.13
+
+The YK remote's raw sensors show settings; they do not make every physical button
+usable in HA. To identify the actual incoming actions without a competing LAN
+client, 0.3.13 adds opt-in capture on HA's already-managed gateway listener.
+The service actions send no commands and create no additional connections.
+Results appear in the child's downloadable diagnostics. See
+[the capture procedure and limits](gateway-report-capture.md).
+The event mapping remains a separate draft pending this hardware evidence.
 
 ## Missing raw child entities fixed in 0.3.12
 

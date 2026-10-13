@@ -197,7 +197,9 @@ class GatewaySession:
                 return "child_dp_discovery_empty"
         return "child_status_query_failed"
 
-    def _publish(self, packets: dict[str, dict[str, Any]]) -> None:
+    def _publish(
+        self, packets: dict[str, dict[str, Any]], *, unsolicited: bool = False,
+    ) -> None:
         for device_id, child in self.children.items():
             if (
                 child.cid in self._offline_notifications
@@ -217,6 +219,7 @@ class GatewaySession:
                 target._last_failure_reason = ""
                 if target._dp_callback:
                     target._dp_callback(dps)
+                target.publish_report(dps, unsolicited=unsolicited)
 
     async def _run(self, operation: Callable[[], Any]) -> Any:
         # Cancellation must not release the lock while the executor still owns
@@ -411,7 +414,7 @@ class GatewaySession:
 
             try:
                 packet = await self._run(receive_sync)
-                self._publish(self.route(packet))
+                self._publish(self.route(packet), unsolicited=True)
             except TimeoutError:
                 pass
             except Exception:
@@ -432,8 +435,38 @@ class GatewayChild(TinyTuyaDevice):
         if not self.cid:
             raise ValueError("child_identifier_missing")
         self.gateway = gateway
+        self._report_callbacks: set[Callable[[dict[str, Any]], None]] = set()
+        self._observation_callbacks: set[Callable[[dict[str, Any], str], None]] = set()
         self.set_monitored_dp_ids(list(config.get("dp_map", {})))
         gateway.attach(self)
+
+    def subscribe_reports(
+        self, callback: Callable[[dict[str, Any]], None],
+    ) -> Callable[[], None]:
+        """Subscribe to unsolicited reports, never status polls or cached values."""
+        self._report_callbacks.add(callback)
+        return lambda: self._report_callbacks.discard(callback)
+
+    def subscribe_observations(
+        self, callback: Callable[[dict[str, Any], str], None],
+    ) -> Callable[[], None]:
+        """Capture live listener/query results separately; never replay cache."""
+        self._observation_callbacks.add(callback)
+        return lambda: self._observation_callbacks.discard(callback)
+
+    def publish_report(self, dps: dict[str, Any], *, unsolicited: bool = True) -> None:
+        """Keep repeated identical reports and isolate listener failures."""
+        source = "gateway_listener" if unsolicited else "gateway_query"
+        for observer in tuple(self._observation_callbacks):
+            try:
+                observer(dps, source)
+            except Exception:
+                _LOGGER.warning("Conti child capture listener failed")
+        for callback in tuple(self._report_callbacks) if unsolicited else ():
+            try:
+                callback(dps)
+            except Exception:
+                _LOGGER.warning("Conti child report listener failed")
 
     @property
     def connected(self) -> bool:

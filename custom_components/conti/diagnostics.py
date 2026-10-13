@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_ENTRY_TYPE, DOMAIN, ENTRY_TYPE_GLOBAL_SETTINGS
+from .gateway_capture import capture_diagnostics
 from .offline_alerts import offline_alert_config_from_mapping
 
 _CONNECTION_FIELDS = (
@@ -82,8 +83,12 @@ async def async_get_config_entry_diagnostics(
         return {"device_id": device_id}
 
     diagnostics = coordinator.get_diagnostics()
-    return {
+    result = {
         field: diagnostics.get(field)
         for field in _CONNECTION_FIELDS
         if field in diagnostics
     }
+    capture = capture_diagnostics(hass, entry.data.get("device_id", ""))
+    if capture is not None:
+        result["gateway_report_capture"] = capture
+    return result

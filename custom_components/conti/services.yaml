@@ -29,3 +29,35 @@ reconnect_device:
 reconnect_all:
   name: Reconnect unavailable devices
   description: Reconnect unavailable or degraded Conti devices one at a time; healthy devices are skipped.
+
+start_gateway_report_capture:
+  name: Start gateway report capture
+  description: Record incoming child reports using the existing connection, without sending commands. Results appear in child diagnostics and conti_gateway_report events.
+  fields:
+    device_id:
+      name: Child Device ID
+      description: Tuya Device ID of the already-loaded Conti gateway child.
+      required: true
+      selector:
+        text:
+    duration:
+      name: Duration
+      description: Capture stops automatically after this many seconds.
+      default: 120
+      selector:
+        number:
+          min: 10
+          max: 300
+          unit_of_measurement: seconds
+          mode: box
+
+stop_gateway_report_capture:
+  name: Stop gateway report capture
+  description: Stop capturing a child's reports. Recorded results remain in its diagnostics until the next capture or HA restart.
+  fields:
+    device_id:
+      name: Child Device ID
+      description: Tuya Device ID used when capture was started.
+      required: true
+      selector:
+        text:
