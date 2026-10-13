@@ -27,7 +27,13 @@ from tests.test_gateway import FakeFactory, config
 @pytest.fixture
 def capture_runtime():
     factory = FakeFactory()
-    with patch("custom_components.conti.gateway.tinytuya.Device", factory):
+    with (
+        patch("custom_components.conti.gateway.tinytuya.Device", factory),
+        patch(
+            "custom_components.conti.gateway.select.select",
+            side_effect=lambda readers, *args: (readers if factory.pushes else [], [], []),
+        ),
+    ):
         gateway = GatewaySession(config())
         child = GatewayChild(config(), gateway)
         sibling = GatewayChild(config("child-b", "node-b"), gateway)

@@ -143,7 +143,13 @@ class FakeFactory:
 @pytest.fixture
 def factory():
     fake = FakeFactory()
-    with patch("custom_components.conti.gateway.tinytuya.Device", fake):
+    with (
+        patch("custom_components.conti.gateway.tinytuya.Device", fake),
+        patch(
+            "custom_components.conti.gateway.select.select",
+            side_effect=lambda readers, *args: (readers if fake.pushes else [], [], []),
+        ),
+    ):
         yield fake
 
 

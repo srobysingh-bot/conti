@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import select
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -403,11 +404,20 @@ class GatewaySession:
                 if self._online_cids is not None and time.monotonic() - self._presence_at > 30:
                     self._presence_at = time.monotonic()
                     return self.device.subdev_query()
-                self.device.set_socketTimeout(0.05)
                 try:
                     if time.monotonic() - self._heartbeat_at > 9:
                         self.device.heartbeat(nowait=True)
                         self._heartbeat_at = time.monotonic()
+                    # TinyTuya discards a partially read frame on timeout.
+                    # Check readiness without consuming bytes, then allow its
+                    # normal socket timeout to assemble the complete frame.
+                    # Its queued sibling reports must not wait on the socket.
+                    queued = getattr(self.device, "received_wrong_cid_queue", ())
+                    if not queued and (
+                        self.device.socket is None
+                        or not select.select([self.device.socket], [], [], 0)[0]
+                    ):
+                        return None
                     return self.device.receive()
                 finally:
                     self.device.set_socketTimeout(old)

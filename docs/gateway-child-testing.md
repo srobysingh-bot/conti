@@ -8,12 +8,39 @@ local `main`, `origin/main`, and GitHub HEAD were all
 **feat: add global offline alert settings for Conti**. The working tree was clean.
 The offline alert changes in that commit are preserved.
 
-This implementation is packaged as **Conti 0.3.13**, tagged `v0.3.13`, for
+This implementation is packaged as **Conti 0.3.14**, tagged `v0.3.14`, for
 download through HACS. No installation or deployment to Home Assistant was
 performed during development or release. Subsequent read-only LAN checks
 verified WG-Z1 protocol 3.4, the Quad child CID, and live child status. No relay
 commands were sent. The user subsequently added the Quad in Home Assistant;
 all four relay DPs were verified in workspace LAN reads after physical operation.
+
+## Fragmented listener frames fixed in 0.3.14
+
+The YK remote's actual HA 0.3.13 diagnostics recorded 17 identical query results
+and zero listener reports. The gateway and two children were connected, with
+no child/gateway errors. The remote's cloud ID/CID were subsequently confirmed
+from the original account's device details. This rules out the expired account
+as the cause of those local results, but does not establish full button forwarding.
+
+Conti's listener imposed a 50-millisecond receive timeout. Installed TinyTuya
+discards an incomplete frame if a read times out. A local-socket reproduction
+received a complete packet, but lost the same packet when TCP pieces arrived
+120 milliseconds apart. This is a confirmed transport bug, not proof that the
+user's remote packets were fragmented during the particular capture.
+
+The listener now checks socket readiness without consuming bytes. When a packet
+is ready, TinyTuya retains the normal configured timeout to assemble its full
+frame. Empty sockets do not enter a blocking receive. TinyTuya's queued sibling
+reports bypass the readiness check, so they are drained even on an idle socket.
+The existing shared I/O lock, heartbeat, presence checks and routing remain intact.
+Direct-device reads are unchanged, and no button meanings/modes are invented.
+
+The installed-library regression test covers complete and delayed fragmented
+frames, idle sockets, timeout restoration and queued reports. All protocol
+payload/shared-socket contract tests still pass. Update through HACS to 0.3.14,
+restart HA normally, and repeat the existing report-capture action with entries
+enabled. Full YK button mapping still requires the resulting hardware reports.
 
 ## Shared-connection report capture in 0.3.13
 

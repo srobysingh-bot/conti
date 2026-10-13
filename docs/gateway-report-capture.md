@@ -1,6 +1,8 @@
 # Capture a remote through Home Assistant's existing gateway connection
 
-Conti v0.3.13 adds a read-only capture action for devices behind a Tuya gateway.
+Conti v0.3.13 added a read-only capture action for devices behind a Tuya gateway.
+Use v0.3.14 or newer: 0.3.14 fixes a listener timeout that could discard fragmented
+TCP report frames. This does not claim that all physical buttons are forwarded.
 It subscribes to the same managed child and serialized parent socket already
 used by Home Assistant. It does not open a connection, poll a device, reconnect
 it, send a command or change button modes. Normal child state handling continues.
@@ -8,7 +10,7 @@ Direct devices are unchanged. No physical button mapping is enabled by capture.
 
 ## Procedure for the YK remote
 
-1. Update Conti to **v0.3.13** in HACS and perform the normal HA restart needed
+1. Update Conti to **v0.3.14** in HACS and perform the normal HA restart needed
    to load the new Python code. Keep all Conti device entries enabled. Subsequent
    capture actions do not require another restart or disabling entries.
 2. In **Developer Tools > Actions**, switch to YAML and run:
@@ -79,8 +81,8 @@ ignored and counted. Restarting capture replaces and unsubscribes the previous
 one. Entry unload stops it. Captures live only in memory and disappear when HA
 restarts. Raw report values are not written to logs or persistent storage.
 
-77 focused gateway/raw-sensor/capture tests pass. The full suite with CI coverage
-reports **321 passed, the same six pre-existing failures**, with 40% overall
+78 focused gateway/raw-sensor/capture tests pass. The full suite with CI coverage
+reports **322 passed, the same six pre-existing failures**, with 40% overall
 coverage. Ruff retains 172 existing findings and mypy retains 64 errors in 19
 files. Tests verify reuse of one socket, normal state updates during capture,
 sibling isolation, repeated reports, query/listener distinction, expiry/replacement/unload
